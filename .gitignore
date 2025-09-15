@@ -1,0 +1,22 @@
+.env
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Editor directories
+.vscode/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS files
+.DS_Store
+
+# Lockfiles (optional to ignore)
+package-lock.json
