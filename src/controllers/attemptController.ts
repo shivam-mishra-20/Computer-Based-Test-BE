@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
-import { listAssignedExams, startAttempt, getAttemptView, saveAnswer, markForReview, submitAttempt, publishResult, logActivity } from '../services/attemptService';
+import { listAssignedExams, startAttempt, getAttemptView, saveAnswer, markForReview, submitAttempt, publishResult, logActivity, nextAdaptiveQuestion } from '../services/attemptService';
+import Question from '../models/Question';
+import Attempt from '../models/Attempt';
 
 export const listAssignedCtrl = async (req: Request, res: Response) => {
   const exams = await listAssignedExams((req as any).user.id);
@@ -78,5 +80,31 @@ export const logActivityCtrl = async (req: Request, res: Response) => {
     res.status(201).json(entry);
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Failed to log activity' });
+  }
+};
+
+export const nextAdaptiveQuestionCtrl = async (req: Request, res: Response) => {
+  try {
+    const result = await nextAdaptiveQuestion(req.params.attemptId, (req as any).user.id);
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ message: err.message || 'Failed to select next question' });
+  }
+};
+
+export const getPracticeExplanationCtrl = async (req: Request, res: Response) => {
+  try {
+    const { attemptId, questionId } = req.params as any;
+    const attempt = await Attempt.findById(attemptId);
+    if (!attempt) return res.status(404).json({ message: 'Attempt not found' });
+    if (attempt.userId.toString() !== (req as any).user.id) return res.status(403).json({ message: 'Forbidden' });
+    if (attempt.mode !== 'practice') return res.status(403).json({ message: 'Explanations only in practice mode' });
+    const answered = attempt.answers.find((a) => a.questionId.toString() === questionId);
+    if (!answered) return res.status(403).json({ message: 'Answer the question first' });
+    const q = await Question.findById(questionId);
+    if (!q || !q.explanation) return res.json({ explanation: null });
+    res.json({ explanation: q.explanation });
+  } catch (err: any) {
+    res.status(400).json({ message: err.message || 'Failed to fetch explanation' });
   }
 };

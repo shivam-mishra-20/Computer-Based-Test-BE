@@ -1,0 +1,118 @@
+{
+  "info": {
+    "name": "CBT Backend API",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:5000" },
+    { "key": "token", "value": "" },
+    { "key": "examId", "value": "" },
+    { "key": "attemptId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Auth / Login",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "url": "{{baseUrl}}/api/auth/login",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"admin@cbt.local\",\n  \"password\": \"Admin@123\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Attempts / Next Adaptive Question (student)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{baseUrl}}/api/attempts/{{attemptId}}/next"
+      }
+    },
+    {
+      "name": "Analytics / Exams (for picking examId)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{baseUrl}}/api/exams"
+      }
+    },
+    {
+      "name": "AI / Generate from PDF (teacher/admin)",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{baseUrl}}/api/ai/generate/pdf",
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            { "key": "pdf", "type": "file", "src": "" },
+            { "key": "subject", "type": "text", "value": "Mathematics" },
+            { "key": "topic", "type": "text", "value": "Integration" },
+            { "key": "difficulty", "type": "text", "value": "medium" },
+            { "key": "count", "type": "text", "value": "10" }
+          ]
+        }
+      }
+    },
+    {
+      "name": "AI / Generate from Text (teacher/admin)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{baseUrl}}/api/ai/generate/text",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"text\": \"Paste chapter or notes text here...\",\n  \"subject\": \"Physics\",\n  \"topic\": \"Kinematics\",\n  \"difficulty\": \"medium\",\n  \"count\": 8\n}"
+        }
+      }
+    },
+    {
+      "name": "AI / Evaluate Subjective (teacher/admin)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{baseUrl}}/api/ai/evaluate/subjective",
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"questionText\": \"Explain Newton's Second Law.\",\n  \"studentAnswer\": \"Force equals mass times acceleration ...\",\n  \"rubric\": \"Mention F=ma, units, and short derivation\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Attempts / Submit (student)",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": "{{baseUrl}}/api/attempts/{{attemptId}}/submit",
+        "body": { "mode": "raw", "raw": "{\n  \"auto\": false\n}" }
+      }
+    },
+    {
+      "name": "Analytics / Me Progress (student)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{baseUrl}}/api/analytics/me/progress"
+      }
+    },
+    {
+      "name": "Analytics / Exam Insights (teacher/admin)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+        "url": "{{baseUrl}}/api/analytics/exams/{{examId}}/insights"
+      }
+    }
+  ]
+}

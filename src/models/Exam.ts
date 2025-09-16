@@ -15,6 +15,7 @@ export interface IExam extends Document {
   createdBy: Types.ObjectId; // teacher/admin
   sections: IExamSection[];
   totalDurationMins?: number; // overall exam timer
+  mode?: 'practice' | 'live' | 'adaptive';
   schedule?: {
     startAt?: Date;
     endAt?: Date;
@@ -45,6 +46,7 @@ const examSchema = new Schema<IExam>(
     createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     sections: { type: [examSectionSchema], required: true },
     totalDurationMins: { type: Number },
+    mode: { type: String, enum: ['practice', 'live', 'adaptive'], default: 'live', index: true },
     schedule: {
       startAt: { type: Date },
       endAt: { type: Date },

@@ -9,6 +9,8 @@ import testRoutes from './routes/api/testRoutes';
 import examRoutes from './routes/api/examRoutes';
 import attemptRoutes from './routes/api/attemptRoutes';
 import reportRoutes from './routes/api/reportRoutes';
+import aiRoutes from './routes/api/aiRoutes';
+import analyticsRoutes from './routes/api/analyticsRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 
 dotenv.config();
@@ -52,6 +54,8 @@ app.use('/api/tests', testRoutes);
 app.use('/api/exams', examRoutes);
 app.use('/api/attempts', attemptRoutes);
 app.use('/api/reports', reportRoutes);
+app.use('/api/ai', aiRoutes);
+app.use('/api/analytics', analyticsRoutes);
 
 // Error handler
 app.use(errorHandler);

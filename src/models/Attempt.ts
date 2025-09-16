@@ -8,6 +8,8 @@ export interface IAnswerItem {
   timeSpentSec?: number;
   isCorrect?: boolean; // computed by auto-grader where applicable
   scoreAwarded?: number; // per question score
+  rubricScore?: number; // 0..1 for subjective grading
+  aiFeedback?: string; // brief AI feedback for subjective answers
 }
 
 export interface IActivityLog {
@@ -21,6 +23,7 @@ export type AttemptStatus = 'created' | 'in-progress' | 'submitted' | 'auto-subm
 export interface IAttempt extends Document {
   examId: Types.ObjectId;
   userId: Types.ObjectId;
+  mode?: 'practice' | 'live' | 'adaptive';
   startedAt?: Date;
   submittedAt?: Date;
   status: AttemptStatus;
@@ -29,6 +32,11 @@ export interface IAttempt extends Document {
     sectionOrder: Types.ObjectId[]; // ids of sections in randomized order
     questionOrderBySection: Record<string, Types.ObjectId[]>; // key: sectionId
     optionOrderByQuestion?: Record<string, Types.ObjectId[]>; // key: questionId
+    adaptiveState?: {
+      asked: Types.ObjectId[];
+      currentDifficulty: 'easy' | 'medium' | 'hard';
+      topicMix?: Record<string, number>;
+    };
   };
   answers: IAnswerItem[];
   totalScore?: number;
@@ -46,6 +54,8 @@ const answerSchema = new Schema<IAnswerItem>(
     timeSpentSec: { type: Number, default: 0 },
     isCorrect: { type: Boolean },
     scoreAwarded: { type: Number },
+    rubricScore: { type: Number, min: 0, max: 1 },
+    aiFeedback: { type: String },
   },
   { _id: false }
 );
@@ -61,7 +71,13 @@ const attemptSchema = new Schema<IAttempt>(
       sectionOrder: [{ type: Schema.Types.ObjectId, required: true }],
       questionOrderBySection: { type: Schema.Types.Mixed, required: true },
       optionOrderByQuestion: { type: Schema.Types.Mixed },
+      adaptiveState: {
+        asked: [{ type: Schema.Types.ObjectId }],
+        currentDifficulty: { type: String, enum: ['easy', 'medium', 'hard'], default: 'medium' },
+        topicMix: { type: Schema.Types.Mixed },
+      },
     },
+    mode: { type: String, enum: ['practice', 'live', 'adaptive'], index: true },
     answers: { type: [answerSchema], default: [] },
     totalScore: { type: Number },
     maxScore: { type: Number },
