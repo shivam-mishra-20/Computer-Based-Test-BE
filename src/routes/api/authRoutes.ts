@@ -1,11 +1,13 @@
 import { Router } from 'express';
-import { register, login } from '../../controllers/authController';
+import { register, login, me } from '../../controllers/authController';
+import { authMiddleware } from '../../middlewares/authMiddleware';
 
 const router = Router();
 
 // POST endpoints used by clients
 router.post('/register', register);
 router.post('/login', login);
+router.get('/me', authMiddleware, me);
 
 // Provide helpful responses for accidental browser GETs (avoid 404 spam)
 router.get('/register', (_req, res) => {
