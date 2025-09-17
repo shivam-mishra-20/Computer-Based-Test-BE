@@ -20,12 +20,16 @@ export interface IExam extends Document {
     startAt?: Date;
     endAt?: Date;
   };
+  classLevel?: string; // e.g., 'Class 10', 'NEET Batch'
+  batch?: string; // batch/group label
+  autoPublish?: boolean; // if true exam auto publishes at start
   isPublished: boolean; // visible/assigned to students
   assignedTo?: {
     users?: Types.ObjectId[];
     groups?: string[]; // simple batch/group names
   };
   meta?: Record<string, any>;
+  blueprintId?: Types.ObjectId; // reference to saved blueprint if created from one
 }
 
 const examSectionSchema = new Schema<IExamSection>(
@@ -51,12 +55,16 @@ const examSchema = new Schema<IExam>(
       startAt: { type: Date },
       endAt: { type: Date },
     },
+    classLevel: { type: String, index: true },
+    batch: { type: String, index: true },
+    autoPublish: { type: Boolean, default: false },
     isPublished: { type: Boolean, default: false, index: true },
     assignedTo: {
       users: [{ type: Schema.Types.ObjectId, ref: 'User' }],
       groups: [{ type: String }],
     },
     meta: { type: Schema.Types.Mixed },
+    blueprintId: { type: Schema.Types.ObjectId, ref: 'Blueprint' },
   },
   { timestamps: true }
 );

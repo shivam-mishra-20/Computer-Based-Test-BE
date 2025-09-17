@@ -1,6 +1,6 @@
 import mongoose, { Document, Schema, Types } from 'mongoose';
 
-export type QuestionType = 'mcq' | 'truefalse' | 'fill' | 'short' | 'long';
+export type QuestionType = 'mcq' | 'truefalse' | 'fill' | 'short' | 'long' | 'assertionreason' | 'integer';
 export type Difficulty = 'easy' | 'medium' | 'hard';
 
 export interface IOption {
@@ -12,8 +12,14 @@ export interface IOption {
 export interface IQuestion extends Document {
   text: string;
   type: QuestionType;
-  options?: IOption[]; // for MCQ
-  correctAnswerText?: string; // for fill/short/long baseline answer or keywords
+  options?: IOption[]; // for MCQ / truefalse if stored as options
+  correctAnswerText?: string; // for fill/short/long/integer baseline answer or keywords
+  integerAnswer?: number; // for integer type (JEE style)
+  assertion?: string; // for assertion-reason
+  reason?: string; // for assertion-reason
+  assertionIsTrue?: boolean; // evaluation flags
+  reasonIsTrue?: boolean;
+  reasonExplainsAssertion?: boolean; // if reason correctly explains assertion
   tags: {
     subject?: string;
     topic?: string;
@@ -35,9 +41,15 @@ const optionSchema = new Schema<IOption>(
 const questionSchema = new Schema<IQuestion>(
   {
     text: { type: String, required: true },
-    type: { type: String, enum: ['mcq', 'truefalse', 'fill', 'short', 'long'], required: true },
+    type: { type: String, enum: ['mcq', 'truefalse', 'fill', 'short', 'long', 'assertionreason', 'integer'], required: true },
     options: { type: [optionSchema], default: undefined },
     correctAnswerText: { type: String },
+    integerAnswer: { type: Number },
+    assertion: { type: String },
+    reason: { type: String },
+    assertionIsTrue: { type: Boolean },
+    reasonIsTrue: { type: Boolean },
+    reasonExplainsAssertion: { type: Boolean },
     tags: {
       subject: { type: String },
       topic: { type: String },

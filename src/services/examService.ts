@@ -1,6 +1,8 @@
 import { Types } from 'mongoose';
 import Exam, { IExam } from '../models/Exam';
 import Question, { IQuestion } from '../models/Question';
+import Blueprint, { IBlueprint } from '../models/Blueprint';
+import type { GeneratedPaperResult } from './aiService';
 
 export const createQuestion = async (payload: Partial<IQuestion> & { createdBy: Types.ObjectId }): Promise<IQuestion> => {
   const q = await Question.create(payload as IQuestion);
@@ -52,5 +54,83 @@ export const assignExam = async (id: string, users?: string[], groups?: string[]
     groups,
   };
   await exam.save();
+  return exam;
+};
+
+// Blueprint CRUD
+export const createBlueprint = async (payload: Partial<IBlueprint> & { owner: Types.ObjectId }) => {
+  return Blueprint.create(payload as IBlueprint);
+};
+export const listBlueprints = async (owner: Types.ObjectId) => {
+  return Blueprint.find({ $or: [{ owner }, { shared: true }] }).sort({ createdAt: -1 });
+};
+export const updateBlueprint = async (id: string, owner: Types.ObjectId, payload: Partial<IBlueprint>) => {
+  return Blueprint.findOneAndUpdate({ _id: id, owner }, payload, { new: true });
+};
+export const deleteBlueprint = async (id: string, owner: Types.ObjectId) => {
+  await Blueprint.findOneAndDelete({ _id: id, owner });
+};
+
+// Create exam (and optionally questions) from generated paper result
+export const createExamFromPaper = async (paper: GeneratedPaperResult, createdBy: Types.ObjectId, opts: {
+  classLevel?: string;
+  batch?: string;
+  schedule?: { startAt?: string | Date; endAt?: string | Date };
+  autoPublish?: boolean;
+  blueprintId?: string;
+}): Promise<IExam> => {
+  // First persist all questions (flatten sections)
+  const questionDocs: IQuestion[] = [];
+  for (const section of paper.sections) {
+    for (const q of section.questions) {
+      const doc = await Question.create({
+        text: q.text,
+        type: q.type as any,
+        options: q.options,
+        correctAnswerText: q.correctAnswerText,
+        integerAnswer: (q as any).integerAnswer,
+        assertion: (q as any).assertion,
+        reason: (q as any).reason,
+        assertionIsTrue: (q as any).assertionIsTrue,
+        reasonIsTrue: (q as any).reasonIsTrue,
+        reasonExplainsAssertion: (q as any).reasonExplainsAssertion,
+        explanation: q.explanation,
+        tags: {
+          subject: paper.subject,
+          difficulty: (q as any).tags?.difficulty || 'medium',
+        },
+        createdBy,
+      } as any);
+      questionDocs.push(doc);
+    }
+  }
+
+  // Map questions into exam sections preserving order
+  let cursor = 0;
+  const sections = paper.sections.map((s) => {
+    const count = s.questions.length;
+    const slice = questionDocs.slice(cursor, cursor + count).map((qd) => qd._id as Types.ObjectId);
+    cursor += count;
+    return {
+      title: s.title,
+      questionIds: slice,
+      shuffleQuestions: false,
+      shuffleOptions: false,
+    };
+  });
+
+  const exam = await Exam.create({
+    title: paper.examTitle,
+    description: `Generated exam from AI paper for subject ${paper.subject || ''}`.trim(),
+    createdBy,
+    sections,
+    isPublished: !!opts.autoPublish,
+    classLevel: opts.classLevel,
+    batch: opts.batch,
+    autoPublish: opts.autoPublish,
+    schedule: opts.schedule ? { startAt: opts.schedule.startAt, endAt: opts.schedule.endAt } : undefined,
+    blueprintId: opts.blueprintId ? new Types.ObjectId(opts.blueprintId) : undefined,
+    meta: { generated: true },
+  } as any);
   return exam;
 };

@@ -11,6 +11,11 @@ import {
   listQuestionsCtrl,
   updateExamCtrl,
   updateQuestionCtrl,
+  createBlueprintCtrl,
+  listBlueprintsCtrl,
+  updateBlueprintCtrl,
+  deleteBlueprintCtrl,
+  createExamFromPaperCtrl,
 } from '../../controllers/examController';
 
 const router = Router();
@@ -24,6 +29,18 @@ router.delete('/questions/:id', authMiddleware, requireRole('teacher', 'admin'),
 // Exams (teacher/admin)
 router.post('/', authMiddleware, requireRole('teacher', 'admin'), createExamCtrl);
 router.get('/', authMiddleware, requireRole('teacher', 'admin'), listExamsCtrl);
+
+// Place more specific sub-routes BEFORE parameterized :id to avoid collisions
+// Blueprints
+router.post('/blueprints', authMiddleware, requireRole('teacher', 'admin'), createBlueprintCtrl);
+router.get('/blueprints', authMiddleware, requireRole('teacher', 'admin'), listBlueprintsCtrl);
+router.put('/blueprints/:id', authMiddleware, requireRole('teacher', 'admin'), updateBlueprintCtrl);
+router.delete('/blueprints/:id', authMiddleware, requireRole('teacher', 'admin'), deleteBlueprintCtrl);
+
+// Create exam from generated paper
+router.post('/from-paper', authMiddleware, requireRole('teacher', 'admin'), createExamFromPaperCtrl);
+
+// Param-based exam operations (must come after specific paths)
 router.get('/:id', authMiddleware, requireRole('teacher', 'admin'), getExamCtrl);
 router.put('/:id', authMiddleware, requireRole('teacher', 'admin'), updateExamCtrl);
 router.delete('/:id', authMiddleware, requireRole('teacher', 'admin'), deleteExamCtrl);

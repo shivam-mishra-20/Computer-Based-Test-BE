@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
-import { listAssignedExams, startAttempt, getAttemptView, saveAnswer, markForReview, submitAttempt, publishResult, logActivity, nextAdaptiveQuestion } from '../services/attemptService';
+import { listAssignedExams, startAttempt, getAttemptView, saveAnswer, markForReview, submitAttempt, publishResult, logActivity, nextAdaptiveQuestion, listPendingReviewAttempts, adjustAnswerScore, listAttemptsForUser, getAttemptViewForTeacher } from '../services/attemptService';
 import Question from '../models/Question';
 import Attempt from '../models/Attempt';
 
@@ -91,6 +91,33 @@ export const nextAdaptiveQuestionCtrl = async (req: Request, res: Response) => {
     res.status(400).json({ message: err.message || 'Failed to select next question' });
   }
 };
+export const listPendingReviewCtrl = async (_req: Request, res: Response) => {
+  try {
+    const list = await listPendingReviewAttempts();
+    res.json(list);
+  } catch (err: any) {
+    res.status(400).json({ message: err.message || 'Failed to list attempts' });
+  }
+};
+
+export const adjustAnswerScoreCtrl = async (req: Request, res: Response) => {
+  try {
+    const updated = await adjustAnswerScore(req.params.attemptId, req.body.answerQuestionId, req.body.score, req.body.feedback);
+    res.json(updated);
+  } catch (err: any) {
+    res.status(400).json({ message: err.message || 'Failed to adjust score' });
+  }
+};
+
+export const listMyAttemptsCtrl = async (req: Request, res: Response) => {
+  try {
+    const published = req.query.published === '1' || req.query.published === 'true';
+    const list = await listAttemptsForUser((req as any).user.id, { published });
+    res.json(list);
+  } catch (err: any) {
+    res.status(400).json({ message: err.message || 'Failed to list attempts' });
+  }
+};
 
 export const getPracticeExplanationCtrl = async (req: Request, res: Response) => {
   try {
@@ -106,5 +133,14 @@ export const getPracticeExplanationCtrl = async (req: Request, res: Response) =>
     res.json({ explanation: q.explanation });
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Failed to fetch explanation' });
+  }
+};
+
+export const teacherAttemptViewCtrl = async (req: Request, res: Response) => {
+  try {
+    const view = await getAttemptViewForTeacher(req.params.attemptId);
+    res.json(view);
+  } catch (err: any) {
+    res.status(400).json({ message: err.message || 'Failed to fetch attempt for review' });
   }
 };

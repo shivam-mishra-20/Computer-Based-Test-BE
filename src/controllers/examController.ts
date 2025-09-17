@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
-import { assignExam, createExam, createQuestion, deleteExam, deleteQuestion, getExam, listExams, listQuestions, updateExam, updateQuestion } from '../services/examService';
+import { assignExam, createExam, createQuestion, deleteExam, deleteQuestion, getExam, listExams, listQuestions, updateExam, updateQuestion, createBlueprint, listBlueprints, updateBlueprint, deleteBlueprint, createExamFromPaper } from '../services/examService';
+import type { GeneratedPaperResult } from '../services/aiService';
 
 export const createQuestionCtrl = async (req: Request, res: Response) => {
   try {
@@ -76,4 +77,47 @@ export const assignExamCtrl = async (req: Request, res: Response) => {
   const exam = await assignExam(req.params.id, users, groups);
   if (!exam) return res.status(404).json({ message: 'Exam not found' });
   res.json(exam);
+};
+
+// Blueprint CRUD
+export const createBlueprintCtrl = async (req: Request, res: Response) => {
+  try {
+    const owner = new Types.ObjectId((req as any).user.id);
+    const bp = await createBlueprint({ ...req.body, owner });
+    res.status(201).json(bp);
+  } catch (err: any) {
+    res.status(400).json({ message: err.message || 'Failed to create blueprint' });
+  }
+};
+
+export const listBlueprintsCtrl = async (req: Request, res: Response) => {
+  const owner = new Types.ObjectId((req as any).user.id);
+  const items = await listBlueprints(owner);
+  res.json({ items, total: items.length });
+};
+
+export const updateBlueprintCtrl = async (req: Request, res: Response) => {
+  const owner = new Types.ObjectId((req as any).user.id);
+  const bp = await updateBlueprint(req.params.id, owner, req.body);
+  if (!bp) return res.status(404).json({ message: 'Blueprint not found' });
+  res.json(bp);
+};
+
+export const deleteBlueprintCtrl = async (req: Request, res: Response) => {
+  const owner = new Types.ObjectId((req as any).user.id);
+  await deleteBlueprint(req.params.id, owner);
+  res.json({ message: 'Blueprint deleted' });
+};
+
+// Create exam from generated paper
+export const createExamFromPaperCtrl = async (req: Request, res: Response) => {
+  try {
+    const { paper, options } = req.body as { paper: GeneratedPaperResult; options?: any };
+    if (!paper || !paper.sections) return res.status(400).json({ message: 'paper is required' });
+    const createdBy = new Types.ObjectId((req as any).user.id);
+    const exam = await createExamFromPaper(paper, createdBy, options || {});
+    res.status(201).json(exam);
+  } catch (err: any) {
+    res.status(400).json({ message: err.message || 'Failed to create exam from paper' });
+  }
 };

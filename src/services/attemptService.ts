@@ -99,6 +99,30 @@ export async function getAttemptView(attemptId: string, userId: string) {
   return { attempt, exam: { _id: exam._id, title: exam.title, totalDurationMins: exam.totalDurationMins }, sections, questions: questionDict };
 }
 
+export async function getAttemptViewForTeacher(attemptId: string) {
+  const attempt = await Attempt.findById(attemptId);
+  if (!attempt) throw new Error('Attempt not found');
+  const exam = await Exam.findById(attempt.examId);
+  if (!exam) throw new Error('Exam not found');
+  const qids = exam.sections.flatMap((s) => s.questionIds);
+  const questions = await Question.find({ _id: { $in: qids } });
+  const qmap = new Map<string, IQuestion>(questions.map((q) => [(q as any)._id.toString(), q]));
+  const sections = exam.sections.map((s) => ({
+    _id: s._id,
+    title: s.title,
+    sectionDurationMins: s.sectionDurationMins,
+    questionIds: attempt.snapshot.questionOrderBySection[s._id.toString()] || [],
+  }));
+  const questionDict: Record<string, any> = {};
+  for (const [qid, q] of qmap) {
+    const base: any = sanitizeQuestion(q);
+    // For teacher show explanation
+    if (q.explanation) base.explanation = q.explanation;
+    questionDict[qid] = base;
+  }
+  return { attempt, exam: { _id: exam._id, title: exam.title, totalDurationMins: exam.totalDurationMins }, sections, questions: questionDict };
+}
+
 export async function saveAnswer(attemptId: string, userId: string, answer: IAnswerItem) {
   const attempt = await Attempt.findById(attemptId);
   if (!attempt) throw new Error('Attempt not found');
@@ -208,6 +232,45 @@ export async function publishResult(attemptId: string, publish = true) {
     { new: true }
   );
   return attempt;
+}
+
+export async function listPendingReviewAttempts() {
+  return Attempt.find({ submittedAt: { $ne: null }, resultPublished: { $ne: true } })
+    .sort({ submittedAt: -1 })
+    .limit(100)
+    .lean();
+}
+
+export async function adjustAnswerScore(attemptId: string, answerId: string, score: number, feedback?: string) {
+  const attempt = await Attempt.findById(attemptId);
+  if (!attempt) throw new Error('Attempt not found');
+  const ans = attempt.answers.find(a => a.questionId.toString() === answerId);
+  if (!ans) throw new Error('Answer not found');
+  ans.scoreAwarded = score;
+  if (feedback) ans.aiFeedback = feedback;
+  // recompute total
+  attempt.totalScore = attempt.answers.reduce((sum, a) => sum + (a.scoreAwarded || 0), 0);
+  await attempt.save();
+  return attempt;
+}
+
+export async function listAttemptsForUser(userId: string, opts: { published?: boolean } = {}) {
+  const criteria: any = { userId: new Types.ObjectId(userId) };
+  if (opts.published) criteria.resultPublished = true;
+  return Attempt.find(criteria)
+    .sort({ submittedAt: -1, createdAt: -1 })
+    .populate('examId', 'title')
+    .lean()
+    .then(list => list.map(a => ({
+      _id: a._id,
+      examId: a.examId instanceof Types.ObjectId ? a.examId.toString() : (a.examId as any)._id?.toString?.(),
+      examTitle: (a as any).examId?.title || 'Exam',
+      submittedAt: a.submittedAt,
+      totalScore: a.totalScore,
+      maxScore: a.maxScore,
+      status: a.status,
+      resultPublished: a.resultPublished,
+    })));
 }
 
 export async function logActivity(attemptId: string, userId: string, type: 'focus-lost' | 'fullscreen-exit' | 'suspicious' | 'navigation', meta?: any) {
