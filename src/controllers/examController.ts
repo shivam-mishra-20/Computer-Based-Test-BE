@@ -73,6 +73,7 @@ export const deleteExamCtrl = async (req: Request, res: Response) => {
 };
 
 export const assignExamCtrl = async (req: Request, res: Response) => {
+  // groups can be batch or classLevel labels, UI can choose which to send
   const { users, groups } = req.body as { users?: string[]; groups?: string[] };
   const exam = await assignExam(req.params.id, users, groups);
   if (!exam) return res.status(404).json({ message: 'Exam not found' });

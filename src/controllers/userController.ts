@@ -25,8 +25,12 @@ export const adminCreateUser = async (req: Request, res: Response) => {
 export const adminListUsers = async (req: Request, res: Response) => {
 	try {
 		const role = (req.query.role as string) || undefined;
+		const classLevel = (req.query.classLevel as string) || undefined;
+		const batch = (req.query.batch as string) || undefined;
 		const filter: any = {};
 		if (role && ['teacher', 'student', 'admin'].includes(role)) filter.role = role;
+		if (classLevel) filter.classLevel = classLevel;
+		if (batch) filter.batch = batch;
 		const users = await User.find(filter).select('-password');
 		res.json(users);
 	} catch (err) {
@@ -48,16 +52,18 @@ export const adminGetUser = async (req: Request, res: Response) => {
 // Admin-only: Update user (name, email, role, password)
 export const adminUpdateUser = async (req: Request, res: Response) => {
 	try {
-		const { name, email, role, password } = req.body as Partial<IUser> & { role?: UserRole };
+		const { name, email, role, password, classLevel, batch } = req.body as Partial<IUser> & { role?: UserRole };
 		const user = await User.findById(req.params.id);
 		if (!user) return res.status(404).json({ message: 'User not found' });
 		if (name) user.name = name;
 		if (email) user.email = email;
 		if (role) user.role = role;
 		if (password) user.password = password; // will be hashed by pre-save
+		if (classLevel !== undefined) (user as any).classLevel = classLevel;
+		if (batch !== undefined) (user as any).batch = batch;
 		await user.save();
 		const { _id, name: n, email: e, role: r } = user;
-		res.json({ id: _id, name: n, email: e, role: r });
+		res.json({ id: _id, name: n, email: e, role: r, classLevel: (user as any).classLevel, batch: (user as any).batch });
 	} catch (err) {
 		res.status(500).json({ message: 'Server error' });
 	}

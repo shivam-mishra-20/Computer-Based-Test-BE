@@ -1,17 +1,26 @@
 import { Types } from 'mongoose';
 import Exam from '../models/Exam';
+import User from '../models/User';
 import Question, { IQuestion } from '../models/Question';
 import Attempt, { IAttempt, IAnswerItem } from '../models/Attempt';
 import { computeMaxScoreForExam, sanitizeQuestion, shuffleArray } from '../utils/exam';
 import { gradeSubjectiveAnswerGroq } from './aiService';
 
 export async function listAssignedExams(userId: string) {
-  // Simple criteria: published exams assigned to this user or open-window exams
+  // Published exams assigned to this user, matching user's class/batch via groups, or open-window exams
   const now = new Date();
+  const user = await User.findById(userId).select('classLevel batch');
+  const groupLabels = [] as string[];
+  if (user?.classLevel) groupLabels.push(user.classLevel);
+  if (user?.batch) groupLabels.push(user.batch);
   const exams = await Exam.find({
     isPublished: true,
     $or: [
       { 'assignedTo.users': new Types.ObjectId(userId) },
+      ...(groupLabels.length ? [{ 'assignedTo.groups': { $in: groupLabels } }] : []),
+      // also include exams targeted by top-level class/batch
+      ...(user?.classLevel ? [{ classLevel: user.classLevel }] : []),
+      ...(user?.batch ? [{ batch: user.batch }] : []),
       { 'schedule.startAt': { $lte: now }, 'schedule.endAt': { $gte: now } },
     ],
   }).sort({ createdAt: -1 });
@@ -21,6 +30,22 @@ export async function listAssignedExams(userId: string) {
 export async function startAttempt(examId: string, userId: string) {
   const exam = await Exam.findById(examId);
   if (!exam) throw new Error('Exam not found');
+  // Access control: allow start only if exam is published and either explicitly assigned, matches user's class/batch, or is in open window
+  const user = await User.findById(userId).select('classLevel batch');
+  const now = new Date();
+  const hasSchedule = !!(exam.schedule?.startAt && exam.schedule?.endAt);
+  const openWindow = hasSchedule && exam.schedule!.startAt! <= now && exam.schedule!.endAt! >= now;
+  const explicitUser = (exam.assignedTo?.users || []).some((u) => u.toString() === userId.toString());
+  const groupLabels = new Set<string>([user?.classLevel || '', user?.batch || ''].filter(Boolean));
+  const inGroups = (exam.assignedTo?.groups || []).some((g) => groupLabels.has(g));
+  const classMatch = !!(user?.classLevel && exam.classLevel && exam.classLevel === user.classLevel);
+  const batchMatch = !!(user?.batch && exam.batch && exam.batch === user.batch);
+  const targeted = explicitUser || inGroups || classMatch || batchMatch;
+  const canAccess = exam.isPublished && (
+    (targeted && (!hasSchedule || openWindow)) ||
+    (!targeted && openWindow)
+  );
+  if (!canAccess) throw new Error('You are not allowed to start this exam');
   // Prevent multiple attempts for same exam-user
   let attempt = await Attempt.findOne({ examId, userId });
   if (attempt) return attempt;

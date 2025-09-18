@@ -8,6 +8,11 @@ export interface IUser extends Document {
   email: string;
   password: string;
   role: UserRole;
+  // Optional Firebase link and student metadata
+  firebaseUid?: string;
+  classLevel?: string;
+  batch?: string;
+  authProvider?: 'local' | 'firebase';
   comparePassword(password: string): Promise<boolean>;
 }
 
@@ -16,6 +21,10 @@ const userSchema = new Schema<IUser>({
   email: { type: String, unique: true, required: true, lowercase: true, trim: true },
   password: { type: String, required: true },
   role: { type: String, enum: ['admin', 'teacher', 'student'], default: 'student', index: true },
+  firebaseUid: { type: String, index: true },
+  classLevel: { type: String, index: true },
+  batch: { type: String, index: true },
+  authProvider: { type: String, enum: ['local', 'firebase'], default: 'local' },
 }, { timestamps: true });
 
 userSchema.pre('save', async function (next) {
