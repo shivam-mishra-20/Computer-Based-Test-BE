@@ -1,10 +1,18 @@
 import { Request, Response } from 'express';
 import User, { IUser, UserRole } from '../models/User';
+import { logAudit } from '../utils/logger';
 
 // Admin-only: Create a user with role teacher or student
 export const adminCreateUser = async (req: Request, res: Response) => {
 	try {
-		const { name, email, password, role } = req.body as { name: string; email: string; password: string; role: UserRole };
+		const { name, email, password, role, classLevel, batch } = req.body as {
+			name: string;
+			email: string;
+			password: string;
+			role: UserRole;
+			classLevel?: string;
+			batch?: string;
+		};
 		if (!name || !email || !password || !role) {
 			return res.status(400).json({ message: 'name, email, password and role are required' });
 		}
@@ -14,7 +22,8 @@ export const adminCreateUser = async (req: Request, res: Response) => {
 	const lcEmail = email.toLowerCase();
 	const existing = await User.findOne({ email: lcEmail });
 		if (existing) return res.status(400).json({ message: 'Email already in use' });
-	const user = await User.create({ name, email: lcEmail, password, role });
+	const user = await User.create({ name, email: lcEmail, password, role, classLevel, batch });
+		await logAudit((req as any).user?.id, 'admin.user.create', String(user._id), { name, email: lcEmail, role });
 		res.status(201).json({ id: user._id, name: user.name, email: user.email, role: user.role });
 	} catch (err) {
 		res.status(500).json({ message: 'Server error' });
@@ -62,6 +71,7 @@ export const adminUpdateUser = async (req: Request, res: Response) => {
 		if (classLevel !== undefined) (user as any).classLevel = classLevel;
 		if (batch !== undefined) (user as any).batch = batch;
 		await user.save();
+		await logAudit((req as any).user?.id, 'admin.user.update', String(user._id), { name, email, role, classLevel, batch });
 		const { _id, name: n, email: e, role: r } = user;
 		res.json({ id: _id, name: n, email: e, role: r, classLevel: (user as any).classLevel, batch: (user as any).batch });
 	} catch (err) {
@@ -74,6 +84,7 @@ export const adminDeleteUser = async (req: Request, res: Response) => {
 	try {
 		const user = await User.findByIdAndDelete(req.params.id);
 		if (!user) return res.status(404).json({ message: 'User not found' });
+		await logAudit((req as any).user?.id, 'admin.user.delete', String(user._id));
 		res.json({ message: 'User deleted' });
 	} catch (err) {
 		res.status(500).json({ message: 'Server error' });

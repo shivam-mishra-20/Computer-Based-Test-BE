@@ -94,6 +94,8 @@ export const createExamFromPaper = async (paper: GeneratedPaperResult, createdBy
         assertionIsTrue: (q as any).assertionIsTrue,
         reasonIsTrue: (q as any).reasonIsTrue,
         reasonExplainsAssertion: (q as any).reasonExplainsAssertion,
+        diagramUrl: (q as any).diagramUrl,
+        diagramAlt: (q as any).diagramAlt,
         explanation: q.explanation,
         tags: {
           subject: paper.subject,

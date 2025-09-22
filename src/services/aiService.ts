@@ -3,6 +3,7 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import Groq from 'groq-sdk';
 import type { Types } from 'mongoose';
 import type { Difficulty, IQuestion, QuestionType } from '../models/Question';
+import Guidance from '../models/Guidance';
 
 dotenv.config();
 
@@ -62,6 +63,58 @@ export interface GeneratedPaperResult {
   sections: GeneratedPaperSection[];
 }
 
+export async function generateSolutionsForPaper(paper: GeneratedPaperResult): Promise<{
+  sections: { title: string; solutions: { solutionText: string }[] }[];
+}> {
+  const g = getGemini();
+  if (!g) throw new Error('Gemini API key not configured');
+  const model = g.getGenerativeModel({ model: 'gemini-1.5-flash' });
+  const sections: { title: string; solutions: { solutionText: string }[] }[] = [];
+  for (const sec of paper.sections) {
+    const questionsText = sec.questions
+      .map((q, i) => {
+        const base = `${i + 1}. ${q.text}`;
+        if (q.type === 'mcq' && Array.isArray(q.options)) {
+          const opts = q.options
+            .map((o, idx) => `${String.fromCharCode(65 + idx)}. ${o.text}`)
+            .join('\n');
+          return `${base}\n${opts}`;
+        }
+        if (q.type === 'assertionreason') {
+          return `${base}\nAssertion: ${q.assertion}\nReason: ${q.reason}`;
+        }
+        return base;
+      })
+      .join('\n\n');
+    const prompt = `Provide concise, step-by-step model solutions for the following exam questions. Keep each solution focused, accurate, and avoid unnecessary verbosity. Where relevant, show key formulas or reasoning. Return STRICT JSON ONLY with schema: { "solutions": [{ "solutionText": string }] } and ensure the number of solutions equals the number of questions in order.
+Exam: ${paper.examTitle} ${paper.subject ? `\nSubject: ${paper.subject}` : ''}
+Section: ${sec.title}${sec.instructions ? `\nInstructions: ${sec.instructions}` : ''}
+
+QUESTIONS:\n${questionsText}`;
+    const result = await model.generateContent(prompt);
+    const raw = result.response.text();
+    let parsed: any;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      const m = raw.match(/\{[\s\S]*\}/);
+      if (!m) throw new Error('Failed to parse solutions JSON');
+      parsed = JSON.parse(m[0]);
+    }
+    const sols = Array.isArray(parsed?.solutions)
+      ? parsed.solutions.map((s: any) => ({ solutionText: String(s.solutionText || '').slice(0, 4000) }))
+      : [];
+    // if model returned wrong count, pad or trim
+    const count = sec.questions.length;
+    let adjusted = sols.slice(0, count);
+    if (adjusted.length < count) {
+      adjusted = adjusted.concat(Array.from({ length: count - adjusted.length }, () => ({ solutionText: 'Solution forthcoming.' })));
+    }
+    sections.push({ title: sec.title, solutions: adjusted });
+  }
+  return { sections };
+}
+
 export async function extractTextFromPdf(buffer: Buffer): Promise<string> {
   // Prefer light-weight local parsing to avoid file upload API setup.
   // If pdf-parse is not available at runtime, fail gracefully.
@@ -74,6 +127,37 @@ export async function extractTextFromPdf(buffer: Buffer): Promise<string> {
     console.warn('pdf-parse not available or failed:', err);
     throw new Error('PDF parsing failed. Ensure pdf-parse is installed.');
   }
+}
+
+// OCR: extract text from images (PNG/JPG) using tesseract.js
+export async function extractTextFromImage(buffer: Buffer): Promise<string> {
+  try {
+    const { createWorker } = await import('tesseract.js');
+    const worker = await createWorker('eng');
+    try {
+      const { data } = await worker.recognize(buffer as any);
+      await worker.terminate();
+      return String(data?.text || '').slice(0, 200_000);
+    } catch (e) {
+      try { await worker.terminate(); } catch {}
+      throw e;
+    }
+  } catch (err) {
+    console.warn('tesseract.js OCR failed or not installed:', err);
+    throw new Error('OCR failed. Ensure tesseract.js is installed.');
+  }
+}
+
+export async function getGuidanceText(subject?: string, topic?: string): Promise<string | null> {
+  const queries: any[] = [];
+  if (subject && topic) queries.push({ subject, topic, isActive: true });
+  if (subject) queries.push({ subject, isActive: true });
+  queries.push({ isActive: true });
+  for (const q of queries) {
+    const g = await Guidance.findOne(q).sort({ updatedAt: -1 }).lean();
+    if (g?.instructions) return String(g.instructions);
+  }
+  return null;
 }
 
 function buildQuestionGenPrompt(text: string, opts: GenerateOptions) {
@@ -107,6 +191,9 @@ Return STRICT JSON with this schema:
 }
 
 Ensure MCQs include 4 options with exactly one correct. For true/false, options can be omitted and correctAnswerText should be "true" or "false". For fill/short/long, provide correctAnswerText with keywords or a reference answer. For integer include integerAnswer & correctAnswerText (string). For assertionreason provide assertion, reason and boolean flags. Do not include markdown, only raw JSON.
+
+ADMIN GUIDANCE (if any) to follow strictly:
+${(opts as any).__guidance || 'N/A'}
 
 Study material:
 """
@@ -180,6 +267,9 @@ Return STRICT JSON ONLY with this schema (no extra commentary):
     }
   ]
 }
+
+ADMIN GUIDANCE (if any) to follow strictly:
+${(blueprint as any).__guidance || 'N/A'}
 
 Rules:
 - Respect requested counts per type; if insufficient material, approximate & note in explanation.

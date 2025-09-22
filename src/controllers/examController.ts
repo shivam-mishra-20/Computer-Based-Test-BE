@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
 import { assignExam, createExam, createQuestion, deleteExam, deleteQuestion, getExam, listExams, listQuestions, updateExam, updateQuestion, createBlueprint, listBlueprints, updateBlueprint, deleteBlueprint, createExamFromPaper } from '../services/examService';
+import { logAudit } from '../utils/logger';
 import type { GeneratedPaperResult } from '../services/aiService';
 
 export const createQuestionCtrl = async (req: Request, res: Response) => {
@@ -38,7 +39,8 @@ export const deleteQuestionCtrl = async (req: Request, res: Response) => {
 export const createExamCtrl = async (req: Request, res: Response) => {
   try {
     const createdBy = new Types.ObjectId((req as any).user.id);
-    const exam = await createExam({ ...req.body, createdBy });
+  const exam = await createExam({ ...req.body, createdBy });
+  await logAudit((req as any).user?.id, 'admin.exam.create', String(exam._id), { title: exam.title });
     res.status(201).json(exam);
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Failed to create exam' });
@@ -48,6 +50,7 @@ export const createExamCtrl = async (req: Request, res: Response) => {
 export const updateExamCtrl = async (req: Request, res: Response) => {
   const exam = await updateExam(req.params.id, req.body);
   if (!exam) return res.status(404).json({ message: 'Exam not found' });
+  await logAudit((req as any).user?.id, 'admin.exam.update', String(exam._id), { patch: req.body });
   res.json(exam);
 };
 
@@ -69,6 +72,7 @@ export const listExamsCtrl = async (req: Request, res: Response) => {
 
 export const deleteExamCtrl = async (req: Request, res: Response) => {
   await deleteExam(req.params.id);
+  await logAudit((req as any).user?.id, 'admin.exam.delete', String(req.params.id));
   res.json({ message: 'Exam deleted' });
 };
 
@@ -77,6 +81,7 @@ export const assignExamCtrl = async (req: Request, res: Response) => {
   const { users, groups } = req.body as { users?: string[]; groups?: string[] };
   const exam = await assignExam(req.params.id, users, groups);
   if (!exam) return res.status(404).json({ message: 'Exam not found' });
+  await logAudit((req as any).user?.id, 'admin.exam.assign', String(exam._id), { users, groups });
   res.json(exam);
 };
 

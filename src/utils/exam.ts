@@ -19,6 +19,8 @@ export function sanitizeQuestion(q: IQuestion) {
     text: q.text,
     type: q.type,
     options,
+    assertion: q.assertion,
+    reason: q.reason,
     tags: q.tags,
     explanation: undefined,
   };

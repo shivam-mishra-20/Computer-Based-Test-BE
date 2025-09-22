@@ -10,8 +10,14 @@ import examRoutes from './routes/api/examRoutes';
 import attemptRoutes from './routes/api/attemptRoutes';
 import reportRoutes from './routes/api/reportRoutes';
 import aiRoutes from './routes/api/aiRoutes';
+import paperRoutes from './routes/api/paperRoutes';
 import analyticsRoutes from './routes/api/analyticsRoutes';
+import adminRoutes from './routes/api/adminRoutes';
 import { errorHandler } from './middlewares/errorHandler';
+import path from 'path';
+// Use require to avoid transient module resolution issues in some TS setups
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const uploadRoutes = require('./routes/api/uploadRoutes').default as import('express').Router;
 
 dotenv.config();
 
@@ -22,6 +28,9 @@ app.use(cors());
 // Helmet with CSP disabled to avoid devtools CSP console noise on API root
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(morgan('dev'));
+
+// Serve static uploads (images) from /uploads
+app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
 
 // Root endpoint to avoid 404 at /
 app.get('/', (_req, res) => {
@@ -56,6 +65,9 @@ app.use('/api/attempts', attemptRoutes);
 app.use('/api/reports', reportRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/upload', uploadRoutes);
+app.use('/api/papers', paperRoutes);
 
 // Error handler
 app.use(errorHandler);

@@ -20,6 +20,9 @@ export interface IQuestion extends Document {
   assertionIsTrue?: boolean; // evaluation flags
   reasonIsTrue?: boolean;
   reasonExplainsAssertion?: boolean; // if reason correctly explains assertion
+  // Optional diagram associated with the question
+  diagramUrl?: string;
+  diagramAlt?: string;
   tags: {
     subject?: string;
     topic?: string;
@@ -50,6 +53,8 @@ const questionSchema = new Schema<IQuestion>(
     assertionIsTrue: { type: Boolean },
     reasonIsTrue: { type: Boolean },
     reasonExplainsAssertion: { type: Boolean },
+    diagramUrl: { type: String },
+    diagramAlt: { type: String },
     tags: {
       subject: { type: String },
       topic: { type: String },
@@ -61,5 +66,8 @@ const questionSchema = new Schema<IQuestion>(
   },
   { timestamps: true }
 );
+
+questionSchema.index({ 'tags.subject': 1, 'tags.topic': 1, 'tags.difficulty': 1, createdAt: -1 });
+questionSchema.index({ text: 'text' });
 
 export default mongoose.model<IQuestion>('Question', questionSchema);

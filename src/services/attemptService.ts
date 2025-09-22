@@ -2,7 +2,7 @@ import { Types } from 'mongoose';
 import Exam from '../models/Exam';
 import User from '../models/User';
 import Question, { IQuestion } from '../models/Question';
-import Attempt, { IAttempt, IAnswerItem } from '../models/Attempt';
+import Attempt, { IAnswerItem } from '../models/Attempt';
 import { computeMaxScoreForExam, sanitizeQuestion, shuffleArray } from '../utils/exam';
 import { gradeSubjectiveAnswerGroq } from './aiService';
 
@@ -180,14 +180,49 @@ export async function markForReview(attemptId: string, userId: string, questionI
 function gradeObjective(q: IQuestion, ans: IAnswerItem): { isCorrect: boolean; score: number } | null {
   if (q.type === 'mcq' || q.type === 'truefalse') {
     const correctOption = q.options?.find((o) => o.isCorrect);
-    if (!correctOption || !ans.chosenOptionId) return { isCorrect: false, score: 0 };
-    const isCorrect = correctOption._id.toString() === ans.chosenOptionId.toString();
-    return { isCorrect, score: isCorrect ? 1 : 0 };
+    if (q.type === 'mcq') {
+      if (!correctOption || !ans.chosenOptionId) return { isCorrect: false, score: 0 };
+      const isCorrect = correctOption._id.toString() === ans.chosenOptionId.toString();
+      return { isCorrect, score: isCorrect ? 1 : 0 };
+    } else {
+      // true/false: support either option-based or textAnswer-based
+      if (correctOption && ans.chosenOptionId) {
+        const isCorrect = correctOption._id.toString() === ans.chosenOptionId.toString();
+        return { isCorrect, score: isCorrect ? 1 : 0 };
+      }
+      const expected = (q.correctAnswerText || '').trim().toLowerCase();
+      const got = (ans.textAnswer || '').trim().toLowerCase();
+      const isCorrect = !!expected && (got === expected || (got === 'true' && expected === 'true') || (got === 'false' && expected === 'false'));
+      return { isCorrect, score: isCorrect ? 1 : 0 };
+    }
   }
   if (q.type === 'fill') {
     const expected = (q.correctAnswerText || '').trim().toLowerCase();
     const got = (ans.textAnswer || '').trim().toLowerCase();
     const isCorrect = expected.length > 0 && expected === got;
+    return { isCorrect, score: isCorrect ? 1 : 0 };
+  }
+  if (q.type === 'assertionreason') {
+    // Expected mapping:
+    // A: Both true and reason explains assertion
+    // B: Both true but reason does not explain assertion
+    // C: Assertion true, reason false
+    // D: Assertion false, reason true
+    const aT = !!q.assertionIsTrue; 
+    const rT = !!q.reasonIsTrue;
+    const explains = !!q.reasonExplainsAssertion;
+    let correct: 'A'|'B'|'C'|'D' | null = null;
+    if (aT && rT && explains) correct = 'A';
+    else if (aT && rT && !explains) correct = 'B';
+    else if (aT && !rT) correct = 'C';
+    else if (!aT && rT) correct = 'D';
+    // Accept textAnswer or chosenOptionId codes
+    const given = ((ans.textAnswer !== undefined && ans.textAnswer !== null)
+      ? ans.textAnswer
+      : (ans.chosenOptionId !== undefined && ans.chosenOptionId !== null)
+        ? ans.chosenOptionId
+        : '').toString().trim().toUpperCase();
+    const isCorrect = !!correct && typeof given === 'string' && given === correct ? true : false;
     return { isCorrect, score: isCorrect ? 1 : 0 };
   }
   return null; // subjective
@@ -232,7 +267,7 @@ export async function submitAttempt(attemptId: string, userId: string, auto = fa
         ans.rubricScore = r.rubricScore;
         ans.aiFeedback = r.feedback;
         // Map rubricScore (0..1) to 1 point scale for now
-        const score = Number((r.rubricScore).toFixed(2));
+        const score = typeof r.rubricScore === 'number' ? Number(r.rubricScore.toFixed(2)) : 0;
         ans.scoreAwarded = score;
         total += score;
       } catch (e) {
@@ -274,7 +309,7 @@ export async function adjustAnswerScore(attemptId: string, answerId: string, sco
   ans.scoreAwarded = score;
   if (feedback) ans.aiFeedback = feedback;
   // recompute total
-  attempt.totalScore = attempt.answers.reduce((sum, a) => sum + (a.scoreAwarded || 0), 0);
+  attempt.totalScore = attempt.answers.reduce((sum, a) => sum + (typeof a.scoreAwarded === 'number' ? a.scoreAwarded : 0), 0);
   await attempt.save();
   return attempt;
 }
