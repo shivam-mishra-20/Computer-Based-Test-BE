@@ -335,6 +335,165 @@ export async function generatePaperFromTextGemini(source: string, blueprint: Pap
   };
 }
 
+// Enforce the blueprint by topping up missing questions per section and type.
+async function enforceBlueprintOnSections(
+  source: string,
+  blueprint: PaperBlueprint,
+  initial: GeneratedPaperSection[],
+  guidance?: string | null,
+): Promise<GeneratedPaperSection[]> {
+  const sections: GeneratedPaperSection[] = [];
+  // Support English-specific pseudo types
+  const englishMap = (key: string): { baseType: QuestionType; formatHint?: string } => {
+    switch (key) {
+      case 'english:letter-formal':
+        return { baseType: 'long', formatHint: 'Formal letter format: sender address, date, receiver address, subject, salutation, body (3-4 paragraphs), complimentary close, signature.' };
+      case 'english:letter-informal':
+        return { baseType: 'long', formatHint: 'Informal letter format: date, salutation, conversational body (2-3 paragraphs), closing and name.' };
+      case 'english:story':
+        return { baseType: 'long', formatHint: 'Story writing: clear plot with beginning, conflict, resolution; maintain tense consistency; include title.' };
+      case 'english:essay':
+        return { baseType: 'long', formatHint: 'Essay writing: introduction, 2-3 body paragraphs, conclusion; maintain coherence and word limit guidance if provided.' };
+      case 'english:diary':
+        return { baseType: 'short', formatHint: 'Diary entry: date/day, salutation (optional), body in first person reflecting feelings/events, closing/signature.' };
+      case 'english:advertisement':
+        return { baseType: 'short', formatHint: 'Advertisement: catchy headline, body with key details (what, where, when, contact), concise; use persuasive language.' };
+      case 'english:notice':
+        return { baseType: 'short', formatHint: 'Notice writing: heading NOTICE, date, subject, body with essential information (what, when, where), signature/name/designation.' };
+      case 'english:unseen-passage':
+        return { baseType: 'short', formatHint: 'Unseen passage comprehension: include a short passage (4-6 lines) within the question text and ask a question requiring a brief answer.' };
+      case 'english:unseen-poem':
+        return { baseType: 'short', formatHint: 'Unseen poem comprehension: include a short 3-5 line poem within the question text and ask a question on theme or literary device requiring a brief answer.' };
+      default:
+        return { baseType: 'long' } as any;
+    }
+  };
+
+  for (let sIdx = 0; sIdx < blueprint.sections.length; sIdx++) {
+    const bp = blueprint.sections[sIdx];
+    const current = initial[sIdx] || ({ title: bp.title, instructions: bp.instructions, marksPerQuestion: bp.marksPerQuestion, questionCounts: {}, difficultyDistribution: bp.difficultyDistribution, questions: [] } as GeneratedPaperSection);
+
+    const requestedKeys = Object.keys(bp.questionCounts || {});
+    let kept = (current.questions || []).slice();
+    const haveByKey: Record<string, number> = {};
+    for (const key of requestedKeys) {
+      if (key.startsWith('english:')) haveByKey[key] = 0; else haveByKey[key] = kept.filter((q) => String(q.type) === key).length;
+    }
+
+    const diff = bp.difficultyDistribution || { easy: 0, medium: 100, hard: 0 };
+    const diffParts: Array<{ key: Difficulty; pct: number }> = [
+      { key: 'easy', pct: Math.max(0, Number(diff.easy ?? 0)) },
+      { key: 'medium', pct: Math.max(0, Number(diff.medium ?? 0)) },
+      { key: 'hard', pct: Math.max(0, Number(diff.hard ?? 0)) },
+    ];
+    const pctSum = diffParts.reduce((a, b) => a + b.pct, 0) || 1;
+
+    const groupedByKey: Record<string, Partial<IQuestion>[]> = {};
+    for (const key of requestedKeys) groupedByKey[key] = [];
+    // Seed with existing for standard types
+    for (const key of requestedKeys) {
+      if (!key.startsWith('english:')) groupedByKey[key] = kept.filter((q) => String(q.type) === key);
+    }
+
+    for (const key of requestedKeys) {
+      const desired = Math.max(0, Number((bp.questionCounts as any)[key] || 0));
+      const have = haveByKey[key] || 0;
+      let missing = desired - have;
+      if (missing <= 0) continue;
+      const alloc: Record<Difficulty, number> = { easy: 0, medium: 0, hard: 0 };
+      let acc = 0;
+      for (let i = 0; i < diffParts.length; i++) {
+        const p = diffParts[i];
+        let count = Math.floor((p.pct / pctSum) * missing);
+        if (i === diffParts.length - 1) count = missing - acc;
+        alloc[p.key] = count as any;
+        acc += count;
+      }
+      for (const d of ['easy', 'medium', 'hard'] as Difficulty[]) {
+        const need = alloc[d];
+        if (need <= 0) continue;
+        const { baseType, formatHint } = key.startsWith('english:') ? englishMap(key) : ({ baseType: key } as any);
+        const extraGuidance = formatHint ? `\nENGLISH FORMAT: ${formatHint}` : '';
+        const gen = await generateQuestionsFromTextGemini(source || `${blueprint.subject || ''} ${bp.title || ''}`.trim(), {
+          subject: blueprint.subject,
+          topic: bp.title,
+          difficulty: d,
+          count: need,
+          types: [baseType],
+          createdBy: undefined as any,
+          __guidance: ((guidance || '') + extraGuidance) as any,
+        } as any);
+        const normalized = gen.map((q) => {
+          if (q.type === 'mcq' && Array.isArray(q.options)) {
+            const firstCorrectIdx = q.options.findIndex((o) => o.isCorrect);
+            let opts = q.options.map((o) => ({ text: String(o.text || ''), isCorrect: !!o.isCorrect })).slice(0, 4);
+            const correctCount = opts.filter((o) => o.isCorrect).length;
+            while (opts.length < 4) opts.push({ text: 'None of the above', isCorrect: false });
+            if (correctCount !== 1) opts = opts.map((o, idx) => ({ ...o, isCorrect: idx === (firstCorrectIdx >= 0 ? Math.min(firstCorrectIdx, 3) : 0) }));
+            return { ...q, type: baseType, options: opts as any };
+          }
+          return { ...q, type: baseType };
+        });
+        groupedByKey[key] = groupedByKey[key].concat(normalized as any);
+      }
+    }
+
+    const balanced: Partial<IQuestion>[] = [];
+    for (const key of requestedKeys) {
+      const desired = Math.max(0, Number((bp.questionCounts as any)[key] || 0));
+      balanced.push(...(groupedByKey[key] || []).slice(0, desired));
+    }
+
+    sections.push({
+      title: bp.title,
+      instructions: bp.instructions,
+      marksPerQuestion: bp.marksPerQuestion,
+      questionCounts: bp.questionCounts,
+      difficultyDistribution: bp.difficultyDistribution,
+      questions: balanced,
+    });
+  }
+  return sections;
+}
+
+export async function generatePaperFromTextEnforced(source: string, blueprint: PaperBlueprint): Promise<GeneratedPaperResult> {
+  // Initial attempt using structured paper generation
+  const g = getGemini();
+  if (!g) throw new Error('Gemini API key not configured');
+  const guidance = await getGuidanceText(blueprint.subject, undefined);
+  let initial: GeneratedPaperResult;
+  try {
+    initial = await generatePaperFromTextGemini(source, { ...(blueprint as any), __guidance: guidance } as any);
+  } catch {
+    // If the structured generation fails, seed with empty sections and we will top up strictly
+    initial = {
+      examTitle: blueprint.examTitle,
+      subject: blueprint.subject,
+      totalMarks: 0,
+      generalInstructions: blueprint.generalInstructions || [],
+      sections: blueprint.sections.map((s) => ({
+        title: s.title,
+        instructions: s.instructions,
+        marksPerQuestion: s.marksPerQuestion,
+        questionCounts: s.questionCounts,
+        difficultyDistribution: s.difficultyDistribution,
+        questions: [],
+      })),
+    };
+  }
+
+  // Strictly enforce counts/types by topping up
+  const enforcedSections = await enforceBlueprintOnSections(source, blueprint, initial.sections, guidance);
+  const totalMarks = enforcedSections.reduce((sum, sec) => sum + (sec.marksPerQuestion || 0) * (sec.questions?.length || 0), 0);
+  return {
+    examTitle: initial.examTitle || blueprint.examTitle,
+    subject: initial.subject || blueprint.subject,
+    totalMarks,
+    generalInstructions: initial.generalInstructions?.length ? initial.generalInstructions : (blueprint.generalInstructions || []),
+    sections: enforcedSections,
+  };
+}
+
 export async function refineQuestionGemini(original: Partial<IQuestion> & { notes?: string; desiredDifficulty?: Difficulty; constraints?: string }): Promise<Partial<IQuestion>> {
   const g = getGemini();
   if (!g) throw new Error('Gemini API key not configured');

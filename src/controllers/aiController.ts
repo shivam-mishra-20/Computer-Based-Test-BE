@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
 import Question from '../models/Question';
-import { extractTextFromPdf, extractTextFromImage, generateQuestionsFromTextGemini, gradeSubjectiveAnswerGroq, generatePaperFromTextGemini, refineQuestionGemini, getGuidanceText } from '../services/aiService';
+import { extractTextFromPdf, extractTextFromImage, generateQuestionsFromTextGemini, gradeSubjectiveAnswerGroq, generatePaperFromTextEnforced, refineQuestionGemini, getGuidanceText } from '../services/aiService';
 import Guidance from '../models/Guidance';
 import type { PaperBlueprint } from '../services/aiService';
 
@@ -102,8 +102,8 @@ export const generatePaper = async (req: Request, res: Response) => {
     const { sourceText, blueprint } = req.body as { sourceText: string; blueprint: PaperBlueprint };
     if (!sourceText || String(sourceText).trim().length < 100) return res.status(400).json({ message: 'Provide sufficient sourceText (>=100 chars)' });
     if (!blueprint || !Array.isArray(blueprint.sections) || blueprint.sections.length === 0) return res.status(400).json({ message: 'Blueprint with at least one section required' });
-    const guidance = await getGuidanceText(blueprint.subject, undefined);
-    const paper = await generatePaperFromTextGemini(String(sourceText), { ...(blueprint as any), __guidance: guidance } as any);
+  const guidance = await getGuidanceText(blueprint.subject, undefined);
+  const paper = await generatePaperFromTextEnforced(String(sourceText), { ...(blueprint as any), __guidance: guidance } as any);
     res.json(paper);
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Paper generation failed' });
@@ -126,8 +126,8 @@ export const generatePaperFromPdf = async (req: Request, res: Response) => {
     if (!blueprint || !Array.isArray(blueprint.sections) || blueprint.sections.length === 0) return res.status(400).json({ message: 'Blueprint with at least one section required' });
     const text = await extractTextFromPdf(file.buffer);
     if (!text || text.trim().length < 100) return res.status(400).json({ message: 'Extracted text insufficient (<100 chars)' });
-    const guidance = await getGuidanceText(blueprint.subject, undefined);
-    const paper = await generatePaperFromTextGemini(text, { ...(blueprint as any), __guidance: guidance } as any);
+  const guidance = await getGuidanceText(blueprint.subject, undefined);
+  const paper = await generatePaperFromTextEnforced(text, { ...(blueprint as any), __guidance: guidance } as any);
     res.json(paper);
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Paper PDF generation failed' });
@@ -155,8 +155,8 @@ export const generatePaperFromImage = async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'Extracted text insufficient (<100 chars)' });
     }
 
-    const guidance = await getGuidanceText(blueprint.subject, undefined);
-    const paper = await generatePaperFromTextGemini(text, { ...(blueprint as any), __guidance: guidance } as any);
+  const guidance = await getGuidanceText(blueprint.subject, undefined);
+  const paper = await generatePaperFromTextEnforced(text, { ...(blueprint as any), __guidance: guidance } as any);
     res.json(paper);
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Paper Image generation failed' });

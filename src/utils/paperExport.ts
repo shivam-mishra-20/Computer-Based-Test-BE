@@ -17,12 +17,17 @@ export function buildPaperHtml(paper: IPaper, options?: { includeSolutions?: boo
     </style>
   </head><body>
   <h1>${esc(paper.examTitle)}</h1>
-  ${paper.subject ? `<div style="text-align:center; margin-bottom:10px"><strong>Subject:</strong> ${esc(paper.subject)}</div>` : ''}
+  ${paper.subject ? `<div style="text-align:center; margin-bottom:6px"><strong>Subject:</strong> ${esc(paper.subject)}</div>` : ''}
+  <div style="text-align:center; margin-bottom:10px" class="muted">
+    ${typeof (paper as any).totalMarks === 'number' ? `<strong>Total Marks:</strong> ${(paper as any).totalMarks}` : ''}
+    ${(paper as any).meta?.durationMins ? ` &nbsp; | &nbsp; <strong>Time:</strong> ${(paper as any).meta?.durationMins} mins` : ''}
+  </div>
   ${Array.isArray(paper.generalInstructions) && paper.generalInstructions.length ? `<ol>${paper.generalInstructions.map((i) => `<li>${esc(i)}</li>`).join('')}</ol>` : ''}
   ${paper.sections
     .map((sec: any, sIdx: number) => {
       const sols = (paper as any).solutions?.sections?.[sIdx]?.solutions || [];
-      return `<section><h2>${esc(sec.title)}</h2>${sec.instructions ? `<div class="muted">${esc(sec.instructions)}</div>` : ''}
+      const marksPerQ = sec.marksPerQuestion ? ` (Marks/Q: ${sec.marksPerQuestion})` : '';
+      return `<section><h2>${esc(sec.title)}${marksPerQ}</h2>${sec.instructions ? `<div class="muted">${esc(sec.instructions)}</div>` : ''}
       <ol>
       ${sec.questions
         .map((q: any, i: number) => `<li>${esc(q.text)}${includeSolutions && sols[i]?.solutionText ? `<div class=\"sol\"><strong>Solution:</strong><br/>${esc(sols[i].solutionText)}</div>` : ''}</li>`)
