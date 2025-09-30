@@ -98,10 +98,9 @@ export const exportPdfCtrl = async (req: Request, res: Response) => {
     res.setHeader('Content-Disposition', `attachment; filename="${(doc.examTitle || 'paper').replace(/[^a-z0-9-_]+/gi, '_')}.pdf"`);
     return res.send(pdf);
   } catch (e: any) {
-    // Fallback: return HTML if PDF generation fails
-    res.setHeader('Content-Type', 'text/html');
-    res.setHeader('Content-Disposition', `attachment; filename="${(doc.examTitle || 'paper').replace(/[^a-z0-9-_]+/gi, '_')}.html"`);
-    return res.send(html);
+    // Strict behavior: do NOT return HTML; signal failure so clients don't download .html accidentally
+    console.error('exportPdfCtrl: PDF generation failed', e);
+    return res.status(500).json({ message: 'PDF generation failed. Please try again.' });
   }
 };
 

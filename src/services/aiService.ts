@@ -68,7 +68,7 @@ export async function generateSolutionsForPaper(paper: GeneratedPaperResult): Pr
 }> {
   const g = getGemini();
   if (!g) throw new Error('Gemini API key not configured');
-  const model = g.getGenerativeModel({ model: 'gemini-1.5-flash' });
+  const model = g.getGenerativeModel({ model: 'gemini-2.5-pro' });
   const sections: { title: string; solutions: { solutionText: string }[] }[] = [];
   for (const sec of paper.sections) {
     const questionsText = sec.questions
@@ -285,7 +285,7 @@ SOURCE MATERIAL (truncate if huge):\n"""\n${source.slice(0, 120_000)}\n"""`;
 export async function generatePaperFromTextGemini(source: string, blueprint: PaperBlueprint): Promise<GeneratedPaperResult> {
   const g = getGemini();
   if (!g) throw new Error('Gemini API key not configured');
-  const model = g.getGenerativeModel({ model: 'gemini-1.5-flash' });
+  const model = g.getGenerativeModel({ model: 'gemini-2.5-pro' });
   const prompt = buildPaperGenPrompt(source, blueprint);
   const result = await model.generateContent(prompt);
   const raw = result.response.text();
@@ -497,7 +497,7 @@ export async function generatePaperFromTextEnforced(source: string, blueprint: P
 export async function refineQuestionGemini(original: Partial<IQuestion> & { notes?: string; desiredDifficulty?: Difficulty; constraints?: string }): Promise<Partial<IQuestion>> {
   const g = getGemini();
   if (!g) throw new Error('Gemini API key not configured');
-  const model = g.getGenerativeModel({ model: 'gemini-1.5-flash' });
+  const model = g.getGenerativeModel({ model: 'gemini-2.5-pro' });
   const prompt = `Refine the following question maintaining its core concept. Apply improvements: clarity, difficulty targeting, remove ambiguity. If MCQ ensure exactly 4 options & one correct. If assertionreason, maintain structure & booleans. Return ONLY JSON with schema { "text": string, "type": string, "options": [{"text":string,"isCorrect":boolean}]|null, "correctAnswerText": string|null, "integerAnswer": number|null, "assertion": string|null, "reason": string|null, "assertionIsTrue": boolean|null, "reasonIsTrue": boolean|null, "reasonExplainsAssertion": boolean|null, "explanation": string|null }.
 Original JSON:
 ${JSON.stringify(original)}
@@ -526,7 +526,7 @@ Notes: ${original.notes || 'none'}
 export async function generateQuestionsFromTextGemini(text: string, opts: GenerateOptions): Promise<Partial<IQuestion>[]> {
   const g = getGemini();
   if (!g) throw new Error('Gemini API key not configured');
-  const model = g.getGenerativeModel({ model: 'gemini-1.5-flash' });
+  const model = g.getGenerativeModel({ model: 'gemini-2.5-pro' });
   const prompt = buildQuestionGenPrompt(text, opts);
   const result = await model.generateContent(prompt);
   const raw = result.response.text();
