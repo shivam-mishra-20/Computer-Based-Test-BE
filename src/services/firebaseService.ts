@@ -202,3 +202,42 @@ export async function getFirestoreUserByEmailAny(email: string) {
   if (viaAdmin) return viaAdmin;
   return getFirestoreUserByEmailRest(email);
 }
+
+/**
+ * Uploads a file buffer to Firebase Storage and returns the public URL
+ * @param buffer File buffer to upload
+ * @param fileName Destination file path in storage (e.g., 'diagrams/image.jpg')
+ * @param contentType MIME type of the file
+ * @returns Public URL of the uploaded file
+ */
+export async function uploadToFirebase(
+  buffer: Buffer,
+  fileName: string,
+  contentType: string
+): Promise<string> {
+  try {
+    initFirebaseAdmin();
+    if (!initialized || !admin) {
+      throw new Error('Firebase Admin SDK not initialized');
+    }
+
+    const bucket = admin.storage().bucket(process.env.FIREBASE_STORAGE_BUCKET);
+    const file = bucket.file(fileName);
+
+    await file.save(buffer, {
+      metadata: {
+        contentType,
+      },
+      public: true,
+    });
+
+    // Make the file publicly accessible
+    await file.makePublic();
+
+    // Return the public URL
+    return `https://storage.googleapis.com/${bucket.name}/${fileName}`;
+  } catch (error) {
+    console.error('Error uploading to Firebase Storage:', error);
+    throw new Error('Failed to upload file to Firebase Storage');
+  }
+}

@@ -11,28 +11,60 @@ export const generateFromPdf = async (req: Request, res: Response) => {
     const single = (req as any).file as { buffer: Buffer } | undefined;
     const file = single || (Array.isArray(anyFiles) && anyFiles.find((f) => f.fieldname === 'pdf'));
     if (!file) return res.status(400).json({ message: 'PDF file is required' });
+    
+    // Step 1: Extract text from PDF
     const text = await extractTextFromPdf(file.buffer);
+    
+    // Step 2: Analyze document to determine if it's a question paper
+    const { analyzeDocument } = await import('../services/documentAnalysisService');
+    const analysis = await analyzeDocument(text, false);
+    
+    // Step 3: Extract diagrams from PDF
+    const { processDocumentForDiagrams } = await import('../services/diagramService');
+    const diagrams = await processDocumentForDiagrams(file.buffer, 'pdf', true);
+    
     const createdBy = new Types.ObjectId((req as any).user.id);
+    
     // accept case-insensitive body keys
     const body = Object.keys(req.body || {}).reduce((acc: any, k) => { acc[k.toLowerCase()] = req.body[k]; return acc; }, {} as any);
     const typesRaw = body.types as string | undefined;
     const parsedTypes = typesRaw
       ? typesRaw.split(',').map((t) => t.trim()).filter(Boolean)
       : undefined;
+    
     const opts = {
-      subject: body.subject as string | undefined,
+      subject: body.subject as string | undefined || analysis.subject,
       topic: body.topic as string | undefined,
       difficulty: (body.difficulty as any) || 'medium',
-      count: body.count ? Number(body.count) : 10,
+      count: body.count ? Number(body.count) : (analysis.estimatedQuestionCount || 10),
       types: parsedTypes as any,
       createdBy,
+      isQuestionPaper: analysis.isQuestionPaper,
+      diagrams: diagrams.map(d => ({ url: d.imageUrl, description: d.description, altText: d.altText })),
     };
+    
     // Attach admin guidance if available
     const guidance = await getGuidanceText(opts.subject, opts.topic);
+    
+    console.log(`Document Analysis: ${analysis.documentType} (confidence: ${analysis.confidence})`);
+    console.log(`Strategy: ${analysis.recommendations.strategy}`);
+    console.log(`Extracted ${diagrams.length} diagrams`);
+    
     const questions = await generateQuestionsFromTextGemini(text, { ...opts, __guidance: guidance } as any);
     const saved = await Question.insertMany(questions.map((q) => ({ ...q, createdBy })));
-    res.status(201).json({ items: saved, total: saved.length });
+    
+    res.status(201).json({ 
+      items: saved, 
+      total: saved.length,
+      metadata: {
+        documentType: analysis.documentType,
+        isQuestionPaper: analysis.isQuestionPaper,
+        diagramsExtracted: diagrams.length,
+        strategy: analysis.recommendations.strategy,
+      }
+    });
   } catch (err: any) {
+    console.error('Error in generateFromPdf:', err);
     res.status(400).json({ message: err.message || 'Failed to generate from PDF' });
   }
 };
@@ -44,24 +76,55 @@ export const generateFromImage = async (req: Request, res: Response) => {
     const single = (req as any).file as { buffer: Buffer } | undefined;
     const file = single || (Array.isArray(files) && files[0]);
     if (!file) return res.status(400).json({ message: 'Image file is required' });
+    
+    // Step 1: Extract text via OCR
     const text = await extractTextFromImage(file.buffer);
+    
+    // Step 2: Analyze document to determine if it's a question paper
+    const { analyzeDocument } = await import('../services/documentAnalysisService');
+    const analysis = await analyzeDocument(text, true); // true = has images
+    
+    // Step 3: Extract/analyze diagrams from image
+    const { processDocumentForDiagrams } = await import('../services/diagramService');
+    const diagrams = await processDocumentForDiagrams(file.buffer, 'image', true);
+    
     const createdBy = new Types.ObjectId((req as any).user.id);
     const body = Object.keys(req.body || {}).reduce((acc: any, k) => { acc[k.toLowerCase()] = req.body[k]; return acc; }, {} as any);
     const typesRaw = body.types as string | undefined;
     const parsedTypes = typesRaw ? typesRaw.split(',').map((t) => t.trim()).filter(Boolean) : undefined;
+    
     const opts = {
-      subject: body.subject as string | undefined,
+      subject: body.subject as string | undefined || analysis.subject,
       topic: body.topic as string | undefined,
       difficulty: (body.difficulty as any) || 'medium',
-      count: body.count ? Number(body.count) : 10,
+      count: body.count ? Number(body.count) : (analysis.estimatedQuestionCount || 10),
       types: parsedTypes as any,
       createdBy,
+      isQuestionPaper: analysis.isQuestionPaper,
+      diagrams: diagrams.map(d => ({ url: d.imageUrl, description: d.description, altText: d.altText })),
     };
+    
     const guidance = await getGuidanceText(opts.subject, opts.topic);
+    
+    console.log(`Document Analysis: ${analysis.documentType} (confidence: ${analysis.confidence})`);
+    console.log(`Strategy: ${analysis.recommendations.strategy}`);
+    console.log(`Extracted ${diagrams.length} diagrams from image`);
+    
     const questions = await generateQuestionsFromTextGemini(text, { ...opts, __guidance: guidance } as any);
     const saved = await Question.insertMany(questions.map((q) => ({ ...q, createdBy })));
-    res.status(201).json({ items: saved, total: saved.length });
+    
+    res.status(201).json({ 
+      items: saved, 
+      total: saved.length,
+      metadata: {
+        documentType: analysis.documentType,
+        isQuestionPaper: analysis.isQuestionPaper,
+        diagramsExtracted: diagrams.length,
+        strategy: analysis.recommendations.strategy,
+      }
+    });
   } catch (err: any) {
+    console.error('Error in generateFromImage:', err);
     res.status(400).json({ message: err.message || 'Failed to generate from image' });
   }
 };
