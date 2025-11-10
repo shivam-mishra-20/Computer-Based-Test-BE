@@ -3,6 +3,7 @@ import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
 import { parseAnyFiles } from '../../middlewares/formData';
 import { evaluateSubjective, generateFromPdf, generateFromText, generatePaper, refineQuestion, generatePaperFromPdf, generateFromImage, createGuidance, listGuidance, updateGuidance, deleteGuidance, generatePaperFromImage } from '../../controllers/aiController';
 import { upload } from '../../middlewares/upload';
+import { saveValidatedQuestionsCtrl } from '../../controllers/questionController';
 
 const router = Router();
 
@@ -14,6 +15,9 @@ router.post('/generate/paper', authMiddleware, requireRole('teacher', 'admin'), 
 router.post('/generate/paper-pdf', authMiddleware, requireRole('teacher', 'admin'), parseAnyFiles, generatePaperFromPdf);
 router.post('/generate/paper-image', authMiddleware, requireRole('teacher', 'admin'), upload.single('image'), generatePaperFromImage);
 router.post('/refine', authMiddleware, requireRole('teacher', 'admin'), refineQuestion);
+
+// Save questions with validation
+router.post('/save-questions', authMiddleware, requireRole('teacher', 'admin'), saveValidatedQuestionsCtrl);
 
 // On-demand subjective evaluation (teachers/admins)
 router.post('/evaluate/subjective', authMiddleware, requireRole('teacher', 'admin'), evaluateSubjective);

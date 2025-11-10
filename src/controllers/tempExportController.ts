@@ -65,6 +65,46 @@ export const exportTempDocCtrl = async (req: Request, res: Response) => {
     
     try {
       const { Document, Paragraph, TextRun, Packer, HeadingLevel, AlignmentType, UnderlineType } = await import('docx');
+      const { mathJaxReady, convertLatex2Math } = await import('@hungknguyen/docx-math-converter');
+      await mathJaxReady();
+
+      const displayRe = /\$\$([\s\S]*?)\$\$/g;
+      const inlineRe = /\$([^$]+?)\$/g;
+      const paragraphChildrenFromText = (text: string, opts?: { bold?: boolean; italics?: boolean }) => {
+        const children: any[] = [];
+        const matches: Array<{ start: number; end: number; content: string; display: boolean }> = [];
+        let m: RegExpExecArray | null;
+        while ((m = displayRe.exec(text)) !== null) matches.push({ start: m.index, end: m.index + m[0].length, content: m[1], display: true });
+        while ((m = inlineRe.exec(text)) !== null) if (!matches.some(dm => m!.index >= dm.start && m!.index < dm.end)) matches.push({ start: m.index, end: m.index + m[0].length, content: m[1], display: false });
+        matches.sort((a, b) => a.start - b.start);
+        let i = 0;
+        for (const match of matches) {
+          if (i < match.start) {
+            const plain = text.slice(i, match.start);
+            const parts = plain.split(/(\n)/);
+            for (const p of parts) {
+              if (p === '\n') children.push(new TextRun({ text: '', break: 1 }));
+              else if (p) children.push(new TextRun({ text: p, bold: opts?.bold, italics: opts?.italics }));
+            }
+          }
+          try {
+            const mathObj = convertLatex2Math(match.content);
+            children.push(mathObj as any);
+          } catch {
+            children.push(new TextRun({ text: match.content }));
+          }
+          i = match.end;
+        }
+        if (i < text.length) {
+          const tail = text.slice(i);
+          const parts = tail.split(/(\n)/);
+          for (const p of parts) {
+            if (p === '\n') children.push(new TextRun({ text: '', break: 1 }));
+            else if (p) children.push(new TextRun({ text: p, bold: opts?.bold, italics: opts?.italics }));
+          }
+        }
+        return children;
+      };
       
       // Create document structure
       const children: any[] = [];
@@ -119,7 +159,7 @@ export const exportTempDocCtrl = async (req: Request, res: Response) => {
         paper.generalInstructions.forEach((instruction: string, index: number) => {
           children.push(
             new Paragraph({
-              children: [new TextRun({ text: `${index + 1}. ${instruction}` })],
+              children: paragraphChildrenFromText(`${index + 1}. ${instruction}`),
               spacing: { after: 50 },
             })
           );
@@ -149,7 +189,7 @@ export const exportTempDocCtrl = async (req: Request, res: Response) => {
         if (section.instructions) {
           children.push(
             new Paragraph({
-              children: [new TextRun({ text: section.instructions, italics: true })],
+              children: paragraphChildrenFromText(section.instructions, { italics: true }),
               spacing: { after: 100 },
             })
           );
@@ -157,12 +197,7 @@ export const exportTempDocCtrl = async (req: Request, res: Response) => {
         
         // Questions
         section.questions.forEach((question: any, questionIndex: number) => {
-          children.push(
-            new Paragraph({
-              children: [new TextRun({ text: `${questionIndex + 1}. ${question.text}`, bold: true })],
-              spacing: { before: 100, after: 50 },
-            })
-          );
+          children.push(new Paragraph({ children: [new TextRun({ text: `${questionIndex + 1}. `, bold: true }), ...paragraphChildrenFromText(String(question.text ?? ''))], spacing: { before: 100, after: 50 } }));
           
           // Multiple choice options
           if (question.options && Array.isArray(question.options)) {
@@ -170,7 +205,7 @@ export const exportTempDocCtrl = async (req: Request, res: Response) => {
               const optionLabel = String.fromCharCode(97 + optionIndex); // a, b, c, d
               children.push(
                 new Paragraph({
-                  children: [new TextRun({ text: `   ${optionLabel}) ${option.text}` })],
+                  children: [new TextRun({ text: `   ${optionLabel}) ` }), ...paragraphChildrenFromText(String(option.text ?? ''))],
                   spacing: { after: 25 },
                 })
               );

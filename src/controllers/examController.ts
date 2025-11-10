@@ -127,3 +127,123 @@ export const createExamFromPaperCtrl = async (req: Request, res: Response) => {
     res.status(400).json({ message: err.message || 'Failed to create exam from paper' });
   }
 };
+
+// Get topics/chapters for selection (enhanced for paper creation)
+export const getTopicsCtrl = async (req: Request, res: Response) => {
+  try {
+    const { subject, class: className, board } = req.query as { subject?: string; class?: string; board?: string };
+    if (!className) return res.status(400).json({ message: 'class is required' });
+    const { getClassQuestionModel } = await import('../models/ClassQuestion');
+    const ClassQuestion = getClassQuestionModel(className);
+
+    const filter: any = { isActive: true };
+    if (subject) filter.subject = subject;
+    if (board) filter.board = board;
+
+    // Group by chapter/topic for this class-only collection
+    const topics = await ClassQuestion.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: { subject: '$subject', topic: '$topic', chapter: '$chapter', board: '$board' },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { '_id.chapter': 1, '_id.topic': 1 } },
+    ]);
+
+    res.json(topics.map((t) => ({
+      subject: t._id.subject,
+      topic: t._id.topic,
+      chapter: t._id.chapter,
+      board: t._id.board,
+      count: t.count,
+    })));
+  } catch (err: any) {
+    res.status(500).json({ message: err.message || 'Failed to fetch topics' });
+  }
+};
+
+// Get filtered questions for paper creation
+export const getQuestionsForPaperCtrl = async (req: Request, res: Response) => {
+  try {
+    const { 
+      subject, 
+      class: className, 
+      board, 
+      chapter, 
+      topic,
+      type,
+      difficulty,
+      limit = '100',
+      skip = '0'
+    } = req.query as any;
+    if (!className) return res.status(400).json({ message: 'class is required' });
+    const { getClassQuestionModel } = await import('../models/ClassQuestion');
+    const ClassQuestion = getClassQuestionModel(className);
+
+  const ci = (v?: string) => (v && v.trim() ? new RegExp(`^${v.trim().replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}$`, 'i') : undefined);
+  const filter: any = { isActive: true };
+  const subj = ci(subject);
+  const top = ci(topic);
+  const diff = ci(difficulty);
+  const typ = ci(type);
+  const brd = ci(board);
+  const ch = ci(chapter);
+  if (subj) filter.subject = subj;
+  if (top) filter.topic = top;
+  if (diff) filter.difficulty = diff;
+  if (typ) filter.type = typ;
+  if (brd) filter.board = brd;
+  if (ch) filter.chapter = ch;
+
+    const questions = await ClassQuestion.find(filter)
+      .limit(parseInt(limit, 10))
+      .skip(parseInt(skip, 10))
+      .sort({ createdAt: -1 })
+      .lean();
+    const total = await ClassQuestion.countDocuments(filter);
+    
+    res.json({
+      items: questions,
+      total,
+      page: Math.floor(parseInt(skip, 10) / parseInt(limit, 10)) + 1,
+      pageSize: parseInt(limit, 10),
+    });
+  } catch (err: any) {
+    res.status(500).json({ message: err.message || 'Failed to fetch questions' });
+  }
+};
+
+// Get distinct chapters available for given class+subject+board
+export const getChaptersCtrl = async (req: Request, res: Response) => {
+  try {
+    const { subject, class: className, board } = req.query as { subject?: string; class?: string; board?: string };
+    if (!className) return res.status(400).json({ message: 'class is required' });
+    const { getClassQuestionModel } = await import('../models/ClassQuestion');
+    const ClassQuestion = getClassQuestionModel(className);
+
+  const ci = (v?: string) => (v && v.trim() ? new RegExp(`^${v.trim().replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}$`, 'i') : undefined);
+  const filter: any = { isActive: true };
+  const subj = ci(subject);
+  const brd = ci(board);
+  if (subj) filter.subject = subj;
+  if (brd) filter.board = brd;
+
+    const chapters = await ClassQuestion.aggregate([
+      { $match: filter },
+      {
+        $group: {
+          _id: '$chapter',
+          count: { $sum: 1 },
+        },
+      },
+      { $match: { _id: { $ne: null } } },
+      { $sort: { _id: 1 } },
+    ]);
+
+    res.json(chapters.map((c) => ({ chapter: c._id, count: c.count })));
+  } catch (err: any) {
+    res.status(500).json({ message: err.message || 'Failed to fetch chapters' });
+  }
+};

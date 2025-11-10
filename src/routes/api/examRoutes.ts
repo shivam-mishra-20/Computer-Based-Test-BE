@@ -16,6 +16,9 @@ import {
   updateBlueprintCtrl,
   deleteBlueprintCtrl,
   createExamFromPaperCtrl,
+  getTopicsCtrl,
+  getQuestionsForPaperCtrl,
+  getChaptersCtrl,
 } from '../../controllers/examController';
 
 const router = Router();
@@ -23,6 +26,9 @@ const router = Router();
 // Questions bank (teacher/admin)
 router.post('/questions', authMiddleware, requireRole('teacher', 'admin'), createQuestionCtrl);
 router.get('/questions', authMiddleware, requireRole('teacher', 'admin'), listQuestionsCtrl);
+router.get('/questions/topics', authMiddleware, requireRole('teacher', 'admin'), getTopicsCtrl);
+router.get('/questions/chapters', authMiddleware, requireRole('teacher', 'admin'), getChaptersCtrl);
+router.get('/questions/for-paper', authMiddleware, requireRole('teacher', 'admin'), getQuestionsForPaperCtrl);
 router.put('/questions/:id', authMiddleware, requireRole('teacher', 'admin'), updateQuestionCtrl);
 router.delete('/questions/:id', authMiddleware, requireRole('teacher', 'admin'), deleteQuestionCtrl);
 

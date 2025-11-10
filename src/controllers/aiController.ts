@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { Types } from 'mongoose';
 import Question from '../models/Question';
 import { extractTextFromPdf, extractTextFromImage, generateQuestionsFromTextGemini, gradeSubjectiveAnswerGroq, generatePaperFromTextEnforced, refineQuestionGemini, getGuidanceText } from '../services/aiService';
+import { saveBatchValidatedQuestions, type EnhancedQuestionData } from '../services/questionValidationService';
 import Guidance from '../models/Guidance';
 import type { PaperBlueprint } from '../services/aiService';
 
@@ -51,11 +52,29 @@ export const generateFromPdf = async (req: Request, res: Response) => {
     console.log(`Extracted ${diagrams.length} diagrams`);
     
     const questions = await generateQuestionsFromTextGemini(text, { ...opts, __guidance: guidance } as any);
-    const saved = await Question.insertMany(questions.map((q) => ({ ...q, createdBy })));
+    
+    // Enhance questions with metadata for paper creation
+    const enhancedQuestions: Partial<EnhancedQuestionData>[] = questions.map((q) => ({
+      ...q,
+      class: body.class as string | undefined,
+      subject: opts.subject || body.subject,
+      board: body.board as string | undefined,
+      chapter: body.chapter as string | undefined,
+      topic: opts.topic || body.topic,
+      section: body.section as string | undefined,
+      marks: body.marks ? Number(body.marks) : undefined,
+      difficulty: q.tags?.difficulty || opts.difficulty || 'medium',
+      createdBy,
+      source: 'AI' as const,
+    }));
+    
+    // Save with validation, sanitization, and deduplication
+    const saved = await saveBatchValidatedQuestions(enhancedQuestions);
     
     res.status(201).json({ 
       items: saved, 
       total: saved.length,
+      skipped: questions.length - saved.length,
       metadata: {
         documentType: analysis.documentType,
         isQuestionPaper: analysis.isQuestionPaper,
@@ -111,11 +130,29 @@ export const generateFromImage = async (req: Request, res: Response) => {
     console.log(`Extracted ${diagrams.length} diagrams from image`);
     
     const questions = await generateQuestionsFromTextGemini(text, { ...opts, __guidance: guidance } as any);
-    const saved = await Question.insertMany(questions.map((q) => ({ ...q, createdBy })));
+    
+    // Enhance questions with metadata for paper creation
+    const enhancedQuestions: Partial<EnhancedQuestionData>[] = questions.map((q) => ({
+      ...q,
+      class: body.class as string | undefined,
+      subject: opts.subject || body.subject,
+      board: body.board as string | undefined,
+      chapter: body.chapter as string | undefined,
+      topic: opts.topic || body.topic,
+      section: body.section as string | undefined,
+      marks: body.marks ? Number(body.marks) : undefined,
+      difficulty: q.tags?.difficulty || opts.difficulty || 'medium',
+      createdBy,
+      source: 'AI' as const,
+    }));
+    
+    // Save with validation, sanitization, and deduplication
+    const saved = await saveBatchValidatedQuestions(enhancedQuestions);
     
     res.status(201).json({ 
       items: saved, 
       total: saved.length,
+      skipped: questions.length - saved.length,
       metadata: {
         documentType: analysis.documentType,
         isQuestionPaper: analysis.isQuestionPaper,
@@ -131,7 +168,7 @@ export const generateFromImage = async (req: Request, res: Response) => {
 
 export const generateFromText = async (req: Request, res: Response) => {
   try {
-    const { text, subject, topic, difficulty, count, types } = req.body as any;
+    const { text, subject, topic, difficulty, count, types, class: className, board, chapter, section, marks } = req.body as any;
     if (!text || String(text).trim().length < 50) return res.status(400).json({ message: 'Provide sufficient source text' });
     const createdBy = new Types.ObjectId((req as any).user.id);
     let selectedTypes: string[] | undefined = undefined;
@@ -142,8 +179,26 @@ export const generateFromText = async (req: Request, res: Response) => {
     const opts = { subject, topic, difficulty, count: Number(count) || 10, types: selectedTypes as any, createdBy };
     const guidance = await getGuidanceText(subject, topic);
     const questions = await generateQuestionsFromTextGemini(String(text), { ...opts, __guidance: guidance } as any);
-    const saved = await Question.insertMany(questions.map((q) => ({ ...q, createdBy })));
-    res.status(201).json({ items: saved, total: saved.length });
+    
+    // Enhance questions with metadata for paper creation
+    const enhancedQuestions: Partial<EnhancedQuestionData>[] = questions.map((q) => ({
+      ...q,
+      class: className as string | undefined,
+      subject: subject,
+      board: board as string | undefined,
+      chapter: chapter as string | undefined,
+      topic: topic,
+      section: section as string | undefined,
+      marks: marks ? Number(marks) : undefined,
+      difficulty: q.tags?.difficulty || difficulty || 'medium',
+      createdBy,
+      source: 'AI' as const,
+    }));
+    
+    // Save with validation, sanitization, and deduplication
+    const saved = await saveBatchValidatedQuestions(enhancedQuestions);
+    
+    res.status(201).json({ items: saved, total: saved.length, skipped: questions.length - saved.length });
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Failed to generate from text' });
   }

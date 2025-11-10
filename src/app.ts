@@ -13,6 +13,7 @@ import aiRoutes from './routes/api/aiRoutes';
 import paperRoutes from './routes/api/paperRoutes';
 import analyticsRoutes from './routes/api/analyticsRoutes';
 import adminRoutes from './routes/api/adminRoutes';
+import importRoutes from './routes/api/importRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import path from 'path';
 // Use require to avoid transient module resolution issues in some TS setups
@@ -68,6 +69,7 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/papers', paperRoutes);
+app.use('/api', importRoutes);
 
 // Error handler
 app.use(errorHandler);

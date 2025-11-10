@@ -398,6 +398,23 @@ Notes
 - Optional (AI):
   - `GOOGLE_API_KEY` or `GEMINI_API_KEY` (Gemini)
   - `GROQ_API_KEY` (Groq)
+
+---
+
+## 11. Smart Question Import (OCR)
+
+### POST /api/import-paper
+
+- Role: teacher|admin
+- Upload: `multipart/form-data` with file field `questionPaper` (PDF or image up to 50MB) and optional text fields: `subject`, `topic`, `ocrProvider`.
+- `ocrProvider` options:
+  - `tesseract` (default): On-device OCR via tesseract.js for exact text extraction
+  - `groq`: Vision model OCR via Groq
+  - `gemini`: Vision model OCR via Gemini
+- Response: `{ message, batchId, totalQuestions, processedQuestions, processingTime }`
+
+Use `GET /api/import-paper/batch/:batchId` to retrieve batch details and extracted questions, and `PUT /api/import-paper/question/:id` to approve/reject.
+
 - Optional (seeding admin):
   - `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_NAME`
 
