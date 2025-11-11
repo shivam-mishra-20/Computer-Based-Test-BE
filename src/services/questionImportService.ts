@@ -1,35 +1,37 @@
 import dotenv from 'dotenv';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import Groq from 'groq-sdk';
+import { ImageAnnotatorClient } from '@google-cloud/vision';
 import fs from 'fs';
 import path from 'path';
 import pdfParse from 'pdf-parse';
 import sharp from 'sharp';
-import Tesseract from 'tesseract.js';
 import { Types } from 'mongoose';
 import { ImportBatch, ImportedQuestion, IImportedQuestion } from '../models/ImportedQuestion';
-import { saveBatchValidatedQuestions, EnhancedQuestionData } from './questionValidationService';
+import { saveBatchValidatedQuestions, EnhancedQuestionData, saveValidatedQuestion } from './questionValidationService';
 import { normalizeMathematicalExpressions } from './mathService';
 
 dotenv.config();
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GEMINI_API_KEY = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
+const VISION_KEY_PATH = process.env.VISION_API_KEY || './vision-key.json';
 
 // Initialize clients
-let groqClient: Groq | null = null;
 let genAI: GoogleGenerativeAI | null = null;
-
-function getGroq() {
-  if (!GROQ_API_KEY) throw new Error('GROQ_API_KEY not configured');
-  if (!groqClient) groqClient = new Groq({ apiKey: GROQ_API_KEY });
-  return groqClient;
-}
+let visionClient: ImageAnnotatorClient | null = null;
 
 function getGemini() {
   if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not configured');
   if (!genAI) genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
   return genAI;
+}
+
+function getVisionClient() {
+  if (!visionClient) {
+    visionClient = new ImageAnnotatorClient({
+      keyFilename: VISION_KEY_PATH
+    });
+  }
+  return visionClient;
 }
 
 export interface ExtractedQuestion {
@@ -74,19 +76,20 @@ export class QuestionImportService {
     options: {
       subject?: string;
       topic?: string;
-      ocrProvider?: 'groq' | 'gemini' | 'tesseract';
-      mode?: 'strict' | 'normal';
       class?: string;
       board?: string;
       chapter?: string;
       section?: string;
       marks?: number;
+      model?: string;
     } = {}
   ): Promise<ImportResult> {
     const startTime = Date.now();
+    const selectedModel = options.model || 'gemini-2.0-flash-exp';
     
     try {
       console.log(`[Import] Starting import for file: ${fileName}`);
+      console.log(`[Import] Pipeline: Google Cloud Vision API → ${selectedModel}`);
       
       // Create import batch
       const fileStats = fs.statSync(filePath);
@@ -97,8 +100,8 @@ export class QuestionImportService {
         fileSize: fileStats.size,
         status: 'processing',
         processingStarted: new Date(),
-        ocrProvider: options.ocrProvider || 'gemini', // Default to Gemini for better accuracy
-        processingModel: options.ocrProvider === 'gemini' ? 'gemini-2.0-flash-exp' : options.ocrProvider === 'groq' ? 'llava-v1.5-7b-4096-preview' : 'tesseract.js',
+        ocrProvider: 'google-vision',
+        processingModel: selectedModel,
         uploadedBy
       });
       
@@ -107,39 +110,39 @@ export class QuestionImportService {
 
       let extractedText: string;
       let totalPages = 1;
-      const extractionProvider = options.ocrProvider || 'gemini';
 
-      // Step 1: Extract text using Gemini for best results
-      console.log(`[Import] Step 1: Extracting text using ${extractionProvider}...`);
+      // Step 1: Extract text using Google Cloud Vision API (highest accuracy OCR)
+      console.log(`[Import] Step 1: Extracting text using Google Cloud Vision API...`);
       
       if (fileType === 'pdf') {
-        // For PDFs, use Gemini vision API with enhanced prompting
-        const result = await this.extractTextFromPDFWithGemini(filePath);
+        // For PDFs, convert pages to images and process with Vision API
+        const result = await this.extractTextFromPDFWithVision(filePath);
         extractedText = result.text;
         totalPages = result.pages;
       } else {
-        // For images, use Gemini vision API
-        extractedText = await this.extractTextFromImageWithGemini(filePath);
+        // For images, use Vision API directly
+        extractedText = await this.extractTextFromImageWithVision(filePath);
       }
 
-      console.log(`[Import] Extracted ${extractedText.length} characters from ${totalPages} page(s)`);
+      console.log(`[Import] Vision API extracted ${extractedText.length} characters from ${totalPages} page(s)`);
 
       // Update batch with page count
       batch.totalPages = totalPages;
       await batch.save();
 
-      // Step 2: Structure questions using Gemini AI with enhanced LaTeX formatting
-      console.log(`[Import] Step 2: Structuring questions with Gemini AI...`);
+      // Step 2: Structure questions using selected Gemini model
+      console.log(`[Import] Step 2: Structuring questions with ${selectedModel}...`);
       const questions = await this.structureQuestionsWithGemini(
         extractedText,
         {
           subject: options.subject,
           topic: options.topic,
-          batchId: batch._id as Types.ObjectId
+          batchId: batch._id as Types.ObjectId,
+          model: selectedModel
         }
       );
 
-      console.log(`[Import] Structured ${questions.length} questions`);
+      console.log(`[Import] ${selectedModel} structured ${questions.length} questions`);
 
       // Step 3: Normalize mathematical expressions in all questions
       console.log(`[Import] Step 3: Normalizing mathematical expressions...`);
@@ -232,19 +235,109 @@ export class QuestionImportService {
   }
 
   /**
-   * Extract text from PDF using pdf-parse
+   * Extract text from image using Google Cloud Vision API (highest accuracy)
    */
-  private static async extractTextFromPDF(filePath: string): Promise<{ text: string; pages: number }> {
+  private static async extractTextFromImageWithVision(filePath: string): Promise<string> {
     try {
+      console.log(`[Vision API] Processing image: ${filePath}`);
+      
+      const client = getVisionClient();
+      
+      // Read image file
+      const imageBuffer = await fs.promises.readFile(filePath);
+      
+      // Perform document text detection (best for dense text like question papers)
+      const [result] = await client.documentTextDetection({
+        image: { content: imageBuffer }
+      });
+      
+      const fullText = result.fullTextAnnotation;
+      if (!fullText || !fullText.text) {
+        throw new Error('No text detected in image');
+      }
+      
+      console.log(`[Vision API] Extracted ${fullText.text.length} characters`);
+      return fullText.text;
+      
+    } catch (error) {
+      console.error('[Vision API] Error:', error);
+      throw new Error(`Vision API extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }
+
+  /**
+   * Extract text from PDF using Google Cloud Vision API
+   * Converts each PDF page to image and processes with Vision API
+   */
+  private static async extractTextFromPDFWithVision(filePath: string): Promise<{ text: string; pages: number }> {
+    try {
+      console.log(`[Vision API PDF] Processing PDF: ${filePath}`);
+      
+      // Get page count
       const dataBuffer = await fs.promises.readFile(filePath);
       const pdfData = await pdfParse(dataBuffer as any);
+      const numPages = pdfData.numpages || 1;
       
+      console.log(`[Vision API PDF] PDF has ${numPages} pages`);
+
+      const client = getVisionClient();
+      const pageTexts: string[] = [];
+
+      // Process each page
+      for (let pageIndex = 0; pageIndex < numPages; pageIndex++) {
+        try {
+          console.log(`[Vision API PDF] Processing page ${pageIndex + 1}/${numPages}...`);
+          
+          // Convert PDF page to high-quality PNG
+          const tmpPngPath = path.join(path.dirname(filePath), `__vision_page_${pageIndex}.png`);
+          
+          await sharp(filePath, { page: pageIndex, density: 300 })
+            .ensureAlpha()
+            .png()
+            .toFile(tmpPngPath);
+          
+          // Read the generated image
+          const imageBuffer = await fs.promises.readFile(tmpPngPath);
+          
+          // Perform document text detection
+          const [result] = await client.documentTextDetection({
+            image: { content: imageBuffer }
+          });
+          
+          const fullText = result.fullTextAnnotation;
+          if (fullText && fullText.text) {
+            pageTexts.push(fullText.text);
+            console.log(`[Vision API PDF] Page ${pageIndex + 1}: extracted ${fullText.text.length} chars`);
+          } else {
+            console.warn(`[Vision API PDF] Page ${pageIndex + 1}: no text detected`);
+            pageTexts.push('');
+          }
+          
+          // Clean up temp file
+          try {
+            await fs.promises.unlink(tmpPngPath);
+          } catch {}
+          
+        } catch (pageError) {
+          console.error(`[Vision API PDF] Error on page ${pageIndex + 1}:`, pageError);
+          pageTexts.push('');
+        }
+      }
+
+      const combinedText = pageTexts
+        .map((text, idx) => `\n\n=== PAGE ${idx + 1} ===\n${text}`)
+        .join('\n');
+
+      console.log(`[Vision API PDF] Total extracted: ${combinedText.length} characters`);
+
       return {
-        text: pdfData.text,
-        pages: pdfData.numpages
+        text: combinedText,
+        pages: numPages
       };
+      
     } catch (error) {
-      throw new Error(`PDF extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      console.error('[Vision API PDF] Fatal error:', error);
+      throw new Error(`Vision API PDF extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
@@ -483,155 +576,12 @@ Just the pure extracted content.`;
     return questions;
   }
 
-  /**
-   * Extract text from image using OCR
-   */
-  private static async extractTextFromImage(filePath: string, provider: 'groq' | 'gemini' = 'groq'): Promise<string> {
-    if (provider === 'groq') {
-      return this.extractTextWithGroq(filePath);
-    } else {
-      return this.extractTextWithGemini(filePath);
-    }
-  }
+
+
+
 
   /**
-   * OCR using Groq (Vision model)
-   */
-  private static async extractTextWithGroq(filePath: string): Promise<string> {
-    try {
-      const groq = getGroq();
-      
-      // Convert image to base64
-      const imageBuffer = await fs.promises.readFile(filePath);
-      const base64Image = imageBuffer.toString('base64');
-      
-      const response = await groq.chat.completions.create({
-        messages: [
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text: 'Extract all text from this image. Focus on questions, options, and answers. Preserve the original structure and numbering. If this is a question paper, maintain the question format exactly as shown.'
-              },
-              {
-                type: 'image_url',
-                image_url: {
-                  url: `data:image/jpeg;base64,${base64Image}`
-                }
-              }
-            ]
-          }
-        ],
-        model: 'llava-v1.5-7b-4096-preview', // Groq's vision model
-        max_tokens: 4096,
-        temperature: 0.1
-      });
-
-      return response.choices[0]?.message?.content || '';
-    } catch (error) {
-      throw new Error(`Groq OCR failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  }
-
-  /**
-   * OCR using Gemini Vision
-   */
-  private static async extractTextWithGemini(filePath: string): Promise<string> {
-    try {
-      const genAI = getGemini();
-      const model = genAI.getGenerativeModel({ model: 'gemini-2.5-pro' });
-
-      // Read and prepare image
-      const imageBuffer = await fs.promises.readFile(filePath);
-      const imagePart = {
-        inlineData: {
-          data: imageBuffer.toString('base64'),
-          mimeType: 'image/jpeg'
-        }
-      };
-
-      const prompt = `Extract all text from this image with high accuracy. This appears to be a question paper. Please:
-1. Preserve exact question numbering and structure
-2. Maintain the format of multiple choice options (a, b, c, d)
-3. Include any instructions or headers
-4. Preserve mathematical expressions and symbols
-5. Return the text exactly as it appears in the image
-
-Focus on accuracy and completeness.`;
-
-      const result = await model.generateContent([prompt, imagePart]);
-      const text = result.response.text();
-      
-      return text;
-    } catch (error) {
-      throw new Error(`Gemini OCR failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  }
-
-  /**
-   * OCR using Tesseract.js for images (exact text extraction)
-   */
-  private static async extractTextFromImageWithTesseract(filePath: string): Promise<string> {
-    try {
-      const { data } = await Tesseract.recognize(filePath, 'eng', {
-        // preserve interword spaces for better layout fidelity
-        preserve_interword_spaces: 1,
-        // logger: m => console.log(m)
-      } as any);
-      // Return raw text as-is to preserve exact content
-      return (data.text || '').trim();
-    } catch (error) {
-      throw new Error(`Tesseract OCR (image) failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  }
-
-  /**
-   * OCR PDFs using Tesseract.js by rasterizing each page to image
-   */
-  private static async extractTextFromPDFWithTesseract(filePath: string): Promise<{ text: string; pages: number }> {
-    try {
-      // First, try to get number of pages via pdf-parse without relying on its text
-      const dataBuffer = await fs.promises.readFile(filePath);
-      const pdfData = await pdfParse(dataBuffer as any);
-      const numpages = pdfData.numpages || 1;
-
-      // Use sharp to rasterize each page; sharp supports page option for PDFs
-      const pageTexts: string[] = [];
-      for (let pageIndex = 0; pageIndex < numpages; pageIndex++) {
-        try {
-          const pageImage = sharp(filePath, { page: pageIndex, density: 300 })
-            .ensureAlpha()
-            .png();
-          const tmpPngPath = path.join(path.dirname(filePath), `__ocr_${path.basename(filePath)}_${pageIndex}.png`);
-          await pageImage.toFile(tmpPngPath);
-          try {
-            const text = await this.extractTextFromImageWithTesseract(tmpPngPath);
-            pageTexts.push(text);
-          } finally {
-            try { await fs.promises.unlink(tmpPngPath); } catch {}
-          }
-        } catch (e) {
-          // Skip page if rasterization fails, we'll fallback after loop
-          pageTexts.push('');
-        }
-      }
-
-      if (pageTexts.every(t => !t || !t.trim())) {
-        // As a last resort, fallback to pdf-parse text
-        const fallback = await this.extractTextFromPDF(filePath);
-        return { text: fallback.text, pages: fallback.pages };
-      }
-
-      const combined = pageTexts.map((t, i) => `\n\n=== Page ${i + 1} ===\n${t}`).join('\n');
-      return { text: combined, pages: numpages };
-    } catch (error) {
-      throw new Error(`Tesseract OCR (pdf) failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  }
-
-  /**
-   * Structure extracted text into questions using Gemini with enhanced LaTeX formatting
+   * Structure extracted text into questions using selected Gemini model
    */
   private static async structureQuestionsWithGemini(
     extractedText: string,
@@ -639,28 +589,39 @@ Focus on accuracy and completeness.`;
       subject?: string;
       topic?: string;
       batchId: Types.ObjectId;
+      model?: string;
     }
   ): Promise<ExtractedQuestion[]> {
     try {
-      console.log(`[Gemini Structure] Starting question structuring...`);
+      const modelName = options.model || 'gemini-2.0-flash-exp';
+      console.log(`[Gemini] Starting question structuring with ${modelName}...`);
       
       const genAI = getGemini();
       const model = genAI.getGenerativeModel({ 
-        model: 'gemini-2.0-flash-exp',
+        model: modelName,
         generationConfig: {
-          temperature: 0.1, // Low temperature for accuracy
+          temperature: 0.0, // Zero temperature for maximum consistency and accuracy
           topP: 0.95,
           topK: 40,
-          maxOutputTokens: 8192,
+          maxOutputTokens: 16384, // Larger for complex papers
         }
       });
 
-      const prompt = `You are an expert question paper analyzer specializing in mathematical and scientific content. Parse the following extracted text and structure it into a JSON array of questions.
+      const prompt = `You are an elite question paper analyzer with expertise in mathematical, scientific, and academic content extraction. Your task is to parse Google Cloud Vision API output and structure it into a precise JSON array of questions.
 
-CRITICAL LATEX FORMATTING RULES - FOLLOW EXACTLY:
+🎯 PRIMARY MISSION: PRESERVE EXACT SOURCE TEXT
+• Use the EXACT words, numbers, and phrases from the Vision API output
+• Do NOT paraphrase, rewrite, or "improve" the text
+• Do NOT correct spelling, grammar, or formatting
+• ONLY add LaTeX markup around mathematical expressions
+• Maintain original question numbering exactly as shown (Q1, 1., Question 1, etc.)
+• Keep option labels exactly as shown: (a), (b), a), A., etc.
+
+📐 CRITICAL LATEX FORMATTING RULES:
 1. ALL mathematical expressions MUST use LaTeX formatting
 2. Inline math: $x^2 + 5x + 6 = 0$ (single dollar signs)
 3. Display equations: $$\\int_0^{\\pi} \\sin(x)\\, dx$$ (double dollar signs)
+4. Wrap ONLY the mathematical part, preserve surrounding text verbatim
 
 COMPREHENSIVE LATEX REFERENCE:
 Basic Operations:
@@ -773,20 +734,32 @@ JSON SCHEMA (STRICT):
   }
 ]
 
-QUALITY CHECKLIST:
-✓ Extract ALL questions (don't skip any)
-✓ Identify correct answers from answer keys if present
-✓ ALL math in LaTeX with $ or $$
-✓ High confidence (>0.8) for clear text
-✓ Flag needsReview=true if unclear or confidence<0.7
-✓ Appropriate difficulty based on complexity
-✓ Return ONLY valid JSON (no markdown, no explanations)
+🔍 QUESTION COUNT GUARANTEE:
+• If the source has 11 questions → output MUST have exactly 11 JSON objects
+• Do NOT merge multiple questions into one
+• Do NOT split one question into multiple parts
+• Each distinct question number = one JSON object
+• Preserve sequential order strictly
 
-EXTRACTED TEXT TO PARSE:
+✅ QUALITY CHECKLIST:
+✓ Extract ALL questions (count must match source exactly)
+✓ Preserve exact wording (no paraphrasing)
+✓ Identify correct answers from answer keys if present
+✓ ALL math expressions in LaTeX ($...$ or $$...$$)
+✓ Set confidence=0.95 for clear text, 0.7-0.8 for unclear
+✓ Flag needsReview=true only if confidence < 0.7
+✓ Determine difficulty: easy (basic recall), medium (application), hard (analysis/synthesis)
+✓ Return ONLY valid JSON array (no markdown fences, no explanations, no preamble)
+
+📄 VISION API OUTPUT TO PARSE:
 ${extractedText}`;
 
+      console.log(`[${modelName}] Sending ${extractedText.length} chars for structuring...`);
+      
       const result = await model.generateContent(prompt);
       const response = result.response.text();
+      
+      console.log(`[${modelName}] Received ${response.length} chars response`);
       
       // Clean response from code fences and whitespace
       const cleanedResponse = response.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
@@ -902,6 +875,12 @@ ${extractedText}`;
       questionNumber: q.questionNumber,
       extractedBy,
       reviewedBy: undefined,
+      // Include metadata for later use when moving to class-wise collections
+      class: metadata?.class,
+      board: metadata?.board,
+      chapter: metadata?.chapter,
+      section: metadata?.section,
+      marks: metadata?.marks,
     }));
 
     const saved = await ImportedQuestion.insertMany(docs);
@@ -925,7 +904,7 @@ ${extractedText}`;
   }
 
   /**
-   * Update question review status
+   * Update question review status and move to class-wise collection if approved
    */
   static async reviewQuestion(
     questionId: Types.ObjectId,
@@ -944,7 +923,58 @@ ${extractedText}`;
     question.reviewedBy = reviewedBy;
     question.needsReview = false;
 
-    return await question.save();
+    await question.save();
+
+    // If approved, move to class-wise Question collection with validation
+    if (action === 'approve') {
+      try {
+        // Metadata is now stored directly in the question document
+        const className = question.class;
+
+        if (!className) {
+          console.warn(`[Review] Question ${questionId} approved but no class found, skipping move to Question collection`);
+          return question;
+        }
+
+        // Prepare enhanced question data
+        const enhancedData: Partial<EnhancedQuestionData> = {
+          text: question.text,
+          type: question.type as any,
+          options: question.options,
+          correctAnswerText: question.correctAnswerText,
+          integerAnswer: question.integerAnswer,
+          assertion: question.assertion,
+          reason: question.reason,
+          assertionIsTrue: question.assertionIsTrue,
+          reasonIsTrue: question.reasonIsTrue,
+          reasonExplainsAssertion: question.reasonExplainsAssertion,
+          diagramUrl: question.diagramUrl,
+          subject: question.subject || 'Unknown',
+          topic: question.topic,
+          difficulty: (question.difficulty || 'medium') as any,
+          createdBy: question.extractedBy,
+          class: className,
+          board: question.board,
+          chapter: question.chapter,
+          section: question.section,
+          marks: question.marks,
+          source: 'Smart Import',
+        };
+
+        // Save with validation (will skip duplicates within same class+chapter and empty answers)
+        const saved = await saveValidatedQuestion(enhancedData);
+        if (saved) {
+          console.log(`✓ Question ${questionId} moved to ${className} collection`);
+        } else {
+          console.log(`⊘ Question ${questionId} skipped (duplicate or invalid)`);
+        }
+      } catch (error) {
+        console.error(`[Review] Failed to move question ${questionId} to Question collection:`, error);
+        // Don't fail the approval, just log the error
+      }
+    }
+
+    return question;
   }
 
   /**

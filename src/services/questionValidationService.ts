@@ -206,6 +206,12 @@ function escapeRegex(str: string): string {
 /**
  * Check for duplicate questions in database
  * Returns true if duplicate exists
+ * 
+ * IMPORTANT: Deduplication is scoped to the SAME class + chapter combination
+ * This means:
+ * - Same question can exist in different classes (Class 10 vs Class 11)
+ * - Same question can exist in different chapters within same class
+ * - Only duplicates within SAME class + SAME chapter are skipped
  */
 export async function isDuplicate(
   questionText: string,
@@ -218,18 +224,41 @@ export async function isDuplicate(
     // Normalize for comparison
     const normalizedText = questionText.trim();
 
-    // Direct query: identical text (case-insensitive) AND same subject + chapter + board
-    if (!className) return false; // without class, cannot decide collection
+    // Require both class AND chapter for duplicate check
+    // Without these, we cannot scope the duplicate check properly
+    if (!className) {
+      console.warn('[Duplicate Check] Skipping: no class provided');
+      return false; // Cannot determine collection
+    }
+    
+    if (!chapter || chapter.trim() === '') {
+      console.warn('[Duplicate Check] Skipping: no chapter provided - allowing question');
+      return false; // Without chapter, cannot scope duplicate check
+    }
+
     const ClassQuestion = getClassQuestionModel(className);
-    const existing = await ClassQuestion.findOne({
+    
+    // Query: identical text (case-insensitive) AND same subject + chapter
+    // Note: We check chapter as the primary scope, board is optional
+    const query: any = {
       isActive: true,
       text: { $regex: new RegExp(`^${escapeRegex(normalizedText)}$`, 'i') },
       subject: subject,
       chapter: chapter,
-      board: board,
-    })
+    };
+    
+    // Only add board filter if provided
+    if (board && board.trim()) {
+      query.board = board;
+    }
+    
+    const existing = await ClassQuestion.findOne(query)
       .select('_id')
       .lean();
+
+    if (existing) {
+      console.log(`[Duplicate Found] Skipping question in ${className}/${chapter}: "${normalizedText.substring(0, 60)}..."`);
+    }
 
     return !!existing;
   } catch (error) {
@@ -241,8 +270,9 @@ export async function isDuplicate(
 /**
  * Validate question data before saving
  * Throws error if validation fails
+ * Returns false if question should be skipped (e.g., empty answers)
  */
-export function validateQuestionData(data: Partial<EnhancedQuestionData>): void {
+export function validateQuestionData(data: Partial<EnhancedQuestionData>): boolean {
   // Required fields
   if (!data.text || data.text.trim().length < 5) {
     throw new Error('Question text must be at least 5 characters');
@@ -269,29 +299,46 @@ export function validateQuestionData(data: Partial<EnhancedQuestionData>): void 
     // Check for at least one correct answer
     const hasCorrect = data.options.some(opt => opt.isCorrect === true);
     if (!hasCorrect) {
-      throw new Error('At least one option must be marked as correct');
+      // SKIP instead of throwing error to avoid 500s
+      console.warn(`[Validation] Skipping ${data.type} question without correct answer: ${data.text?.substring(0, 50)}...`);
+      return false;
     }
   }
   
-  if (data.type === 'integer' && data.integerAnswer === undefined) {
-    throw new Error('Integer type questions must have integerAnswer');
+  if (data.type === 'integer') {
+    if (data.integerAnswer === undefined || data.integerAnswer === null) {
+      // SKIP instead of throwing error
+      console.warn(`[Validation] Skipping integer question without answer: ${data.text?.substring(0, 50)}...`);
+      return false;
+    }
   }
   
   if (data.type === 'assertionreason') {
     if (!data.assertion || !data.reason) {
-      throw new Error('Assertion-reason questions must have both assertion and reason');
+      // SKIP instead of throwing error
+      console.warn(`[Validation] Skipping assertion-reason question with missing assertion/reason: ${data.text?.substring(0, 50)}...`);
+      return false;
     }
+  }
+  
+  // For fill/short/long types, if correctAnswerText is completely empty, skip
+  if (['fill', 'short', 'long'].includes(data.type) && !data.correctAnswerText?.trim()) {
+    console.warn(`[Validation] Skipping ${data.type} question without answer: ${data.text?.substring(0, 50)}...`);
+    return false;
   }
   
   // Difficulty must be valid
   if (data.difficulty && !['easy', 'medium', 'hard'].includes(data.difficulty)) {
     throw new Error('Difficulty must be easy, medium, or hard');
   }
+  
+  // Passed all validations
+  return true;
 }
 
 /**
  * Save question with full validation, sanitization, and deduplication
- * Returns saved question or null if duplicate
+ * Returns saved question or null if duplicate or validation failed
  */
 export async function saveValidatedQuestion(
   data: Partial<EnhancedQuestionData>
@@ -299,10 +346,14 @@ export async function saveValidatedQuestion(
   // 1. Sanitize data
   const sanitized = sanitizeQuestionData(data);
   
-  // 2. Validate
-  validateQuestionData(sanitized);
+  // 2. Validate (returns false if should skip, throws on hard errors)
+  const isValid = validateQuestionData(sanitized);
+  if (!isValid) {
+    // Question should be skipped (e.g., no answer provided)
+    return null;
+  }
   
-  // 3. Check for duplicates
+  // 3. Check for duplicates within same class + chapter
   const isDupe = await isDuplicate(
     sanitized.text!,
     sanitized.subject!,
@@ -312,11 +363,11 @@ export async function saveValidatedQuestion(
   );
   
   if (isDupe) {
-    console.log(`Skipping duplicate question: ${sanitized.text!.substring(0, 50)}...`);
+    console.log(`[Duplicate] Skipping question in ${sanitized.class}/${sanitized.chapter}: ${sanitized.text!.substring(0, 50)}...`);
     return null;
   }
   
-  // 4. Map enhanced fields to Question model schema
+  // 4. Map enhanced fields to ClassQuestion model schema
   const questionData: any = {
     text: sanitized.text,
     type: sanitized.type,
@@ -340,47 +391,77 @@ export async function saveValidatedQuestion(
     section: sanitized.section,
     marks: sanitized.marks,
     difficulty: sanitized.difficulty || 'medium',
-    source: sanitized.source || 'Manual',
+    source: sanitized.source || 'Smart Import',
   };
   
-  // Store enhanced metadata in a custom field (extend model if needed)
-  // For now, we'll store additional metadata in tags or a new field
-  // You may need to update the Question model to include these fields
-  
-  // 5. Save to database
+  // 5. Save to class-wise collection (e.g., class_10, class_11, class_12)
   try {
     if (!sanitized.class) throw new Error('Class is required to save question');
     const ClassQuestion = getClassQuestionModel(sanitized.class);
     const saved = await ClassQuestion.create(questionData);
-    console.log(`\u2713 Saved question: ${saved._id} (${saved.subject} - ${saved.chapter}) in ${sanitized.class}`);
+    console.log(`✓ Saved to ${sanitized.class}: ${saved._id} (${saved.subject}/${saved.chapter})`);
     return saved;
   } catch (error) {
-    console.error('Error saving question:', error);
+    console.error(`[Save Error] Failed to save question in ${sanitized.class}:`, error);
     throw error;
   }
 }
 
 /**
  * Batch save questions with validation
- * Returns array of saved questions (skips duplicates)
+ * Returns array of saved questions (skips duplicates and invalid questions)
  */
 export async function saveBatchValidatedQuestions(
   questions: Partial<EnhancedQuestionData>[]
 ): Promise<IClassQuestion[]> {
   const saved: IClassQuestion[] = [];
+  const stats = {
+    total: questions.length,
+    saved: 0,
+    skippedDuplicate: 0,
+    skippedInvalid: 0,
+    errors: 0
+  };
   
   for (const q of questions) {
     try {
       const result = await saveValidatedQuestion(q);
       if (result) {
         saved.push(result);
+        stats.saved++;
+      } else {
+        // null returned means duplicate or invalid (empty answer, etc.)
+        // Check if it's likely a duplicate or validation skip
+        if (q.text) {
+          const isDupe = await isDuplicate(
+            q.text,
+            q.subject || 'Unknown',
+            q.chapter || q.topic,
+            q.board,
+            q.class
+          );
+          if (isDupe) {
+            stats.skippedDuplicate++;
+          } else {
+            stats.skippedInvalid++;
+          }
+        } else {
+          stats.skippedInvalid++;
+        }
       }
     } catch (error) {
-      console.error('Error saving question in batch:', error);
+      console.error('[Batch Save Error]:', error);
+      stats.errors++;
       // Continue with next question
     }
   }
   
-  console.log(`✓ Saved ${saved.length}/${questions.length} questions (skipped ${questions.length - saved.length} duplicates/errors)`);
+  console.log(`✅ Batch Save Complete:
+  - Total: ${stats.total}
+  - Saved: ${stats.saved}
+  - Skipped (duplicate): ${stats.skippedDuplicate}
+  - Skipped (invalid/no answer): ${stats.skippedInvalid}
+  - Errors: ${stats.errors}`);
+  
   return saved;
 }

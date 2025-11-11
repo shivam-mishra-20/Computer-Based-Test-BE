@@ -34,6 +34,13 @@ export interface IImportedQuestion extends Document {
   confidence: number; // AI confidence score (0-1)
   needsReview: boolean; // Flag for manual review
   
+  // Enhanced metadata (for paper creation)
+  class?: string;
+  board?: string;
+  chapter?: string;
+  section?: string;
+  marks?: number;
+  
   // Processing status
   status: 'extracted' | 'processed' | 'reviewed' | 'approved' | 'rejected';
   
@@ -75,7 +82,7 @@ export interface IImportBatch extends Document {
   }>;
   
   // OCR and AI metadata
-  ocrProvider: 'groq' | 'gemini' | 'tesseract';
+  ocrProvider: 'google-vision' | 'groq' | 'gemini' | 'tesseract';
   processingModel: string;
   totalProcessingTime?: number; // milliseconds
   
@@ -124,6 +131,13 @@ const importedQuestionSchema = new Schema<IImportedQuestion>(
     originalText: { type: String, required: true },
     confidence: { type: Number, min: 0, max: 1, default: 0.5 },
     needsReview: { type: Boolean, default: false, index: true },
+    
+    // Enhanced metadata for paper creation
+    class: { type: String, index: true },
+    board: { type: String, index: true },
+    chapter: { type: String, index: true },
+    section: { type: String },
+    marks: { type: Number },
     
     // Status tracking
     status: { 
@@ -176,8 +190,8 @@ const importBatchSchema = new Schema<IImportBatch>(
       timestamp: { type: Date, default: Date.now }
     }],
     
-  ocrProvider: { type: String, enum: ['groq', 'gemini', 'tesseract'], default: 'tesseract' },
-    processingModel: { type: String, default: 'mixtral-8x7b-32768' },
+  ocrProvider: { type: String, enum: ['google-vision', 'groq', 'gemini', 'tesseract'], default: 'google-vision' },
+    processingModel: { type: String, default: 'gemini-2.5-pro' },
     totalProcessingTime: { type: Number },
     
     uploadedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true }

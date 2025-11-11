@@ -20,3 +20,6 @@ yarn-error.log*
 
 # Lockfiles (optional to ignore)
 package-lock.json
+
+#keys
+vision-key.json

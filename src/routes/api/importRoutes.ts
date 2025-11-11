@@ -58,7 +58,7 @@ const upload = multer({
  */
 router.post('/import-paper', authMiddleware, upload.single('questionPaper'), async (req, res) => {
   try {
-  const { subject, topic, ocrProvider = 'tesseract', mode, class: className, board, chapter, section, marks } = req.body;
+  const { subject, topic, ocrProvider = 'tesseract', mode, model = 'gemini-2.0-flash-exp', class: className, board, chapter, section, marks } = req.body;
     const userId = (req as any).user.id;
     
     if (!req.file) {
@@ -68,7 +68,7 @@ router.post('/import-paper', authMiddleware, upload.single('questionPaper'), asy
     // Validate file type
     const fileType = req.file.mimetype.startsWith('image/') ? 'image' : 'pdf';
     
-    // Start processing asynchronously
+    // Start processing asynchronously with Vision API + Gemini pipeline
     const importPromise = QuestionImportService.importQuestionPaper(
       req.file.path,
       req.file.originalname,
@@ -77,13 +77,12 @@ router.post('/import-paper', authMiddleware, upload.single('questionPaper'), asy
       {
         subject,
         topic,
-        ocrProvider: ['groq', 'gemini', 'tesseract'].includes(ocrProvider) ? (ocrProvider as any) : 'tesseract',
-        mode: mode === 'strict' ? 'strict' : 'normal',
         class: className,
         board,
         chapter,
         section,
-        marks: marks ? parseInt(marks) : undefined
+        marks: marks ? parseInt(marks) : undefined,
+        model
       }
     );
 
