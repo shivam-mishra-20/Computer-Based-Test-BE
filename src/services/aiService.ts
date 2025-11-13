@@ -1,5 +1,6 @@
 import dotenv from 'dotenv';
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { VertexAI } from '@google-cloud/vertexai';
 import Groq from 'groq-sdk';
 import type { Types } from 'mongoose';
 import type { Difficulty, IQuestion, QuestionType } from '../models/Question';
@@ -7,17 +8,56 @@ import Guidance from '../models/Guidance';
 
 dotenv.config();
 
+/**
+ * AI Service Architecture:
+ * 
+ * PRIMARY LLM: Vertex AI (Google Cloud) - gemini-2.5-pro
+ * - Used for: Question generation, paper generation, solutions, refinement
+ * - Advantages: Production-ready, service account auth, better quotas
+ * - Location: us-central1
+ * 
+ * FALLBACK LLM: Google Generative AI SDK (legacy)
+ * - Used for: PDF/Image OCR fallback only
+ * - Note: Primary OCR uses Google Cloud Vision API in questionImportService
+ * 
+ * ALTERNATIVE: Groq (if configured)
+ * - Fast inference for specific use cases
+ */
+
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const GOOGLE_CREDENTIALS = process.env.GOOGLE_APPLICATION_CREDENTIALS || './vision-key.json';
+const GOOGLE_PROJECT = process.env.GOOGLE_CLOUD_PROJECT || 'cbt-vision-api';
+const GOOGLE_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
 
 // Lazy singletons
 let genAI: GoogleGenerativeAI | null = null;
+let vertexAI: VertexAI | null = null;
 let groqClient: Groq | null = null;
 
 function getGemini() {
   if (!GOOGLE_API_KEY) return null;
   if (!genAI) genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
   return genAI;
+}
+
+function getVertexAI(): VertexAI {
+  if (!vertexAI) {
+    try {
+      vertexAI = new VertexAI({
+        project: GOOGLE_PROJECT,
+        location: GOOGLE_LOCATION,
+        googleAuthOptions: {
+          keyFilename: GOOGLE_CREDENTIALS
+        }
+      });
+      console.log(`[Vertex AI] Initialized with project: ${GOOGLE_PROJECT}, location: ${GOOGLE_LOCATION}`);
+    } catch (error) {
+      console.error('[Vertex AI] Failed to initialize:', error);
+      throw new Error(`Vertex AI initialization failed. Check credentials at: ${GOOGLE_CREDENTIALS}`);
+    }
+  }
+  return vertexAI;
 }
 
 function getGroq() {
@@ -66,9 +106,18 @@ export interface GeneratedPaperResult {
 export async function generateSolutionsForPaper(paper: GeneratedPaperResult): Promise<{
   sections: { title: string; solutions: { solutionText: string }[] }[];
 }> {
-  const g = getGemini();
-  if (!g) throw new Error('Gemini API key not configured');
-  const model = g.getGenerativeModel({ model: 'gemini-2.5-pro' });
+  try {
+    const vertexAI = getVertexAI();
+    const model = vertexAI.getGenerativeModel({
+      model: 'gemini-2.5-pro',
+      generationConfig: {
+        temperature: 0.7,
+        topP: 0.95,
+        topK: 40,
+        maxOutputTokens: 8192,
+      },
+    });
+  
   const sections: { title: string; solutions: { solutionText: string }[] }[] = [];
   for (const sec of paper.sections) {
     const questionsText = sec.questions
@@ -91,8 +140,11 @@ Exam: ${paper.examTitle} ${paper.subject ? `\nSubject: ${paper.subject}` : ''}
 Section: ${sec.title}${sec.instructions ? `\nInstructions: ${sec.instructions}` : ''}
 
 QUESTIONS:\n${questionsText}`;
-    const result = await model.generateContent(prompt);
-    const raw = result.response.text();
+    
+    const result = await model.generateContent({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    });
+    const raw = result.response.candidates?.[0]?.content?.parts?.[0]?.text || '';
     let parsed: any;
     try {
       parsed = JSON.parse(raw);
@@ -113,6 +165,10 @@ QUESTIONS:\n${questionsText}`;
     sections.push({ title: sec.title, solutions: adjusted });
   }
   return { sections };
+  } catch (error) {
+    console.error('[AI Service] Error generating solutions:', error);
+    throw new Error(`Failed to generate solutions: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
 }
 
 export async function extractTextFromPdf(buffer: Buffer, useVision = false): Promise<string> {
@@ -279,9 +335,14 @@ CRITICAL INSTRUCTIONS:
 - Do NOT paraphrase or simplify - copy verbatim
 - Match original difficulty level precisely`
     : `
-GENERATION MODE: Create original questions based on the study material provided.
-- Generate new, high-quality exam questions
-- Ensure questions test key concepts comprehensively`;
+🎯 GENERATION MODE: Create NEW, original questions based on the study material.
+CRITICAL INSTRUCTIONS:
+- Generate FRESH questions that test understanding of the concepts
+- DO NOT copy existing questions from the source material
+- Create questions that assess comprehension, application, and analysis
+- Ensure questions are pedagogically sound and exam-appropriate
+- Questions should be clear, unambiguous, and well-structured
+- Match the requested difficulty level: ${difficulty}`;
 
   const diagramInstructions = opts.hasDiagrams 
     ? `
@@ -414,11 +475,25 @@ Number of questions: ${count}
 ${mathInstructions}
 ${diagramInstructions}
 
+⚠️ CRITICAL JSON FORMATTING REQUIREMENTS:
+1. Return ONLY valid JSON - no markdown, no code blocks, no extra text before or after
+2. Use double quotes (") for all string values
+3. Escape special characters in strings:
+   - Backslash: \\ → \\\\
+   - Double quote: " → \\"
+   - Newline: remove or escape as \\n
+   - Tab: \\t
+4. LaTeX backslashes MUST be double-escaped in JSON strings:
+   - Write "$\\\\int$" not "$\\int$"
+   - Write "$\\\\frac{a}{b}$" not "$\\frac{a}{b}$"
+5. Do NOT include actual line breaks inside string values
+6. Ensure all brackets [], braces {}, parentheses () are properly matched and closed
+
 Return STRICT JSON with this schema:
 {
   "questions": [
     {
-      "text": string (with LaTeX math formatting),
+      "text": string (with LaTeX math formatting - DOUBLE-ESCAPE backslashes),
       "type": "mcq"|"truefalse"|"fill"|"short"|"long"|"assertionreason"|"integer",
       "options": [{ "text": string, "isCorrect": boolean }] | null,
       "correctAnswerText": string | null,
@@ -594,12 +669,27 @@ SOURCE MATERIAL (truncate if huge):\n"""\n${source.slice(0, 120_000)}\n"""`;
 }
 
 export async function generatePaperFromTextGemini(source: string, blueprint: PaperBlueprint): Promise<GeneratedPaperResult> {
-  const g = getGemini();
-  if (!g) throw new Error('Gemini API key not configured');
-  const model = g.getGenerativeModel({ model: 'gemini-2.5-pro' });
-  const prompt = buildPaperGenPrompt(source, blueprint);
-  const result = await model.generateContent(prompt);
-  const raw = result.response.text();
+  try {
+    console.log('[AI Service] Generating paper from text with Vertex AI...');
+    const vertexAI = getVertexAI();
+    const model = vertexAI.getGenerativeModel({
+      model: 'gemini-2.5-pro',
+      generationConfig: {
+        temperature: 0.7,
+        topP: 0.95,
+        topK: 40,
+        maxOutputTokens: 8192,
+      },
+    });
+    
+    const prompt = buildPaperGenPrompt(source, blueprint);
+    console.log(`[AI Service] Sending prompt (${prompt.length} chars)...`);
+    
+    const result = await model.generateContent({
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    });
+    const raw = result.response.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    console.log(`[AI Service] Received response (${raw.length} chars)`);
   let parsed: any;
   try {
     parsed = JSON.parse(raw);
@@ -637,6 +727,7 @@ export async function generatePaperFromTextGemini(source: string, blueprint: Pap
     } as GeneratedPaperSection;
   });
   const totalMarks = sections.reduce((sum, sec) => sum + sec.questions.length * (sec.marksPerQuestion || 1), 0);
+  console.log('[AI Service] Paper generation successful');
   return {
     examTitle: parsed.examTitle || blueprint.examTitle,
     subject: parsed.subject || blueprint.subject,
@@ -644,6 +735,10 @@ export async function generatePaperFromTextGemini(source: string, blueprint: Pap
     generalInstructions: Array.isArray(parsed.generalInstructions) ? parsed.generalInstructions.map((x: any) => String(x)).slice(0, 25) : [],
     sections,
   };
+  } catch (error) {
+    console.error('[AI Service] Error generating paper:', error);
+    throw new Error(`Failed to generate paper: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
 }
 
 // Enforce the blueprint by topping up missing questions per section and type.
@@ -769,8 +864,7 @@ async function enforceBlueprintOnSections(
 
 export async function generatePaperFromTextEnforced(source: string, blueprint: PaperBlueprint): Promise<GeneratedPaperResult> {
   // Initial attempt using structured paper generation
-  const g = getGemini();
-  if (!g) throw new Error('Gemini API key not configured');
+  // Now using Vertex AI instead of legacy Gemini SDK
   const guidance = await getGuidanceText(blueprint.subject, undefined);
   let initial: GeneratedPaperResult;
   try {
@@ -806,9 +900,19 @@ export async function generatePaperFromTextEnforced(source: string, blueprint: P
 }
 
 export async function refineQuestionGemini(original: Partial<IQuestion> & { notes?: string; desiredDifficulty?: Difficulty; constraints?: string }): Promise<Partial<IQuestion>> {
-  const g = getGemini();
-  if (!g) throw new Error('Gemini API key not configured');
-  const model = g.getGenerativeModel({ model: 'gemini-2.5-pro' });
+  try {
+    console.log('[AI Service] Refining question with Vertex AI...');
+    const vertexAI = getVertexAI();
+    const model = vertexAI.getGenerativeModel({
+      model: 'gemini-2.5-pro',
+      generationConfig: {
+        temperature: 0.7,
+        topP: 0.95,
+        topK: 40,
+        maxOutputTokens: 8192,
+      },
+    });
+  
   const prompt = `Refine the following question maintaining its core concept. Apply improvements: clarity, difficulty targeting, remove ambiguity. If MCQ ensure exactly 4 options & one correct. If assertionreason, maintain structure & booleans. Return ONLY JSON with schema { "text": string, "type": string, "options": [{"text":string,"isCorrect":boolean}]|null, "correctAnswerText": string|null, "integerAnswer": number|null, "assertion": string|null, "reason": string|null, "assertionIsTrue": boolean|null, "reasonIsTrue": boolean|null, "reasonExplainsAssertion": boolean|null, "explanation": string|null }.
 Original JSON:
 ${JSON.stringify(original)}
@@ -816,8 +920,10 @@ DesiredDifficulty: ${original.desiredDifficulty || 'unchanged'}
 ExtraConstraints: ${original.constraints || 'none'}
 Notes: ${original.notes || 'none'}
 `; 
-  const result = await model.generateContent(prompt);
-  const raw = result.response.text();
+  const result = await model.generateContent({
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+  });
+  const raw = result.response.candidates?.[0]?.content?.parts?.[0]?.text || '';
   let parsed: any; try { parsed = JSON.parse(raw); } catch { const m = raw.match(/\{[\s\S]*\}/); if (!m) throw new Error('Failed to parse refined question'); parsed = JSON.parse(m[0]); }
   return {
     text: String(parsed.text || original.text || '').trim(),
@@ -832,6 +938,10 @@ Notes: ${original.notes || 'none'}
     reasonExplainsAssertion: typeof parsed.reasonExplainsAssertion === 'boolean' ? parsed.reasonExplainsAssertion : original.reasonExplainsAssertion,
     explanation: parsed.explanation ? String(parsed.explanation) : original.explanation,
   };
+  } catch (error) {
+    console.error('[AI Service] Error refining question:', error);
+    throw new Error(`Failed to refine question: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
 }
 
 export async function generateQuestionsFromTextGemini(
@@ -841,9 +951,16 @@ export async function generateQuestionsFromTextGemini(
     isQuestionPaper?: boolean;
   }
 ): Promise<Partial<IQuestion>[]> {
-  const g = getGemini();
-  if (!g) throw new Error('Gemini API key not configured');
-  const model = g.getGenerativeModel({ model: 'gemini-2.5-pro' });
+  const vertexAI = getVertexAI();
+  const model = vertexAI.getGenerativeModel({
+    model: 'gemini-2.5-pro',
+    generationConfig: {
+      temperature: 0.8,
+      topP: 0.95,
+      topK: 40,
+      maxOutputTokens: 8192,
+    },
+  });
   
   const hasDiagrams = opts.diagrams && opts.diagrams.length > 0;
   const diagramDescriptions = opts.diagrams?.map(d => d.description) || [];
@@ -854,18 +971,57 @@ export async function generateQuestionsFromTextGemini(
     diagramDescriptions,
   });
   
-  const result = await model.generateContent(prompt);
-  const raw = result.response.text();
+  console.log('[AI Service] Generating questions with Vertex AI...');
+  const result = await model.generateContent({
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+  });
+  const raw = result.response.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  console.log(`[AI Service] Received response (${raw.length} chars)`);
+  
   let parsed: any;
   try {
+    // Try direct parse first
     parsed = JSON.parse(raw);
-  } catch {
-    // Try to salvage JSON from code fences if present
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error('Failed to parse model output as JSON');
-    parsed = JSON.parse(match[0]);
+  } catch (firstError) {
+    console.log('[AI Service] Direct JSON parse failed, trying to extract JSON...');
+    
+    // Try to extract JSON from markdown code blocks
+    const codeBlockMatch = raw.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+    if (codeBlockMatch) {
+      try {
+        parsed = JSON.parse(codeBlockMatch[1]);
+      } catch (e) {
+        console.log('[AI Service] Code block extraction failed');
+      }
+    }
+    
+    // Try to find any JSON object in the response
+    if (!parsed) {
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        try {
+          // Clean up common JSON issues
+          let cleanJson = jsonMatch[0]
+            .replace(/\n/g, '\\n')  // Escape newlines in strings
+            .replace(/\r/g, '')      // Remove carriage returns
+            .replace(/\t/g, '\\t');  // Escape tabs
+          
+          // Fix unescaped quotes in strings (basic attempt)
+          // This is tricky and may not catch all cases
+          parsed = JSON.parse(cleanJson);
+        } catch (e) {
+          console.error('[AI Service] All JSON parsing attempts failed');
+          console.error('[AI Service] Response snippet:', raw.substring(0, 500));
+          throw new Error(`Failed to parse model output as JSON. Error: ${firstError instanceof Error ? firstError.message : String(firstError)}`);
+        }
+      } else {
+        throw new Error('No JSON object found in model response');
+      }
+    }
   }
+  
   const items = Array.isArray(parsed?.questions) ? parsed.questions : [];
+  console.log(`[AI Service] Parsed ${items.length} questions`);
   
   // Create a map of diagrams for easy matching
   const diagramMap = new Map<string, { url?: string; description: string; altText: string }>();

@@ -113,6 +113,11 @@ export function sanitizeQuestionData(data: Partial<EnhancedQuestionData>): Parti
     sanitized.section = normalizeField(sanitized.section);
   }
   
+  // 5. Normalize question type
+  if (sanitized.type) {
+    sanitized.type = normalizeQuestionType(sanitized.type) as any;
+  }
+  
   return sanitized;
 }
 
@@ -196,6 +201,67 @@ function normalizeField(value: string): string {
     .join(' ');
   
   return normalized;
+}
+
+/**
+ * Normalize question type to match QuestionType enum
+ * Handles common variations and aliases
+ */
+function normalizeQuestionType(type: string): QuestionType {
+  if (!type) return 'mcq'; // default
+  
+  const normalized = type.toLowerCase().replace(/[_\s-]/g, '');
+  
+  // Map common variations to standard types
+  const typeMap: Record<string, QuestionType> = {
+    // MCQ variations
+    'mcq': 'mcq',
+    'multiplechoice': 'mcq',
+    'multiple': 'mcq',
+    'choice': 'mcq',
+    'objective': 'mcq',
+    'singlecorrect': 'mcq',
+    
+    // True/False variations
+    'truefalse': 'truefalse',
+    'true/false': 'truefalse',
+    'tf': 'truefalse',
+    'boolean': 'truefalse',
+    
+    // Fill in the blank variations
+    'fill': 'fill',
+    'fillblank': 'fill',
+    'fillintheblank': 'fill',
+    'fillup': 'fill',
+    'blank': 'fill',
+    
+    // Short answer variations
+    'short': 'short',
+    'shortanswer': 'short',
+    'sa': 'short',
+    'brief': 'short',
+    
+    // Long answer variations
+    'long': 'long',
+    'longanswer': 'long',
+    'la': 'long',
+    'essay': 'long',
+    'descriptive': 'long',
+    
+    // Assertion-Reason variations
+    'assertionreason': 'assertionreason',
+    'assertion': 'assertionreason',
+    'ar': 'assertionreason',
+    'assertionreasontype': 'assertionreason',
+    
+    // Integer variations
+    'integer': 'integer',
+    'integertype': 'integer',
+    'numerical': 'integer',
+    'numeric': 'integer',
+  };
+  
+  return typeMap[normalized] || 'mcq'; // default to mcq if unknown
 }
 
 // Escape regex special characters in a string
@@ -295,36 +361,13 @@ export function validateQuestionData(data: Partial<EnhancedQuestionData>): boole
     if (!data.options || !Array.isArray(data.options) || data.options.length < 2) {
       throw new Error(`${data.type} questions must have at least 2 options`);
     }
-    
-    // Check for at least one correct answer
-    const hasCorrect = data.options.some(opt => opt.isCorrect === true);
-    if (!hasCorrect) {
-      // SKIP instead of throwing error to avoid 500s
-      console.warn(`[Validation] Skipping ${data.type} question without correct answer: ${data.text?.substring(0, 50)}...`);
-      return false;
-    }
-  }
-  
-  if (data.type === 'integer') {
-    if (data.integerAnswer === undefined || data.integerAnswer === null) {
-      // SKIP instead of throwing error
-      console.warn(`[Validation] Skipping integer question without answer: ${data.text?.substring(0, 50)}...`);
-      return false;
-    }
+    // Note: We no longer validate if answers are present - questions can be saved without answers
   }
   
   if (data.type === 'assertionreason') {
     if (!data.assertion || !data.reason) {
-      // SKIP instead of throwing error
-      console.warn(`[Validation] Skipping assertion-reason question with missing assertion/reason: ${data.text?.substring(0, 50)}...`);
-      return false;
+      throw new Error('Assertion-Reason questions must have both assertion and reason');
     }
-  }
-  
-  // For fill/short/long types, if correctAnswerText is completely empty, skip
-  if (['fill', 'short', 'long'].includes(data.type) && !data.correctAnswerText?.trim()) {
-    console.warn(`[Validation] Skipping ${data.type} question without answer: ${data.text?.substring(0, 50)}...`);
-    return false;
   }
   
   // Difficulty must be valid
@@ -391,7 +434,8 @@ export async function saveValidatedQuestion(
     section: sanitized.section,
     marks: sanitized.marks,
     difficulty: sanitized.difficulty || 'medium',
-    source: sanitized.source || 'Smart Import',
+    // Normalize source to match enum values (handle legacy 'Import' value)
+    source: (sanitized.source as any) === 'Import' ? 'Smart Import' : (sanitized.source || 'Smart Import'),
   };
   
   // 5. Save to class-wise collection (e.g., class_10, class_11, class_12)

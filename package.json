@@ -16,6 +16,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@google-cloud/vertexai": "^1.10.0",
     "@google-cloud/vision": "^5.3.4",
     "@google/generative-ai": "^0.24.1",
     "@heroicons/react": "^2.2.0",
@@ -28,7 +29,7 @@
     "dotenv": "^17.2.2",
     "express": "^5.1.0",
     "firebase-admin": "^12.6.0",
-    "groq-sdk": "^0.32.0",
+    "groq-sdk": "^0.34.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
     "katex": "^0.16.11",

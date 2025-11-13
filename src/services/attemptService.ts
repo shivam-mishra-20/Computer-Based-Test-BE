@@ -5,23 +5,35 @@ import Question, { IQuestion } from '../models/Question';
 import Attempt, { IAnswerItem } from '../models/Attempt';
 import { computeMaxScoreForExam, sanitizeQuestion, shuffleArray } from '../utils/exam';
 import { gradeSubjectiveAnswerGroq } from './aiService';
+import { getClassQuestionModel } from '../models/ClassQuestion';
 
 export async function listAssignedExams(userId: string) {
-  // Published exams assigned to this user, matching user's class/batch via groups, or open-window exams
-  const now = new Date();
+  // Published exams assigned to this user: must match user's classLevel AND (batch OR "All Batches" OR explicitly assigned)
   const user = await User.findById(userId).select('classLevel batch');
-  const groupLabels = [] as string[];
-  if (user?.classLevel) groupLabels.push(user.classLevel);
-  if (user?.batch) groupLabels.push(user.batch);
+  if (!user) throw new Error('User not found');
+  
+  // Normalize classLevel to handle both "9" and "Class 9" formats
+  const userClass = user.classLevel || '';
+  const classVariants = [
+    userClass,
+    userClass.replace(/^Class\s*/i, ''), // "Class 9" -> "9"
+    `Class ${userClass}`, // "9" -> "Class 9"
+  ].filter(Boolean);
+  
   const exams = await Exam.find({
     isPublished: true,
     $or: [
+      // Explicitly assigned to this user
       { 'assignedTo.users': new Types.ObjectId(userId) },
-      ...(groupLabels.length ? [{ 'assignedTo.groups': { $in: groupLabels } }] : []),
-      // also include exams targeted by top-level class/batch
-      ...(user?.classLevel ? [{ classLevel: user.classLevel }] : []),
-      ...(user?.batch ? [{ batch: user.batch }] : []),
-      { 'schedule.startAt': { $lte: now }, 'schedule.endAt': { $gte: now } },
+      // Class and batch match (including "All Batches")
+      {
+        classLevel: { $in: classVariants },
+        $or: [
+          { batch: user.batch },
+          { batch: 'All Batches' },
+          { 'assignedTo.groups': { $in: [user.classLevel, user.batch].filter(Boolean) } },
+        ],
+      },
     ],
   }).sort({ createdAt: -1 });
   return exams;
@@ -38,8 +50,12 @@ export async function startAttempt(examId: string, userId: string) {
   const explicitUser = (exam.assignedTo?.users || []).some((u) => u.toString() === userId.toString());
   const groupLabels = new Set<string>([user?.classLevel || '', user?.batch || ''].filter(Boolean));
   const inGroups = (exam.assignedTo?.groups || []).some((g) => groupLabels.has(g));
-  const classMatch = !!(user?.classLevel && exam.classLevel && exam.classLevel === user.classLevel);
-  const batchMatch = !!(user?.batch && exam.batch && exam.batch === user.batch);
+  // Handle both "9" and "Class 9" formats
+  const normalizeClass = (cls?: string) => cls?.replace(/^Class\s*/i, '').trim().toLowerCase() || '';
+  const classMatch = !!(user?.classLevel && exam.classLevel && 
+    normalizeClass(exam.classLevel) === normalizeClass(user.classLevel));
+  const batchMatch = !!(user?.batch && exam.batch && 
+    (exam.batch === user.batch || exam.batch === 'All Batches'));
   const targeted = explicitUser || inGroups || classMatch || batchMatch;
   const canAccess = exam.isPublished && (
     (targeted && (!hasSchedule || openWindow)) ||
@@ -50,9 +66,15 @@ export async function startAttempt(examId: string, userId: string) {
   let attempt = await Attempt.findOne({ examId, userId });
   if (attempt) return attempt;
 
-  // Load questions
+  // Load questions from class-specific collection
   const qids = exam.sections.flatMap((s) => s.questionIds.map((id) => id.toString()));
-  const questions = await Question.find({ _id: { $in: qids } });
+  let questions: IQuestion[];
+  if (exam.classLevel) {
+    const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
+    questions = await ClassQuestionModel.find({ _id: { $in: qids } });
+  } else {
+    questions = await Question.find({ _id: { $in: qids } });
+  }
   const qmap = new Map<string, IQuestion>(questions.map((q) => [(q as any)._id.toString(), q]));
 
   // Build snapshot with randomization
@@ -93,7 +115,13 @@ export async function getAttemptView(attemptId: string, userId: string) {
   const exam = await Exam.findById(attempt.examId);
   if (!exam) throw new Error('Exam not found');
   const qids = exam.sections.flatMap((s) => s.questionIds);
-  const questions = await Question.find({ _id: { $in: qids } });
+  let questions: IQuestion[];
+  if (exam.classLevel) {
+    const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
+    questions = await ClassQuestionModel.find({ _id: { $in: qids } });
+  } else {
+    questions = await Question.find({ _id: { $in: qids } });
+  }
   const qmap = new Map<string, IQuestion>(questions.map((q) => [(q as any)._id.toString(), q]));
 
   // Build sanitized view per snapshot order
@@ -125,12 +153,18 @@ export async function getAttemptView(attemptId: string, userId: string) {
 }
 
 export async function getAttemptViewForTeacher(attemptId: string) {
-  const attempt = await Attempt.findById(attemptId);
+  const attempt = await Attempt.findById(attemptId).populate('userId', 'name email classLevel batch firebaseUid');
   if (!attempt) throw new Error('Attempt not found');
   const exam = await Exam.findById(attempt.examId);
   if (!exam) throw new Error('Exam not found');
   const qids = exam.sections.flatMap((s) => s.questionIds);
-  const questions = await Question.find({ _id: { $in: qids } });
+  let questions: IQuestion[];
+  if (exam.classLevel) {
+    const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
+    questions = await ClassQuestionModel.find({ _id: { $in: qids } });
+  } else {
+    questions = await Question.find({ _id: { $in: qids } });
+  }
   const qmap = new Map<string, IQuestion>(questions.map((q) => [(q as any)._id.toString(), q]));
   const sections = exam.sections.map((s) => ({
     _id: s._id,
@@ -244,7 +278,13 @@ export async function submitAttempt(attemptId: string, userId: string, auto = fa
     }
   }
   const qids = exam.sections.flatMap((s) => s.questionIds);
-  const questions = await Question.find({ _id: { $in: qids } });
+  let questions: IQuestion[];
+  if (exam.classLevel) {
+    const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
+    questions = await ClassQuestionModel.find({ _id: { $in: qids } });
+  } else {
+    questions = await Question.find({ _id: { $in: qids } });
+  }
   const qmap = new Map<string, IQuestion>(questions.map((q) => [(q as any)._id.toString(), q]));
 
   let total = 0;
@@ -295,10 +335,13 @@ export async function publishResult(attemptId: string, publish = true) {
 }
 
 export async function listPendingReviewAttempts() {
-  return Attempt.find({ submittedAt: { $ne: null }, resultPublished: { $ne: true } })
+  const attempts = await Attempt.find({ submittedAt: { $ne: null }, resultPublished: { $ne: true } })
+    .populate('userId', 'name email classLevel batch firebaseUid')
+    .populate('examId', 'title')
     .sort({ submittedAt: -1 })
     .limit(100)
     .lean();
+  return attempts;
 }
 
 export async function adjustAnswerScore(attemptId: string, answerId: string, score: number, feedback?: string) {
@@ -353,7 +396,13 @@ export async function nextAdaptiveQuestion(attemptId: string, userId: string) {
 
   // Gather pool
   const qids = exam.sections.flatMap((s) => s.questionIds);
-  const questions = await Question.find({ _id: { $in: qids } });
+  let questions: IQuestion[];
+  if (exam.classLevel) {
+    const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
+    questions = await ClassQuestionModel.find({ _id: { $in: qids } });
+  } else {
+    questions = await Question.find({ _id: { $in: qids } });
+  }
   const askedSet = new Set((attempt.snapshot.adaptiveState?.asked || []).map((id) => id.toString()));
 
   // Determine current difficulty based on last answer

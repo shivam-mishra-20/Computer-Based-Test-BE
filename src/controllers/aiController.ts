@@ -5,16 +5,29 @@ import { extractTextFromPdf, extractTextFromImage, generateQuestionsFromTextGemi
 import { saveBatchValidatedQuestions, type EnhancedQuestionData } from '../services/questionValidationService';
 import Guidance from '../models/Guidance';
 import type { PaperBlueprint } from '../services/aiService';
+import { 
+  generateQuestionsFromPDF, 
+  generateQuestionsFromImage, 
+  generateQuestionsFromDirectText,
+  type AIGenerationOptions,
+  type GeneratedQuestion 
+} from '../services/aiQuestionGenerationService';
 
 export const generateFromPdf = async (req: Request, res: Response) => {
   try {
     const anyFiles = (req as any).files as any[] | undefined;
     const single = (req as any).file as { buffer: Buffer } | undefined;
     const file = single || (Array.isArray(anyFiles) && anyFiles.find((f) => f.fieldname === 'pdf'));
-    if (!file) return res.status(400).json({ message: 'PDF file is required' });
+    if (!file) {
+      console.error('[AI Controller] No PDF file provided');
+      return res.status(400).json({ message: 'PDF file is required' });
+    }
+    
+    console.log('[AI Controller] Starting PDF generation process...');
     
     // Step 1: Extract text from PDF
     const text = await extractTextFromPdf(file.buffer);
+    console.log(`[AI Controller] Extracted ${text.length} characters from PDF`);
     
     // Step 2: Analyze document to determine if it's a question paper
     const { analyzeDocument } = await import('../services/documentAnalysisService');
@@ -231,23 +244,47 @@ export const generatePaper = async (req: Request, res: Response) => {
 // Generate paper from uploaded PDF
 export const generatePaperFromPdf = async (req: Request, res: Response) => {
   try {
+    console.log('[AI Controller] generatePaperFromPdf started');
     const files: any[] | undefined = (req as any).files;
     let file = files && files.length ? files[0] : undefined;
     if (!file && Array.isArray(files)) {
       file = files.find(f => f.fieldname === 'file' || f.fieldname === 'pdf');
     }
-    if (!file) return res.status(400).json({ message: 'PDF file required' });
+    if (!file) {
+      console.error('[AI Controller] No PDF file provided');
+      return res.status(400).json({ message: 'PDF file required' });
+    }
+    
     let { blueprint } = req.body as { blueprint: any };
     if (typeof blueprint === 'string') {
-      try { blueprint = JSON.parse(blueprint); } catch { /* ignore */ }
+      try { blueprint = JSON.parse(blueprint); } catch (e) { 
+        console.error('[AI Controller] Failed to parse blueprint:', e);
+      }
     }
-    if (!blueprint || !Array.isArray(blueprint.sections) || blueprint.sections.length === 0) return res.status(400).json({ message: 'Blueprint with at least one section required' });
+    if (!blueprint || !Array.isArray(blueprint.sections) || blueprint.sections.length === 0) {
+      console.error('[AI Controller] Invalid blueprint');
+      return res.status(400).json({ message: 'Blueprint with at least one section required' });
+    }
+    
+    console.log('[AI Controller] Extracting text from PDF...');
     const text = await extractTextFromPdf(file.buffer);
-    if (!text || text.trim().length < 100) return res.status(400).json({ message: 'Extracted text insufficient (<100 chars)' });
-  const guidance = await getGuidanceText(blueprint.subject, undefined);
-  const paper = await generatePaperFromTextEnforced(text, { ...(blueprint as any), __guidance: guidance } as any);
+    console.log(`[AI Controller] Extracted ${text.length} characters`);
+    
+    if (!text || text.trim().length < 100) {
+      console.error('[AI Controller] Insufficient text extracted');
+      return res.status(400).json({ message: 'Extracted text insufficient (<100 chars)' });
+    }
+    
+    console.log('[AI Controller] Getting guidance...');
+    const guidance = await getGuidanceText(blueprint.subject, undefined);
+    
+    console.log('[AI Controller] Generating paper...');
+    const paper = await generatePaperFromTextEnforced(text, { ...(blueprint as any), __guidance: guidance } as any);
+    
+    console.log('[AI Controller] Paper generated successfully');
     res.json(paper);
   } catch (err: any) {
+    console.error('[AI Controller] Error in generatePaperFromPdf:', err);
     res.status(400).json({ message: err.message || 'Paper PDF generation failed' });
   }
 };
@@ -322,4 +359,293 @@ export const deleteGuidance = async (req: Request, res: Response) => {
   const { id } = req.params as any;
   await Guidance.findByIdAndDelete(id);
   res.json({ message: 'Deleted' });
+};
+
+/**
+ * NEW AI TOOLS - Generate questions from PDF (with preview)
+ * Matches Smart Import workflow
+ */
+export const aiGenerateFromPDF = async (req: Request, res: Response) => {
+  try {
+    const file = (req as any).file as { buffer: Buffer } | undefined;
+    if (!file) {
+      return res.status(400).json({ success: false, message: 'PDF file is required' });
+    }
+    
+    const userId = (req as any).user.id;
+    const {
+      subject,
+      class: className,
+      topic,
+      board,
+      chapter,
+      section,
+      marks,
+      count,
+      difficulty,
+      questionTypes,
+    } = req.body;
+    
+    // Validate required fields
+    if (!subject || !className) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Subject and Class are required' 
+      });
+    }
+    
+    if (!count || isNaN(Number(count)) || Number(count) < 1) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Valid question count is required' 
+      });
+    }
+    
+    const options: AIGenerationOptions = {
+      subject: subject.trim(),
+      class: className.trim(),
+      topic: topic?.trim(),
+      board: board?.trim(),
+      chapter: chapter?.trim(),
+      section: section?.trim(),
+      marks: marks ? Number(marks) : undefined,
+      count: Number(count),
+      difficulty: difficulty || 'mixed',
+      questionTypes: questionTypes ? questionTypes.split(',').map((t: string) => t.trim()) : undefined,
+      createdBy: new Types.ObjectId(userId),
+    };
+    
+    console.log('[AI Tools] Generating questions from PDF:', options);
+    
+    const result = await generateQuestionsFromPDF(file.buffer, options);
+    
+    // Format response for preview (similar to Smart Import)
+    const previewQuestions = result.questions.map((q, index) => ({
+      _id: new Types.ObjectId().toString(),
+      questionNumber: index + 1,
+      text: q.text,
+      type: q.type,
+      options: q.options,
+      correctAnswerText: q.correctAnswerText,
+      integerAnswer: q.integerAnswer,
+      assertion: q.assertion,
+      reason: q.reason,
+      assertionIsTrue: q.assertionIsTrue,
+      reasonIsTrue: q.reasonIsTrue,
+      reasonExplainsAssertion: q.reasonExplainsAssertion,
+      difficulty: q.difficulty || 'medium',
+      confidence: q.confidence || 0.85,
+      needsReview: q.needsReview || false,
+      status: 'pending' as const,
+    }));
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        questions: previewQuestions,
+        metadata: result.metadata,
+        formData: options, // Return form data for reference
+      }
+    });
+  } catch (error) {
+    console.error('[AI Tools] PDF generation error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate questions from PDF',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+};
+
+/**
+ * NEW AI TOOLS - Generate questions from Image (with preview)
+ */
+export const aiGenerateFromImage = async (req: Request, res: Response) => {
+  try {
+    const file = (req as any).file as { buffer: Buffer } | undefined;
+    if (!file) {
+      return res.status(400).json({ success: false, message: 'Image file is required' });
+    }
+    
+    const userId = (req as any).user.id;
+    const {
+      subject,
+      class: className,
+      topic,
+      board,
+      chapter,
+      section,
+      marks,
+      count,
+      difficulty,
+      questionTypes,
+    } = req.body;
+    
+    // Validate required fields
+    if (!subject || !className) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Subject and Class are required' 
+      });
+    }
+    
+    if (!count || isNaN(Number(count)) || Number(count) < 1) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Valid question count is required' 
+      });
+    }
+    
+    const options: AIGenerationOptions = {
+      subject: subject.trim(),
+      class: className.trim(),
+      topic: topic?.trim(),
+      board: board?.trim(),
+      chapter: chapter?.trim(),
+      section: section?.trim(),
+      marks: marks ? Number(marks) : undefined,
+      count: Number(count),
+      difficulty: difficulty || 'mixed',
+      questionTypes: questionTypes ? questionTypes.split(',').map((t: string) => t.trim()) : undefined,
+      createdBy: new Types.ObjectId(userId),
+    };
+    
+    console.log('[AI Tools] Generating questions from Image:', options);
+    
+    const result = await generateQuestionsFromImage(file.buffer, options);
+    
+    // Format response for preview (similar to Smart Import)
+    const previewQuestions = result.questions.map((q, index) => ({
+      _id: new Types.ObjectId().toString(),
+      questionNumber: index + 1,
+      text: q.text,
+      type: q.type,
+      options: q.options,
+      correctAnswerText: q.correctAnswerText,
+      integerAnswer: q.integerAnswer,
+      assertion: q.assertion,
+      reason: q.reason,
+      assertionIsTrue: q.assertionIsTrue,
+      reasonIsTrue: q.reasonIsTrue,
+      reasonExplainsAssertion: q.reasonExplainsAssertion,
+      difficulty: q.difficulty || 'medium',
+      confidence: q.confidence || 0.85,
+      needsReview: q.needsReview || false,
+      status: 'pending' as const,
+    }));
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        questions: previewQuestions,
+        metadata: result.metadata,
+        formData: options, // Return form data for reference
+      }
+    });
+  } catch (error) {
+    console.error('[AI Tools] Image generation error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate questions from image',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+};
+
+/**
+ * NEW AI TOOLS - Generate questions from text input (with preview)
+ */
+export const aiGenerateFromText = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user.id;
+    const {
+      text,
+      subject,
+      class: className,
+      topic,
+      board,
+      chapter,
+      section,
+      marks,
+      count,
+      difficulty,
+      questionTypes,
+    } = req.body;
+    
+    // Validate required fields
+    if (!text || text.trim().length < 50) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Text content is required (minimum 50 characters)' 
+      });
+    }
+    
+    if (!subject || !className) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Subject and Class are required' 
+      });
+    }
+    
+    if (!count || isNaN(Number(count)) || Number(count) < 1) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Valid question count is required' 
+      });
+    }
+    
+    const options: AIGenerationOptions = {
+      subject: subject.trim(),
+      class: className.trim(),
+      topic: topic?.trim(),
+      board: board?.trim(),
+      chapter: chapter?.trim(),
+      section: section?.trim(),
+      marks: marks ? Number(marks) : undefined,
+      count: Number(count),
+      difficulty: difficulty || 'mixed',
+      questionTypes: questionTypes ? questionTypes.split(',').map((t: string) => t.trim()) : undefined,
+      createdBy: new Types.ObjectId(userId),
+    };
+    
+    console.log('[AI Tools] Generating questions from text:', options);
+    
+    const result = await generateQuestionsFromDirectText(text.trim(), options);
+    
+    // Format response for preview (similar to Smart Import)
+    const previewQuestions = result.questions.map((q, index) => ({
+      _id: new Types.ObjectId().toString(),
+      questionNumber: index + 1,
+      text: q.text,
+      type: q.type,
+      options: q.options,
+      correctAnswerText: q.correctAnswerText,
+      integerAnswer: q.integerAnswer,
+      assertion: q.assertion,
+      reason: q.reason,
+      assertionIsTrue: q.assertionIsTrue,
+      reasonIsTrue: q.reasonIsTrue,
+      reasonExplainsAssertion: q.reasonExplainsAssertion,
+      difficulty: q.difficulty || 'medium',
+      confidence: q.confidence || 0.85,
+      needsReview: q.needsReview || false,
+      status: 'pending' as const,
+    }));
+    
+    res.status(200).json({
+      success: true,
+      data: {
+        questions: previewQuestions,
+        metadata: result.metadata,
+        formData: options, // Return form data for reference
+      }
+    });
+  } catch (error) {
+    console.error('[AI Tools] Text generation error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to generate questions from text',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
 };

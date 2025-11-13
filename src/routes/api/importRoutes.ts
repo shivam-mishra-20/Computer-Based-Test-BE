@@ -58,7 +58,7 @@ const upload = multer({
  */
 router.post('/import-paper', authMiddleware, upload.single('questionPaper'), async (req, res) => {
   try {
-  const { subject, topic, ocrProvider = 'tesseract', mode, model = 'gemini-2.0-flash-exp', class: className, board, chapter, section, marks } = req.body;
+  const { subject, topic, ocrProvider = 'tesseract', mode, model = 'gemini-2.5-flash', class: className, board, chapter, section, marks } = req.body;
     const userId = (req as any).user.id;
     
     if (!req.file) {

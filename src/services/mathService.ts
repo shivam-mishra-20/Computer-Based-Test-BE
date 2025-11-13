@@ -20,7 +20,8 @@ function getGemini() {
 export async function normalizeMathematicalExpressions(text: string): Promise<string> {
   const g = getGemini();
   if (!g) {
-    console.warn('Gemini API not configured for math normalization');
+    // Silently return original text if Gemini API is not configured
+    // LaTeX normalization is already handled by Vertex AI in import pipeline
     return text;
   }
 

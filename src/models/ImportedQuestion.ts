@@ -191,7 +191,7 @@ const importBatchSchema = new Schema<IImportBatch>(
     }],
     
   ocrProvider: { type: String, enum: ['google-vision', 'groq', 'gemini', 'tesseract'], default: 'google-vision' },
-    processingModel: { type: String, default: 'gemini-2.5-pro' },
+    processingModel: { type: String, default: 'vertex-ai-gemini-2.5-flash' },
     totalProcessingTime: { type: Number },
     
     uploadedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true }

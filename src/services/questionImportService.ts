@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { VertexAI } from '@google-cloud/vertexai';
 import { ImageAnnotatorClient } from '@google-cloud/vision';
 import fs from 'fs';
 import path from 'path';
@@ -12,24 +12,43 @@ import { normalizeMathematicalExpressions } from './mathService';
 
 dotenv.config();
 
-const GEMINI_API_KEY = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
-const VISION_KEY_PATH = process.env.VISION_API_KEY || './vision-key.json';
+// Google Cloud configuration - Single service account for Vision API + Vertex AI
+const GOOGLE_CREDENTIALS = process.env.GOOGLE_APPLICATION_CREDENTIALS || './vision-key.json';
+const GOOGLE_PROJECT = process.env.GOOGLE_CLOUD_PROJECT || 'cbt-vision-api';
+const GOOGLE_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
 
-// Initialize clients
-let genAI: GoogleGenerativeAI | null = null;
+// Initialize clients (lazy loading)
+let vertexAI: VertexAI | null = null;
 let visionClient: ImageAnnotatorClient | null = null;
 
-function getGemini() {
-  if (!GEMINI_API_KEY) throw new Error('GEMINI_API_KEY not configured');
-  if (!genAI) genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-  return genAI;
+/**
+ * Get or initialize Vertex AI client for Gemini LLM
+ * Uses the same service account credentials as Vision API
+ */
+function getVertexAI(): VertexAI {
+  if (!vertexAI) {
+    vertexAI = new VertexAI({
+      project: GOOGLE_PROJECT,
+      location: GOOGLE_LOCATION,
+      googleAuthOptions: {
+        keyFilename: GOOGLE_CREDENTIALS
+      }
+    });
+    console.log(`[Vertex AI] Initialized with project: ${GOOGLE_PROJECT}, location: ${GOOGLE_LOCATION}`);
+  }
+  return vertexAI;
 }
 
-function getVisionClient() {
+/**
+ * Get or initialize Vision API client for OCR
+ * Uses the same service account credentials as Vertex AI
+ */
+function getVisionClient(): ImageAnnotatorClient {
   if (!visionClient) {
     visionClient = new ImageAnnotatorClient({
-      keyFilename: VISION_KEY_PATH
+      keyFilename: GOOGLE_CREDENTIALS
     });
+    console.log('[Vision API] Initialized with service account');
   }
   return visionClient;
 }
@@ -81,15 +100,25 @@ export class QuestionImportService {
       chapter?: string;
       section?: string;
       marks?: number;
-      model?: string;
+      model?: 'gemini-2.5-flash' | 'gemini-2.5-pro' | 'gemini-2.0-flash';
     } = {}
   ): Promise<ImportResult> {
     const startTime = Date.now();
-    const selectedModel = options.model || 'gemini-2.0-flash-exp';
+    // Default to Flash for speed, Pro for complex papers
+    let selectedModel = options.model || 'gemini-2.5-flash';
+    
+    console.log(`[Import] DEBUG: Received model = "${selectedModel}"`);
+    
+    // Strip "publishers/google/models/" prefix if present (frontend may send full path)
+    if (selectedModel.includes('/')) {
+      const originalModel = selectedModel;
+      selectedModel = (selectedModel.split('/').pop() || 'gemini-2.5-flash') as typeof selectedModel;
+      console.log(`[Import] DEBUG: Stripped "${originalModel}" → "${selectedModel}"`);
+    }
     
     try {
       console.log(`[Import] Starting import for file: ${fileName}`);
-      console.log(`[Import] Pipeline: Google Cloud Vision API → ${selectedModel}`);
+      console.log(`[Import] Pipeline: Google Cloud Vision API → Vertex AI ${selectedModel}`);
       
       // Create import batch
       const fileStats = fs.statSync(filePath);
@@ -101,7 +130,7 @@ export class QuestionImportService {
         status: 'processing',
         processingStarted: new Date(),
         ocrProvider: 'google-vision',
-        processingModel: selectedModel,
+        processingModel: `vertex-ai-${selectedModel}`,
         uploadedBy
       });
       
@@ -125,14 +154,18 @@ export class QuestionImportService {
       }
 
       console.log(`[Import] Vision API extracted ${extractedText.length} characters from ${totalPages} page(s)`);
+      
+      // Log a preview of extracted text for debugging
+      const textPreview = extractedText.slice(0, 200).replace(/\n/g, ' ');
+      console.log(`[Import] Text preview: ${textPreview}...`);
 
       // Update batch with page count
       batch.totalPages = totalPages;
       await batch.save();
 
-      // Step 2: Structure questions using selected Gemini model
-      console.log(`[Import] Step 2: Structuring questions with ${selectedModel}...`);
-      const questions = await this.structureQuestionsWithGemini(
+      // Step 2: Structure questions using Vertex AI Gemini
+      console.log(`[Import] Step 2: Structuring questions with Vertex AI ${selectedModel}...`);
+      const questions = await this.structureQuestionsWithVertexAI(
         extractedText,
         {
           subject: options.subject,
@@ -142,7 +175,7 @@ export class QuestionImportService {
         }
       );
 
-      console.log(`[Import] ${selectedModel} structured ${questions.length} questions`);
+      console.log(`[Import] Vertex AI ${selectedModel} structured ${questions.length} questions`);
 
       // Step 3: Normalize mathematical expressions in all questions
       console.log(`[Import] Step 3: Normalizing mathematical expressions...`);
@@ -267,7 +300,7 @@ export class QuestionImportService {
 
   /**
    * Extract text from PDF using Google Cloud Vision API
-   * Converts each PDF page to image and processes with Vision API
+   * Uses Vision API's native PDF support via asyncBatchAnnotateFiles
    */
   private static async extractTextFromPDFWithVision(filePath: string): Promise<{ text: string; pages: number }> {
     try {
@@ -281,46 +314,48 @@ export class QuestionImportService {
       console.log(`[Vision API PDF] PDF has ${numPages} pages`);
 
       const client = getVisionClient();
-      const pageTexts: string[] = [];
+      
+      // Read the PDF file
+      const pdfBuffer = await fs.promises.readFile(filePath);
 
-      // Process each page
-      for (let pageIndex = 0; pageIndex < numPages; pageIndex++) {
-        try {
-          console.log(`[Vision API PDF] Processing page ${pageIndex + 1}/${numPages}...`);
-          
-          // Convert PDF page to high-quality PNG
-          const tmpPngPath = path.join(path.dirname(filePath), `__vision_page_${pageIndex}.png`);
-          
-          await sharp(filePath, { page: pageIndex, density: 300 })
-            .ensureAlpha()
-            .png()
-            .toFile(tmpPngPath);
-          
-          // Read the generated image
-          const imageBuffer = await fs.promises.readFile(tmpPngPath);
-          
-          // Perform document text detection
-          const [result] = await client.documentTextDetection({
-            image: { content: imageBuffer }
-          });
-          
-          const fullText = result.fullTextAnnotation;
-          if (fullText && fullText.text) {
-            pageTexts.push(fullText.text);
-            console.log(`[Vision API PDF] Page ${pageIndex + 1}: extracted ${fullText.text.length} chars`);
-          } else {
-            console.warn(`[Vision API PDF] Page ${pageIndex + 1}: no text detected`);
-            pageTexts.push('');
+      console.log(`[Vision API PDF] Processing PDF with Vision API...`);
+
+      // Use batchAnnotateFiles for synchronous PDF processing
+      // Note: This processes all pages in one request
+      const request = {
+        requests: [
+          {
+            inputConfig: {
+              content: pdfBuffer,
+              mimeType: 'application/pdf',
+            },
+            features: [{ type: 'DOCUMENT_TEXT_DETECTION' as const }],
+            pages: Array.from({ length: numPages }, (_, i) => i + 1), // Process all pages
+          },
+        ],
+      };
+
+      const [response] = await client.batchAnnotateFiles(request);
+      
+      if (!response.responses || response.responses.length === 0) {
+        console.warn(`[Vision API PDF] No responses from Vision API`);
+        return { text: '', pages: numPages };
+      }
+
+      const pageTexts: string[] = [];
+      
+      // Extract text from each page response
+      for (const fileResponse of response.responses) {
+        if (fileResponse.responses) {
+          for (const pageResponse of fileResponse.responses) {
+            const fullText = pageResponse.fullTextAnnotation;
+            if (fullText && fullText.text) {
+              pageTexts.push(fullText.text);
+              console.log(`[Vision API PDF] Extracted ${fullText.text.length} chars from page`);
+            } else {
+              pageTexts.push('');
+            }
           }
-          
-          // Clean up temp file
-          try {
-            await fs.promises.unlink(tmpPngPath);
-          } catch {}
-          
-        } catch (pageError) {
-          console.error(`[Vision API PDF] Error on page ${pageIndex + 1}:`, pageError);
-          pageTexts.push('');
         }
       }
 
@@ -328,7 +363,7 @@ export class QuestionImportService {
         .map((text, idx) => `\n\n=== PAGE ${idx + 1} ===\n${text}`)
         .join('\n');
 
-      console.log(`[Vision API PDF] Total extracted: ${combinedText.length} characters`);
+      console.log(`[Vision API PDF] Total extracted: ${combinedText.length} characters from ${pageTexts.length} pages`);
 
       return {
         text: combinedText,
@@ -337,173 +372,21 @@ export class QuestionImportService {
       
     } catch (error) {
       console.error('[Vision API PDF] Fatal error:', error);
-      throw new Error(`Vision API PDF extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  }
-
-  /**
-   * Extract text from PDF using Gemini Vision API for maximum accuracy
-   * Converts PDF pages to images and processes with Gemini
-   */
-  private static async extractTextFromPDFWithGemini(filePath: string): Promise<{ text: string; pages: number }> {
-    try {
-      console.log(`[Gemini PDF] Processing PDF: ${filePath}`);
       
-      // First get page count
-      const dataBuffer = await fs.promises.readFile(filePath);
-      const pdfData = await pdfParse(dataBuffer as any);
-      const numPages = pdfData.numpages || 1;
-      
-      console.log(`[Gemini PDF] PDF has ${numPages} pages`);
-
-      const pageTexts: string[] = [];
-      const genAI = getGemini();
-      const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
-
-      // Process each page
-      for (let pageIndex = 0; pageIndex < Math.min(numPages, 50); pageIndex++) {
-        try {
-          console.log(`[Gemini PDF] Processing page ${pageIndex + 1}/${numPages}`);
-          
-          // Convert PDF page to image using sharp
-          const tmpPngPath = path.join(path.dirname(filePath), `__pdf_page_${pageIndex}_${Date.now()}.png`);
-          
-          await sharp(filePath, { page: pageIndex, density: 300 })
-            .png()
-            .toFile(tmpPngPath);
-
-          try {
-            // Process with Gemini Vision
-            const imageBuffer = await fs.promises.readFile(tmpPngPath);
-            const imagePart = {
-              inlineData: {
-                data: imageBuffer.toString('base64'),
-                mimeType: 'image/png'
-              }
-            };
-
-            const prompt = `Extract ALL text from this page of a question paper with MAXIMUM ACCURACY. 
-
-CRITICAL REQUIREMENTS:
-1. Extract EVERY word, number, and symbol exactly as shown
-2. Preserve question numbering (Q1, 1., etc.)
-3. Maintain option labels (a), b), c), d) or A, B, C, D
-4. Include instructions, marks allocation, and section headers
-5. For mathematical expressions:
-   - Extract them accurately
-   - Use standard notation (x^2 for powers, / for fractions initially)
-   - Include all Greek letters, symbols, equations
-6. Preserve the document structure and layout
-7. Mark unclear or difficult-to-read text with [?]
-
-Return ONLY the extracted text with proper line breaks. No explanations or markdown formatting.`;
-
-            const result = await model.generateContent([prompt, imagePart]);
-            const pageText = result.response.text();
-            pageTexts.push(pageText);
-            
-            console.log(`[Gemini PDF] Page ${pageIndex + 1} extracted: ${pageText.length} characters`);
-          } finally {
-            // Clean up temp file
-            try {
-              await fs.promises.unlink(tmpPngPath);
-            } catch {}
-          }
-        } catch (pageError) {
-          console.error(`[Gemini PDF] Error processing page ${pageIndex + 1}:`, pageError);
-          pageTexts.push(`[Error processing page ${pageIndex + 1}]`);
-        }
+      // Fallback to text extraction with pdf-parse
+      console.log(`[Vision API PDF] Falling back to text extraction with pdf-parse...`);
+      try {
+        const dataBuffer = await fs.promises.readFile(filePath);
+        const pdfData = await pdfParse(dataBuffer as any);
+        
+        return {
+          text: pdfData.text || '',
+          pages: pdfData.numpages || 1
+        };
+      } catch (fallbackError) {
+        throw new Error(`Vision API PDF extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
       }
-
-      const combinedText = pageTexts.map((text, idx) => 
-        `\n\n=== PAGE ${idx + 1} ===\n${text}`
-      ).join('\n');
-
-      console.log(`[Gemini PDF] Total extracted text: ${combinedText.length} characters`);
-
-      return {
-        text: combinedText,
-        pages: numPages
-      };
-    } catch (error) {
-      console.error('[Gemini PDF] Fatal error:', error);
-      throw new Error(`Gemini PDF extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
-  }
-
-  /**
-   * Extract text from image using Gemini Vision API with enhanced accuracy
-   */
-  private static async extractTextFromImageWithGemini(filePath: string): Promise<string> {
-    try {
-      console.log(`[Gemini Image] Processing image: ${filePath}`);
-      
-      const genAI = getGemini();
-      const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
-
-      // Read and prepare image
-      const imageBuffer = await fs.promises.readFile(filePath);
-      const imagePart = {
-        inlineData: {
-          data: imageBuffer.toString('base64'),
-          mimeType: this.getMimeType(filePath)
-        }
-      };
-
-      const prompt = `Extract ALL text from this image of a question paper with MAXIMUM ACCURACY.
-
-CRITICAL REQUIREMENTS:
-1. Extract EVERY word, number, and symbol exactly as shown
-2. Preserve question numbering (Q1, Q2, 1., 2., etc.)
-3. Maintain multiple choice option labels: (a), (b), (c), (d) or A, B, C, D
-4. Include all instructions, marks allocation [2M], section headers
-5. For mathematical expressions and equations:
-   - Extract them with high precision
-   - Preserve operators: +, -, ×, ÷, =, <, >, ≤, ≥
-   - Include powers: x^2, x^n, e^x
-   - Include fractions, roots, integrals, summations
-   - Greek letters: α, β, γ, π, θ, Σ, Δ, etc.
-   - Special symbols: ∫, √, ∑, ∏, ∞, ±, ≈, ≠
-6. For diagrams or figures:
-   - Note their presence: [DIAGRAM: description]
-   - Extract any labels, axes, values shown
-7. Preserve document structure:
-   - Section divisions
-   - Question grouping
-   - Instructions vs questions
-8. For unclear text, mark as [UNCLEAR: approximate_text]
-
-OUTPUT FORMAT:
-Return ONLY the extracted text with proper line breaks and spacing. 
-Do NOT add markdown, do NOT add explanations.
-Just the pure extracted content.`;
-
-      const result = await model.generateContent([prompt, imagePart]);
-      const extractedText = result.response.text();
-
-      console.log(`[Gemini Image] Extracted ${extractedText.length} characters`);
-      
-      return extractedText;
-    } catch (error) {
-      console.error('[Gemini Image] Error:', error);
-      throw new Error(`Gemini image extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  }
-
-  /**
-   * Get MIME type from file extension
-   */
-  private static getMimeType(filePath: string): string {
-    const ext = path.extname(filePath).toLowerCase();
-    const mimeTypes: { [key: string]: string } = {
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.png': 'image/png',
-      '.gif': 'image/gif',
-      '.bmp': 'image/bmp',
-      '.webp': 'image/webp'
-    };
-    return mimeTypes[ext] || 'image/jpeg';
   }
 
   /**
@@ -581,30 +464,37 @@ Just the pure extracted content.`;
 
 
   /**
-   * Structure extracted text into questions using selected Gemini model
+   * Structure extracted text into questions using Vertex AI Gemini
+   * Production-grade implementation with single Google Cloud credentials
    */
-  private static async structureQuestionsWithGemini(
+  private static async structureQuestionsWithVertexAI(
     extractedText: string,
     options: {
       subject?: string;
       topic?: string;
       batchId: Types.ObjectId;
-      model?: string;
+      model?: 'gemini-2.5-flash' | 'gemini-2.5-pro' | 'gemini-2.0-flash';
     }
   ): Promise<ExtractedQuestion[]> {
     try {
-      const modelName = options.model || 'gemini-2.0-flash-exp';
-      console.log(`[Gemini] Starting question structuring with ${modelName}...`);
+      let modelName = options.model || 'gemini-2.5-flash';
       
-      const genAI = getGemini();
-      const model = genAI.getGenerativeModel({ 
+      // Strip "publishers/google/models/" prefix if present (frontend may send full path)
+      if (modelName.includes('/')) {
+        modelName = (modelName.split('/').pop() || 'gemini-2.5-flash') as typeof modelName;
+      }
+      
+      console.log(`[Vertex AI] Structuring with ${modelName}...`);
+      
+      const vertexAI = getVertexAI();
+      const generativeModel = vertexAI.getGenerativeModel({
         model: modelName,
         generationConfig: {
-          temperature: 0.0, // Zero temperature for maximum consistency and accuracy
+          temperature: 0.0, // Maximum consistency
           topP: 0.95,
           topK: 40,
-          maxOutputTokens: 16384, // Larger for complex papers
-        }
+          maxOutputTokens: 32768, // Increased for math-heavy content with LaTeX
+        },
       });
 
       const prompt = `You are an elite question paper analyzer with expertise in mathematical, scientific, and academic content extraction. Your task is to parse Google Cloud Vision API output and structure it into a precise JSON array of questions.
@@ -617,82 +507,96 @@ Just the pure extracted content.`;
 • Maintain original question numbering exactly as shown (Q1, 1., Question 1, etc.)
 • Keep option labels exactly as shown: (a), (b), a), A., etc.
 
+⚠️ JSON FORMATTING - CRITICAL:
+• Return ONLY a valid JSON array - no markdown code blocks, no explanations
+• In JSON strings, backslashes MUST be escaped: use \\\\ for LaTeX backslashes
+• Example: "text": "$\\\\frac{1}{2}$" NOT "text": "$\\frac{1}{2}$"
+• Example: "$x^2 + 5x + 6 = 0$" (powers don't need backslash, just ^)
+• Example: "$\\\\sin(x)$" NOT "$\\sin(x)$"
+• ALWAYS close all JSON objects and arrays properly
+• Ensure output is complete - never truncate mid-object
+
 📐 CRITICAL LATEX FORMATTING RULES:
 1. ALL mathematical expressions MUST use LaTeX formatting
 2. Inline math: $x^2 + 5x + 6 = 0$ (single dollar signs)
-3. Display equations: $$\\int_0^{\\pi} \\sin(x)\\, dx$$ (double dollar signs)
+3. Display equations: $$\\\\int_0^{\\\\pi} \\\\sin(x)\\\\, dx$$ (double dollar signs, double backslashes)
 4. Wrap ONLY the mathematical part, preserve surrounding text verbatim
+5. Remember: In JSON, use \\\\ for each LaTeX backslash command
 
-COMPREHENSIVE LATEX REFERENCE:
+COMPREHENSIVE LATEX REFERENCE (Remember: Double backslashes in JSON!):
 Basic Operations:
 - Addition: $a + b$
 - Subtraction: $a - b$  
-- Multiplication: $a \\times b$ or $a \\cdot b$
-- Division: $a \\div b$ or $\\frac{a}{b}$
-- Equals: $=$, Not equals: $\\neq$
+- Multiplication: $a \\\\times b$ or $a \\\\cdot b$
+- Division: $a \\\\div b$ or $\\\\frac{a}{b}$
+- Equals: $=$, Not equals: $\\\\neq$
 
 Powers and Roots:
 - Superscript: $x^2$, $x^{2n}$, $e^{-x}$
 - Subscript: $x_1$, $x_{n+1}$
-- Square root: $\\sqrt{x}$, $\\sqrt{x^2 + y^2}$
-- Nth root: $\\sqrt[3]{x}$, $\\sqrt[n]{x}$
+- Square root: $\\\\sqrt{x}$, $\\\\sqrt{x^2 + y^2}$
+- Nth root: $\\\\sqrt[3]{x}$, $\\\\sqrt[n]{x}$
 
 Fractions:
-- Simple: $\\frac{a}{b}$
-- Complex: $\\frac{x^2 + 1}{x - 1}$
-- Mixed: $2\\frac{1}{3}$
+- Simple: $\\\\frac{a}{b}$
+- Complex: $\\\\frac{x^2 + 1}{x - 1}$
+- Mixed: $2\\\\frac{1}{3}$
 
 Greek Letters:
-- Lowercase: $\\alpha$, $\\beta$, $\\gamma$, $\\delta$, $\\epsilon$, $\\theta$, $\\lambda$, $\\mu$, $\\pi$, $\\sigma$, $\\omega$
-- Uppercase: $\\Gamma$, $\\Delta$, $\\Sigma$, $\\Omega$, $\\Phi$
+- Lowercase: $\\\\alpha$, $\\\\beta$, $\\\\gamma$, $\\\\delta$, $\\\\epsilon$, $\\\\theta$, $\\\\lambda$, $\\\\mu$, $\\\\pi$, $\\\\sigma$, $\\\\omega$
+- Uppercase: $\\\\Gamma$, $\\\\Delta$, $\\\\Sigma$, $\\\\Omega$, $\\\\Phi$
 
 Trigonometry:
-- $\\sin(x)$, $\\cos(x)$, $\\tan(x)$
-- $\\sin^2(x)$, $\\cos^{-1}(x)$
-- $\\sec(x)$, $\\csc(x)$, $\\cot(x)$
+- $\\\\sin(x)$, $\\\\cos(x)$, $\\\\tan(x)$
+- $\\\\sin^2(x)$, $\\\\cos^{-1}(x)$
+- $\\\\sec(x)$, $\\\\csc(x)$, $\\\\cot(x)$
 
 Calculus:
-- Derivative: $\\frac{dy}{dx}$, $\\frac{d^2y}{dx^2}$
-- Partial: $\\frac{\\partial f}{\\partial x}$
-- Integral: $\\int f(x)\\, dx$
-- Definite: $\\int_a^b f(x)\\, dx$
-- Double: $\\iint$, Triple: $\\iiint$
-- Limit: $\\lim_{x \\to a} f(x)$
-- Summation: $\\sum_{i=1}^{n} a_i$
-- Product: $\\prod_{i=1}^{n} a_i$
+- Derivative: $\\\\frac{dy}{dx}$, $\\\\frac{d^2y}{dx^2}$
+- Partial: $\\\\frac{\\\\partial f}{\\\\partial x}$
+- Integral: $\\\\int f(x)\\\\, dx$
+- Definite: $\\\\int_a^b f(x)\\\\, dx$
+- Double: $\\\\iint$, Triple: $\\\\iiint$
+- Limit: $\\\\lim_{x \\\\to a} f(x)$
+- Summation: $\\\\sum_{i=1}^{n} a_i$
+- Product: $\\\\prod_{i=1}^{n} a_i$
 
 Relations:
-- $<$, $>$, $\\leq$, $\\geq$, $\\neq$
-- $\\approx$, $\\equiv$, $\\propto$
-- $\\in$ (element of), $\\notin$
-- $\\subset$, $\\subseteq$, $\\supset$
+- $<$, $>$, $\\\\leq$, $\\\\geq$, $\\\\neq$
+- $\\\\approx$, $\\\\equiv$, $\\\\propto$
+- $\\\\in$ (element of), $\\\\notin$
+- $\\\\subset$, $\\\\subseteq$, $\\\\supset$
 
 Sets and Logic:
-- Union: $\\cup$, Intersection: $\\cap$
-- Empty set: $\\emptyset$ or $\\varnothing$
-- $\\forall$ (for all), $\\exists$ (exists)
-- $\\implies$ (implies), $\\iff$ (if and only if)
-- $\\land$ (and), $\\lor$ (or), $\\neg$ (not)
+- Union: $\\\\cup$, Intersection: $\\\\cap$
+- Empty set: $\\\\emptyset$ or $\\\\varnothing$
+- $\\\\forall$ (for all), $\\\\exists$ (exists)
+- $\\\\implies$ (implies), $\\\\iff$ (if and only if)
+- $\\\\land$ (and), $\\\\lor$ (or), $\\\\neg$ (not)
 
 Special Symbols:
-- Infinity: $\\infty$
-- Plus-minus: $\\pm$, Minus-plus: $\\mp$
-- Dot product: $\\cdot$, Cross: $\\times$
-- Angle: $\\angle$, Degree: $^{\\circ}$
-- Perpendicular: $\\perp$, Parallel: $\\parallel$
+- Infinity: $\\\\infty$
+- Plus-minus: $\\\\pm$, Minus-plus: $\\\\mp$
+- Dot product: $\\\\cdot$, Cross: $\\\\times$
+- Angle: $\\\\angle$, Degree: $^{\\\\circ}$
+- Perpendicular: $\\\\perp$, Parallel: $\\\\parallel$
 
 Matrices and Vectors:
-- Vector: $\\vec{v}$ or $\\mathbf{v}$
-- Matrix: $\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}$
-- Determinant: $\\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix}$
+- Vector: $\\\\vec{v}$ or $\\\\mathbf{v}$
+- Matrix: $\\\\begin{pmatrix} a & b \\\\\\\\ c & d \\\\end{pmatrix}$
+- Determinant: $\\\\begin{vmatrix} a & b \\\\\\\\ c & d \\\\end{vmatrix}$
+
+Piecewise Functions (IMPORTANT):
+- Use begin{cases}: $\\\\begin{cases} 1+x^2, & 0 \\\\le x \\\\le 1 \\\\\\\\ 1-x, & x>1 \\\\end{cases}$
+- Each case on its own line with \\\\\\\\ separator
 
 Chemistry (if present):
 - Use subscripts: $H_2O$, $CO_2$, $NaCl$
-- Reactions: $2H_2 + O_2 \\rightarrow 2H_2O$
+- Reactions: $2H_2 + O_2 \\\\rightarrow 2H_2O$
 
 Physics:
-- Units in text mode: $5 \\text{ m/s}^2$
-- Vectors: $\\vec{F} = m\\vec{a}$
+- Units in text mode: $5 \\\\text{ m/s}^2$
+- Vectors: $\\\\vec{F} = m\\\\vec{a}$
 
 PRESERVE SOURCE TEXT EXACTLY (CRITICAL):
 • Use the EXACT words from the extracted text
@@ -710,29 +614,45 @@ QUESTION TYPE DETECTION:
 - integer: Asks for numeric answer only
 - assertionreason: Has "Assertion:" and "Reason:" statements
 
-JSON SCHEMA (STRICT):
+JSON SCHEMA (STRICT - Remember double backslashes!):
 [
   {
-    "text": "Complete question text with LaTeX",
-    "type": "mcq|truefalse|fill|short|long|integer|assertionreason",
+    "text": "If $f(x)=\\\\begin{cases} 1+x^2, & 0 \\\\le x \\\\le 1 \\\\\\\\ 1-x, & x>1 \\\\end{cases}$ then find the limit.",
+    "type": "mcq",
     "options": [
-      {"text": "Option text with LaTeX", "isCorrect": true|false}
+      {"text": "$\\\\lim_{x \\\\to 1} f(x) \\\\neq 0$", "isCorrect": false},
+      {"text": "$\\\\lim_{x \\\\to 1} f(x) = 2$", "isCorrect": true},
+      {"text": "f is discontinuous at $x = 1$", "isCorrect": false},
+      {"text": "none of these", "isCorrect": false}
     ],
-    "correctAnswerText": "Answer for non-MCQ",
-    "integerAnswer": 42,
-    "assertion": "Assertion statement",
-    "reason": "Reason statement",
-    "assertionIsTrue": true|false,
-    "reasonIsTrue": true|false,
-    "reasonExplainsAssertion": true|false,
     "questionNumber": "1",
     "subject": "${options.subject || 'Unknown'}",
     "topic": "${options.topic || 'General'}",
-    "difficulty": "easy|medium|hard",
-    "confidence": 0.0-1.0,
-    "needsReview": true|false
+    "difficulty": "medium",
+    "confidence": 0.95,
+    "needsReview": false
+  },
+  {
+    "text": "What is $\\\\frac{dy}{dx}$ if $y = x^2 + 3x + 5$?",
+    "type": "short",
+    "correctAnswerText": "$2x + 3$",
+    "questionNumber": "2",
+    "subject": "${options.subject || 'Unknown'}",
+    "topic": "${options.topic || 'General'}",
+    "difficulty": "easy",
+    "confidence": 0.98,
+    "needsReview": false
   }
 ]
+
+SCHEMA FIELDS:
+- text: Question text (REQUIRED)
+- type: mcq|truefalse|fill|short|long|integer|assertionreason (REQUIRED)
+- options: Array of {text, isCorrect} for MCQ/True-False (REQUIRED for mcq/truefalse)
+- correctAnswerText: Answer for non-MCQ types
+- integerAnswer: Numeric answer for integer type
+- assertion/reason: For assertion-reason questions
+- questionNumber, subject, topic, difficulty, confidence, needsReview (all REQUIRED)
 
 🔍 QUESTION COUNT GUARANTEE:
 • If the source has 11 questions → output MUST have exactly 11 JSON objects
@@ -745,24 +665,60 @@ JSON SCHEMA (STRICT):
 ✓ Extract ALL questions (count must match source exactly)
 ✓ Preserve exact wording (no paraphrasing)
 ✓ Identify correct answers from answer keys if present
-✓ ALL math expressions in LaTeX ($...$ or $$...$$)
+✓ ALL math expressions in LaTeX with DOUBLE BACKSLASHES ($\\\\frac{1}{2}$, not $\\frac{1}{2}$)
 ✓ Set confidence=0.95 for clear text, 0.7-0.8 for unclear
 ✓ Flag needsReview=true only if confidence < 0.7
 ✓ Determine difficulty: easy (basic recall), medium (application), hard (analysis/synthesis)
 ✓ Return ONLY valid JSON array (no markdown fences, no explanations, no preamble)
+✓ COMPLETE THE ENTIRE RESPONSE - close all JSON objects and arrays properly
+✓ Never truncate mid-object - ensure output ends with ]
 
 📄 VISION API OUTPUT TO PARSE:
 ${extractedText}`;
 
-      console.log(`[${modelName}] Sending ${extractedText.length} chars for structuring...`);
+      console.log(`[Vertex AI] Sending ${extractedText.length} chars for structuring...`);
       
-      const result = await model.generateContent(prompt);
-      const response = result.response.text();
+      const request = {
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      };
       
-      console.log(`[${modelName}] Received ${response.length} chars response`);
+      const result = await generativeModel.generateContent(request);
+      const response = result.response;
+      const responseText = response.candidates?.[0]?.content?.parts?.[0]?.text || '';
+      
+      console.log(`[Vertex AI] Received ${responseText.length} chars response`);
+      
+      // Log finish reason for debugging
+      const finishReason = response.candidates?.[0]?.finishReason;
+      if (finishReason) {
+        console.log(`[Vertex AI] Finish reason: ${finishReason}`);
+        if (finishReason === 'MAX_TOKENS' || finishReason === 'OTHER') {
+          console.warn('[Vertex AI] ⚠ Response may be truncated due to token limit');
+        }
+      }
       
       // Clean response from code fences and whitespace
-      const cleanedResponse = response.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+      let cleanedResponse = responseText.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
+
+      // Check if response appears truncated
+      const isTruncated = !cleanedResponse.endsWith(']') && !cleanedResponse.endsWith('}]');
+      if (isTruncated) {
+        console.warn('[Vertex AI] ⚠ Response appears truncated. Attempting repair...');
+        // Try to close incomplete JSON structures
+        const openBraces = (cleanedResponse.match(/\{/g) || []).length;
+        const closeBraces = (cleanedResponse.match(/\}/g) || []).length;
+        const openBrackets = (cleanedResponse.match(/\[/g) || []).length;
+        const closeBrackets = (cleanedResponse.match(/\]/g) || []).length;
+        
+        // Close any unclosed objects/arrays
+        for (let i = 0; i < openBraces - closeBraces; i++) {
+          cleanedResponse += '\n  }';
+        }
+        for (let i = 0; i < openBrackets - closeBrackets; i++) {
+          cleanedResponse += '\n]';
+        }
+        console.log('[Vertex AI] Attempted to repair truncated JSON');
+      }
 
       // Robust JSON parsing: try direct parse, then extract array, then attempt to sanitize
       let questions: ExtractedQuestion[] | null = null;
@@ -783,22 +739,71 @@ ${extractedText}`;
         if (jsonMatch) {
           questions = attemptParse(jsonMatch[0]);
 
-          // 3) If still failing, sanitize common bad escapes (stray backslashes) and retry
+          // 3) If still failing, sanitize LaTeX and other bad escapes and retry
           if (!questions) {
-            // Replace backslashes that are not part of valid JSON escape sequences with double-backslash
-            // Valid escapes are: \" \\ \/ \b \f \n \r \t \uXXXX
-            const sanitized = jsonMatch[0].replace(/\\(?!["\\\/bfnrtu])/g, "\\\\");
+            console.log('[Vertex AI] Standard parse failed. Attempting LaTeX escape sanitization...');
+            let sanitized = jsonMatch[0];
+            
+            // Strategy: Pre-process the raw JSON string to properly escape backslashes
+            // In JSON strings, backslashes must be escaped as \\ 
+            // But the AI might output LaTeX like \frac which should be \\frac in JSON
+            
+            // First pass: Find all string values in JSON (between quotes)
+            // and properly escape backslashes within them
+            sanitized = sanitized.replace(
+              /"((?:[^"\\]|\\.)*)"/g,
+              (match, content) => {
+                // Within quoted strings, ensure backslashes are doubled
+                // But preserve already-escaped sequences
+                let escaped = content
+                  .replace(/\\\\/g, '\\u0000') // Temp marker for already-escaped backslashes
+                  .replace(/\\/g, '\\\\')       // Escape all remaining backslashes
+                  .replace(/\\u0000/g, '\\\\'); // Restore the already-escaped ones
+                return `"${escaped}"`;
+              }
+            );
+            
             try {
               questions = JSON.parse(sanitized) as ExtractedQuestion[];
+              console.log('[Vertex AI] ✓ Successfully parsed after LaTeX sanitization');
             } catch (finalErr) {
-              // As a last attempt, remove control characters that may break JSON
-              const ctrlClean = sanitized.replace(/[\x00-\x1F]/g, '');
+              // Last attempt: remove control characters that may break JSON
+              const ctrlClean = sanitized.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
               try {
                 questions = JSON.parse(ctrlClean) as ExtractedQuestion[];
+                console.log('[Vertex AI] ✓ Successfully parsed after removing control characters');
               } catch (finalErr2) {
-                throw new Error(
-                  `Failed to parse JSON from Gemini response. Last parse error: ${finalErr2 instanceof Error ? finalErr2.message : String(finalErr2)}. Response snippet: ${ctrlClean.slice(0,1200)}`
-                );
+                // Final fallback: Extract complete question objects from truncated JSON
+                console.warn('[Vertex AI] JSON parsing failed. Attempting to extract complete questions from partial response...');
+                const extractedQuestions: ExtractedQuestion[] = [];
+                const objRegex = /\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g;
+                const matches = ctrlClean.match(objRegex);
+                
+                if (matches) {
+                  for (const match of matches) {
+                    try {
+                      // Try to parse each object individually
+                      if (match.includes('"text"') && match.includes('"type"')) {
+                        const obj = JSON.parse(match);
+                        if (obj.text && obj.type) {
+                          extractedQuestions.push(obj as ExtractedQuestion);
+                        }
+                      }
+                    } catch {
+                      // Skip invalid objects
+                    }
+                  }
+                }
+                
+                if (extractedQuestions.length > 0) {
+                  console.log(`[Vertex AI] ⚠ Recovered ${extractedQuestions.length} complete questions from truncated response`);
+                  questions = extractedQuestions;
+                } else {
+                  console.error('[Vertex AI] All parse attempts failed');
+                  throw new Error(
+                    `Failed to parse JSON from Gemini response. Last parse error: ${finalErr2 instanceof Error ? finalErr2.message : String(finalErr2)}. Response snippet: ${ctrlClean.slice(0,1200)}`
+                  );
+                }
               }
             }
           }
@@ -851,37 +856,49 @@ ${extractedText}`;
   ): Promise<IImportedQuestion[]> {
     // Review-first flow: persist extracted questions into ImportedQuestion (temporary store)
     // Do NOT push directly to the Question Bank here.
-    const docs = questions.map((q) => ({
-      text: q.text,
-      type: q.type,
-      subject: q.subject || undefined,
-      topic: q.topic || undefined,
-      difficulty: q.difficulty || 'medium',
-      options: q.options,
-      correctAnswerText: q.correctAnswerText,
-      integerAnswer: q.integerAnswer,
-      assertion: q.assertion,
-      reason: q.reason,
-      assertionIsTrue: q.assertionIsTrue,
-      reasonIsTrue: q.reasonIsTrue,
-      reasonExplainsAssertion: q.reasonExplainsAssertion,
-      diagramUrl: undefined,
-      importBatch: batchId,
-      originalText: q.text || '',
-      confidence: typeof q.confidence === 'number' ? q.confidence : 0.5,
-      needsReview: q.needsReview ?? false,
-      status: 'extracted' as const,
-      pageNumber: undefined,
-      questionNumber: q.questionNumber,
-      extractedBy,
-      reviewedBy: undefined,
-      // Include metadata for later use when moving to class-wise collections
-      class: metadata?.class,
-      board: metadata?.board,
-      chapter: metadata?.chapter,
-      section: metadata?.section,
-      marks: metadata?.marks,
-    }));
+    const docs = questions.map((q) => {
+      // Filter out empty options to prevent validation errors
+      let cleanedOptions = q.options;
+      if (cleanedOptions && Array.isArray(cleanedOptions)) {
+        cleanedOptions = cleanedOptions.filter(opt => opt && opt.text && opt.text.trim() !== '');
+        // If after filtering we have no options, set to undefined
+        if (cleanedOptions.length === 0) {
+          cleanedOptions = undefined;
+        }
+      }
+
+      return {
+        text: q.text,
+        type: q.type,
+        subject: q.subject || undefined,
+        topic: q.topic || undefined,
+        difficulty: q.difficulty || 'medium',
+        options: cleanedOptions,
+        correctAnswerText: q.correctAnswerText,
+        integerAnswer: q.integerAnswer,
+        assertion: q.assertion,
+        reason: q.reason,
+        assertionIsTrue: q.assertionIsTrue,
+        reasonIsTrue: q.reasonIsTrue,
+        reasonExplainsAssertion: q.reasonExplainsAssertion,
+        diagramUrl: undefined,
+        importBatch: batchId,
+        originalText: q.text || '',
+        confidence: typeof q.confidence === 'number' ? q.confidence : 0.5,
+        needsReview: q.needsReview ?? false,
+        status: 'extracted' as const,
+        pageNumber: undefined,
+        questionNumber: q.questionNumber,
+        extractedBy,
+        reviewedBy: undefined,
+        // Include metadata for later use when moving to class-wise collections
+        class: metadata?.class,
+        board: metadata?.board,
+        chapter: metadata?.chapter,
+        section: metadata?.section,
+        marks: metadata?.marks,
+      };
+    });
 
     const saved = await ImportedQuestion.insertMany(docs);
     return saved;
@@ -1010,33 +1027,51 @@ ${extractedText}`;
     
     for (const question of questions) {
       try {
-        // Normalize question text
-        const normalizedText = await normalizeMathematicalExpressions(question.text);
+        // Check if text already has LaTeX formatting (has $ signs)
+        const hasLatex = (text: string) => text.includes('$') && (text.includes('\\') || /\^|\{|\}/.test(text));
         
-        // Normalize options if present
+        // Only normalize if NO LaTeX is present yet
+        // If Vertex AI already added LaTeX, skip normalization to avoid corruption
+        const shouldNormalize = !hasLatex(question.text);
+        
+        if (shouldNormalize) {
+          console.log(`[LaTeX Normalize] Question ${question.questionNumber} needs normalization`);
+        } else {
+          console.log(`[LaTeX Normalize] Question ${question.questionNumber} already has LaTeX, skipping`);
+        }
+        
+        // Normalize question text only if needed
+        const normalizedText = shouldNormalize 
+          ? await normalizeMathematicalExpressions(question.text)
+          : question.text;
+        
+        // Normalize options if present and needed
         let normalizedOptions = question.options;
         if (question.options && question.options.length > 0) {
           normalizedOptions = await Promise.all(
-            question.options.map(async (opt) => ({
-              text: await normalizeMathematicalExpressions(opt.text),
-              isCorrect: opt.isCorrect
-            }))
+            question.options.map(async (opt) => {
+              const needsNorm = !hasLatex(opt.text);
+              return {
+                text: needsNorm ? await normalizeMathematicalExpressions(opt.text) : opt.text,
+                isCorrect: opt.isCorrect
+              };
+            })
           );
         }
         
-        // Normalize answer text if present
+        // Normalize answer text if present and needed
         let normalizedAnswer = question.correctAnswerText;
-        if (normalizedAnswer) {
+        if (normalizedAnswer && !hasLatex(normalizedAnswer)) {
           normalizedAnswer = await normalizeMathematicalExpressions(normalizedAnswer);
         }
         
-        // Normalize assertion-reason if present
+        // Normalize assertion-reason if present and needed
         let normalizedAssertion = question.assertion;
         let normalizedReason = question.reason;
-        if (normalizedAssertion) {
+        if (normalizedAssertion && !hasLatex(normalizedAssertion)) {
           normalizedAssertion = await normalizeMathematicalExpressions(normalizedAssertion);
         }
-        if (normalizedReason) {
+        if (normalizedReason && !hasLatex(normalizedReason)) {
           normalizedReason = await normalizeMathematicalExpressions(normalizedReason);
         }
         
