@@ -1,6 +1,7 @@
 import dotenv from 'dotenv';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { VertexAI } from '@google-cloud/vertexai';
+import type { VertexAI } from '@google-cloud/vertexai';
+import { getVertexClient } from '../lib/googleClients';
 import Groq from 'groq-sdk';
 import type { Types } from 'mongoose';
 import type { Difficulty, IQuestion, QuestionType } from '../models/Question';
@@ -26,7 +27,6 @@ dotenv.config();
 
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GOOGLE_CREDENTIALS = process.env.GOOGLE_APPLICATION_CREDENTIALS || './vision-key.json';
 const GOOGLE_PROJECT = process.env.GOOGLE_CLOUD_PROJECT || 'cbt-vision-api';
 const GOOGLE_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
 
@@ -42,21 +42,7 @@ function getGemini() {
 }
 
 function getVertexAI(): VertexAI {
-  if (!vertexAI) {
-    try {
-      vertexAI = new VertexAI({
-        project: GOOGLE_PROJECT,
-        location: GOOGLE_LOCATION,
-        googleAuthOptions: {
-          keyFilename: GOOGLE_CREDENTIALS
-        }
-      });
-      console.log(`[Vertex AI] Initialized with project: ${GOOGLE_PROJECT}, location: ${GOOGLE_LOCATION}`);
-    } catch (error) {
-      console.error('[Vertex AI] Failed to initialize:', error);
-      throw new Error(`Vertex AI initialization failed. Check credentials at: ${GOOGLE_CREDENTIALS}`);
-    }
-  }
+  if (!vertexAI) vertexAI = getVertexClient();
   return vertexAI;
 }
 

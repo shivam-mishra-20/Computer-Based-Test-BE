@@ -1,55 +1,27 @@
-import { VertexAI } from '@google-cloud/vertexai';
 import { Types } from 'mongoose';
-import { ImageAnnotatorClient } from '@google-cloud/vision';
 import dotenv from 'dotenv';
+import type { VertexAI } from '@google-cloud/vertexai';
+import { getVertexClient, getVisionClient as createVisionClient } from '../lib/googleClients';
 
 dotenv.config();
 
-const GOOGLE_CREDENTIALS = process.env.GOOGLE_APPLICATION_CREDENTIALS || './vision-key.json';
-const GOOGLE_PROJECT = process.env.GOOGLE_CLOUD_PROJECT || 'cbt-vision-api';
-const GOOGLE_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
-
 // Singleton instances
 let vertexAI: VertexAI | null = null;
-let visionClient: ImageAnnotatorClient | null = null;
+let visionClient: ReturnType<typeof createVisionClient> | null = null;
 
 /**
  * Get or initialize Vertex AI client
  */
 function getVertexAI(): VertexAI {
-  if (!vertexAI) {
-    try {
-      vertexAI = new VertexAI({
-        project: GOOGLE_PROJECT,
-        location: GOOGLE_LOCATION,
-        googleAuthOptions: {
-          keyFilename: GOOGLE_CREDENTIALS
-        }
-      });
-      console.log(`[AI Generation] Vertex AI initialized with project: ${GOOGLE_PROJECT}`);
-    } catch (error) {
-      console.error('[AI Generation] Failed to initialize Vertex AI:', error);
-      throw new Error(`Vertex AI initialization failed. Check credentials at: ${GOOGLE_CREDENTIALS}`);
-    }
-  }
+  if (!vertexAI) vertexAI = getVertexClient();
   return vertexAI;
 }
 
 /**
  * Get or initialize Vision API client
  */
-function getVisionClient(): ImageAnnotatorClient {
-  if (!visionClient) {
-    try {
-      visionClient = new ImageAnnotatorClient({
-        keyFilename: GOOGLE_CREDENTIALS
-      });
-      console.log('[AI Generation] Vision API client initialized');
-    } catch (error) {
-      console.error('[AI Generation] Failed to initialize Vision API:', error);
-      throw new Error('Vision API initialization failed');
-    }
-  }
+function getVisionClient() {
+  if (!visionClient) visionClient = createVisionClient();
   return visionClient;
 }
 

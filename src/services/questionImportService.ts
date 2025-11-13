@@ -1,6 +1,6 @@
 import dotenv from 'dotenv';
-import { VertexAI } from '@google-cloud/vertexai';
-import { ImageAnnotatorClient } from '@google-cloud/vision';
+import type { VertexAI } from '@google-cloud/vertexai';
+import { getVertexClient, getVisionClient as createVisionClient } from '../lib/googleClients';
 import fs from 'fs';
 import path from 'path';
 import pdfParse from 'pdf-parse';
@@ -12,30 +12,20 @@ import { normalizeMathematicalExpressions } from './mathService';
 
 dotenv.config();
 
-// Google Cloud configuration - Single service account for Vision API + Vertex AI
-const GOOGLE_CREDENTIALS = process.env.GOOGLE_APPLICATION_CREDENTIALS || './vision-key.json';
+// Google Cloud configuration
 const GOOGLE_PROJECT = process.env.GOOGLE_CLOUD_PROJECT || 'cbt-vision-api';
 const GOOGLE_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
 
 // Initialize clients (lazy loading)
 let vertexAI: VertexAI | null = null;
-let visionClient: ImageAnnotatorClient | null = null;
+let visionClient: ReturnType<typeof createVisionClient> | null = null;
 
 /**
  * Get or initialize Vertex AI client for Gemini LLM
  * Uses the same service account credentials as Vision API
  */
 function getVertexAI(): VertexAI {
-  if (!vertexAI) {
-    vertexAI = new VertexAI({
-      project: GOOGLE_PROJECT,
-      location: GOOGLE_LOCATION,
-      googleAuthOptions: {
-        keyFilename: GOOGLE_CREDENTIALS
-      }
-    });
-    console.log(`[Vertex AI] Initialized with project: ${GOOGLE_PROJECT}, location: ${GOOGLE_LOCATION}`);
-  }
+  if (!vertexAI) vertexAI = getVertexClient();
   return vertexAI;
 }
 
@@ -43,13 +33,8 @@ function getVertexAI(): VertexAI {
  * Get or initialize Vision API client for OCR
  * Uses the same service account credentials as Vertex AI
  */
-function getVisionClient(): ImageAnnotatorClient {
-  if (!visionClient) {
-    visionClient = new ImageAnnotatorClient({
-      keyFilename: GOOGLE_CREDENTIALS
-    });
-    console.log('[Vision API] Initialized with service account');
-  }
+function getVisionClient(): ReturnType<typeof createVisionClient> {
+  if (!visionClient) visionClient = createVisionClient();
   return visionClient;
 }
 
