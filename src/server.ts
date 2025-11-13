@@ -1,5 +1,14 @@
+import { writeFileSync } from 'fs';
 import app from './app';
 import { connectDB } from './config/db';
+
+// Setup Google credentials for Render.com deployment
+if (process.env.GOOGLE_APPLICATION_CREDENTIALS_BASE64) {
+  const keyPath = '/tmp/vision-key.json';
+  writeFileSync(keyPath, Buffer.from(process.env.GOOGLE_APPLICATION_CREDENTIALS_BASE64, 'base64'));
+  process.env.GOOGLE_APPLICATION_CREDENTIALS = keyPath;
+  console.log('Google credentials configured');
+}
 
 const PORT = process.env.PORT || 5000;
 
