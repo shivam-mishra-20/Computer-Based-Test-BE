@@ -102,7 +102,12 @@ export const listPendingReviewCtrl = async (_req: Request, res: Response) => {
 
 export const adjustAnswerScoreCtrl = async (req: Request, res: Response) => {
   try {
-    const updated = await adjustAnswerScore(req.params.attemptId, req.body.answerQuestionId, req.body.score, req.body.feedback);
+    // Accept both answerQuestionId (frontend) and answerId for compatibility
+    const questionId = req.body.answerQuestionId || req.body.answerId;
+    if (!questionId) {
+      return res.status(400).json({ message: 'answerQuestionId is required' });
+    }
+    const updated = await adjustAnswerScore(req.params.attemptId, questionId, req.body.score, req.body.feedback);
     res.json(updated);
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Failed to adjust score' });

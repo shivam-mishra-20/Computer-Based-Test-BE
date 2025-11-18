@@ -491,97 +491,102 @@ export class QuestionImportService {
 • ONLY add LaTeX markup around mathematical expressions
 • Maintain original question numbering exactly as shown (Q1, 1., Question 1, etc.)
 • Keep option labels exactly as shown: (a), (b), a), A., etc.
+• PRESERVE ALL SPACING - especially around mathematical expressions
 
 ⚠️ JSON FORMATTING - CRITICAL:
 • Return ONLY a valid JSON array - no markdown code blocks, no explanations
-• In JSON strings, backslashes MUST be escaped: use \\\\ for LaTeX backslashes
-• Example: "text": "$\\\\frac{1}{2}$" NOT "text": "$\\frac{1}{2}$"
+• In JSON strings, backslashes MUST be escaped with ONE backslash: use \\ for LaTeX backslashes
+• Example: "text": "$\\frac{1}{2}$" NOT "text": "$\\\\frac{1}{2}$"
 • Example: "$x^2 + 5x + 6 = 0$" (powers don't need backslash, just ^)
-• Example: "$\\\\sin(x)$" NOT "$\\sin(x)$"
+• Example: "$\\sin(x)$" NOT "$sin(x)$"
 • ALWAYS close all JSON objects and arrays properly
 • Ensure output is complete - never truncate mid-object
 
 📐 CRITICAL LATEX FORMATTING RULES:
 1. ALL mathematical expressions MUST use LaTeX formatting
 2. Inline math: $x^2 + 5x + 6 = 0$ (single dollar signs)
-3. Display equations: $$\\\\int_0^{\\\\pi} \\\\sin(x)\\\\, dx$$ (double dollar signs, double backslashes)
-4. Wrap ONLY the mathematical part, preserve surrounding text verbatim
-5. Remember: In JSON, use \\\\ for each LaTeX backslash command
+3. Display equations: $$\\int_0^{\\pi} \\sin(x)\\, dx$$ (double dollar signs for display)
+4. Wrap ONLY the mathematical part, preserve surrounding text and spaces verbatim
+5. Remember: In JSON strings, ONE backslash for each LaTeX command
+6. PRESERVE SPACES: "text": "If $A = 1 + r + r^2 + ...$ then" (spaces around equations maintained)
+7. ELLIPSIS: Use "..." for ellipsis unless LaTeX dots (\\ldots or \\cdots) clearly needed
+8. UNICODE: Convert Unicode math symbols to LaTeX (∞→\\infty, ²→^2, ×→\\times, ÷→\\div)
 
-COMPREHENSIVE LATEX REFERENCE (Remember: Double backslashes in JSON!):
+COMPREHENSIVE LATEX REFERENCE (Remember: Single backslash in JSON for LaTeX commands!):
 Basic Operations:
 - Addition: $a + b$
 - Subtraction: $a - b$  
-- Multiplication: $a \\\\times b$ or $a \\\\cdot b$
-- Division: $a \\\\div b$ or $\\\\frac{a}{b}$
-- Equals: $=$, Not equals: $\\\\neq$
+- Multiplication: $a \\times b$ or $a \\cdot b$
+- Division: $a \\div b$ or $\\frac{a}{b}$
+- Equals: $=$, Not equals: $\\neq$
 
 Powers and Roots:
 - Superscript: $x^2$, $x^{2n}$, $e^{-x}$
 - Subscript: $x_1$, $x_{n+1}$
-- Square root: $\\\\sqrt{x}$, $\\\\sqrt{x^2 + y^2}$
-- Nth root: $\\\\sqrt[3]{x}$, $\\\\sqrt[n]{x}$
+- Square root: $\\sqrt{x}$, $\\sqrt{x^2 + y^2}$
+- Nth root: $\\sqrt[3]{x}$, $\\sqrt[n]{x}$
 
 Fractions:
-- Simple: $\\\\frac{a}{b}$
-- Complex: $\\\\frac{x^2 + 1}{x - 1}$
-- Mixed: $2\\\\frac{1}{3}$
+- Simple: $\\frac{a}{b}$
+- Complex: $\\frac{x^2 + 1}{x - 1}$
+- Mixed: $2\\frac{1}{3}$
 
 Greek Letters:
-- Lowercase: $\\\\alpha$, $\\\\beta$, $\\\\gamma$, $\\\\delta$, $\\\\epsilon$, $\\\\theta$, $\\\\lambda$, $\\\\mu$, $\\\\pi$, $\\\\sigma$, $\\\\omega$
-- Uppercase: $\\\\Gamma$, $\\\\Delta$, $\\\\Sigma$, $\\\\Omega$, $\\\\Phi$
+- Lowercase: $\\alpha$, $\\beta$, $\\gamma$, $\\delta$, $\\epsilon$, $\\theta$, $\\lambda$, $\\mu$, $\\pi$, $\\sigma$, $\\omega$
+- Uppercase: $\\Gamma$, $\\Delta$, $\\Sigma$, $\\Omega$, $\\Phi$
 
 Trigonometry:
-- $\\\\sin(x)$, $\\\\cos(x)$, $\\\\tan(x)$
-- $\\\\sin^2(x)$, $\\\\cos^{-1}(x)$
-- $\\\\sec(x)$, $\\\\csc(x)$, $\\\\cot(x)$
+- $\\sin(x)$, $\\cos(x)$, $\\tan(x)$
+- $\\sin^2(x)$, $\\cos^{-1}(x)$
+- $\\sec(x)$, $\\csc(x)$, $\\cot(x)$
 
 Calculus:
-- Derivative: $\\\\frac{dy}{dx}$, $\\\\frac{d^2y}{dx^2}$
-- Partial: $\\\\frac{\\\\partial f}{\\\\partial x}$
-- Integral: $\\\\int f(x)\\\\, dx$
-- Definite: $\\\\int_a^b f(x)\\\\, dx$
-- Double: $\\\\iint$, Triple: $\\\\iiint$
-- Limit: $\\\\lim_{x \\\\to a} f(x)$
-- Summation: $\\\\sum_{i=1}^{n} a_i$
-- Product: $\\\\prod_{i=1}^{n} a_i$
+- Derivative: $\\frac{dy}{dx}$, $\\frac{d^2y}{dx^2}$
+- Partial: $\\frac{\\partial f}{\\partial x}$
+- Integral: $\\int f(x)\\, dx$
+- Definite: $\\int_a^b f(x)\\, dx$
+- Double: $\\iint$, Triple: $\\iiint$
+- Limit: $\\lim_{x \\to a} f(x)$
+- Summation: $\\sum_{i=1}^{n} a_i$
+- Product: $\\prod_{i=1}^{n} a_i$
 
 Relations:
-- $<$, $>$, $\\\\leq$, $\\\\geq$, $\\\\neq$
-- $\\\\approx$, $\\\\equiv$, $\\\\propto$
-- $\\\\in$ (element of), $\\\\notin$
-- $\\\\subset$, $\\\\subseteq$, $\\\\supset$
+- $<$, $>$, $\\leq$, $\\geq$, $\\neq$
+- $\\approx$, $\\equiv$, $\\propto$
+- $\\in$ (element of), $\\notin$
+- $\\subset$, $\\subseteq$, $\\supset$
 
 Sets and Logic:
-- Union: $\\\\cup$, Intersection: $\\\\cap$
-- Empty set: $\\\\emptyset$ or $\\\\varnothing$
-- $\\\\forall$ (for all), $\\\\exists$ (exists)
-- $\\\\implies$ (implies), $\\\\iff$ (if and only if)
-- $\\\\land$ (and), $\\\\lor$ (or), $\\\\neg$ (not)
+- Union: $\\cup$, Intersection: $\\cap$
+- Empty set: $\\emptyset$ or $\\varnothing$
+- $\\forall$ (for all), $\\exists$ (exists)
+- $\\implies$ (implies), $\\iff$ (if and only if)
+- $\\land$ (and), $\\lor$ (or), $\\neg$ (not)
 
 Special Symbols:
-- Infinity: $\\\\infty$
-- Plus-minus: $\\\\pm$, Minus-plus: $\\\\mp$
-- Dot product: $\\\\cdot$, Cross: $\\\\times$
-- Angle: $\\\\angle$, Degree: $^{\\\\circ}$
-- Perpendicular: $\\\\perp$, Parallel: $\\\\parallel$
+- Infinity: $\\infty$ (convert ∞ to this)
+- Plus-minus: $\\pm$, Minus-plus: $\\mp$
+- Dot product: $\\cdot$, Cross: $\\times$ (convert × to this)
+- Angle: $\\angle$, Degree: $^{\\circ}$
+- Perpendicular: $\\perp$, Parallel: $\\parallel$
+- Ellipsis in math: $\\ldots$ (for ..., but simple ... is also acceptable)
 
 Matrices and Vectors:
-- Vector: $\\\\vec{v}$ or $\\\\mathbf{v}$
-- Matrix: $\\\\begin{pmatrix} a & b \\\\\\\\ c & d \\\\end{pmatrix}$
-- Determinant: $\\\\begin{vmatrix} a & b \\\\\\\\ c & d \\\\end{vmatrix}$
+- Vector: $\\vec{v}$ or $\\mathbf{v}$
+- Matrix: $\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}$
+- Determinant: $\\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix}$
 
 Piecewise Functions (IMPORTANT):
-- Use begin{cases}: $\\\\begin{cases} 1+x^2, & 0 \\\\le x \\\\le 1 \\\\\\\\ 1-x, & x>1 \\\\end{cases}$
-- Each case on its own line with \\\\\\\\ separator
+- Use begin{cases}: $\\begin{cases} 1+x^2, & 0 \\le x \\le 1 \\\\ 1-x, & x>1 \\end{cases}$
+- Each case on its own line with \\\\ separator
 
 Chemistry (if present):
 - Use subscripts: $H_2O$, $CO_2$, $NaCl$
-- Reactions: $2H_2 + O_2 \\\\rightarrow 2H_2O$
+- Reactions: $2H_2 + O_2 \\rightarrow 2H_2O$
 
 Physics:
-- Units in text mode: $5 \\\\text{ m/s}^2$
-- Vectors: $\\\\vec{F} = m\\\\vec{a}$
+- Units in text mode: $5 \\text{ m/s}^2$
+- Vectors: $\\vec{F} = m\\vec{a}$
 
 PRESERVE SOURCE TEXT EXACTLY (CRITICAL):
 • Use the EXACT words from the extracted text
@@ -589,6 +594,7 @@ PRESERVE SOURCE TEXT EXACTLY (CRITICAL):
 • Only wrap mathematical expressions in $ or $$
 • Preserve original numbering: Q1, Q.1, 1., (1), etc.
 • Keep option labels as-is: (a), a), A., etc.
+• PRESERVE ALL SPACES before and after $ delimiters
 
 QUESTION TYPE DETECTION:
 - mcq: Has 4-5 options with (a)/(b)/(c)/(d) or A/B/C/D labels
@@ -599,14 +605,14 @@ QUESTION TYPE DETECTION:
 - integer: Asks for numeric answer only
 - assertionreason: Has "Assertion:" and "Reason:" statements
 
-JSON SCHEMA (STRICT - Remember double backslashes!):
+JSON SCHEMA (STRICT - Remember single backslash for LaTeX in JSON!):
 [
   {
-    "text": "If $f(x)=\\\\begin{cases} 1+x^2, & 0 \\\\le x \\\\le 1 \\\\\\\\ 1-x, & x>1 \\\\end{cases}$ then find the limit.",
+    "text": "If $f(x)=\\begin{cases} 1+x^2, & 0 \\le x \\le 1 \\\\ 1-x, & x>1 \\end{cases}$ then find the limit.",
     "type": "mcq",
     "options": [
-      {"text": "$\\\\lim_{x \\\\to 1} f(x) \\\\neq 0$", "isCorrect": false},
-      {"text": "$\\\\lim_{x \\\\to 1} f(x) = 2$", "isCorrect": true},
+      {"text": "$\\lim_{x \\to 1} f(x) \\neq 0$", "isCorrect": false},
+      {"text": "$\\lim_{x \\to 1} f(x) = 2$", "isCorrect": true},
       {"text": "f is discontinuous at $x = 1$", "isCorrect": false},
       {"text": "none of these", "isCorrect": false}
     ],
@@ -618,7 +624,7 @@ JSON SCHEMA (STRICT - Remember double backslashes!):
     "needsReview": false
   },
   {
-    "text": "What is $\\\\frac{dy}{dx}$ if $y = x^2 + 3x + 5$?",
+    "text": "What is $\\frac{dy}{dx}$ if $y = x^2 + 3x + 5$?",
     "type": "short",
     "correctAnswerText": "$2x + 3$",
     "questionNumber": "2",
@@ -626,6 +632,17 @@ JSON SCHEMA (STRICT - Remember double backslashes!):
     "topic": "${options.topic || 'General'}",
     "difficulty": "easy",
     "confidence": 0.98,
+    "needsReview": false
+  },
+  {
+    "text": "If $A = 1 + r + r^2 + ... + \\infty$, then find the value of $r$.",
+    "type": "short",
+    "correctAnswerText": "$|r| < 1$ for convergence",
+    "questionNumber": "3",
+    "subject": "${options.subject || 'Unknown'}",
+    "topic": "${options.topic || 'General'}",
+    "difficulty": "medium",
+    "confidence": 0.90,
     "needsReview": false
   }
 ]
@@ -650,7 +667,9 @@ SCHEMA FIELDS:
 ✓ Extract ALL questions (count must match source exactly)
 ✓ Preserve exact wording (no paraphrasing)
 ✓ Identify correct answers from answer keys if present
-✓ ALL math expressions in LaTeX with DOUBLE BACKSLASHES ($\\\\frac{1}{2}$, not $\\frac{1}{2}$)
+✓ ALL math expressions in LaTeX with SINGLE BACKSLASH ($\\frac{1}{2}$, NOT $\\\\frac{1}{2}$)
+✓ Convert Unicode to LaTeX: ∞→\\infty, ²→^2, ³→^3, ×→\\times, ÷→\\div, ≤→\\leq, ≥→\\geq
+✓ Preserve ALL spaces around $ delimiters
 ✓ Set confidence=0.95 for clear text, 0.7-0.8 for unclear
 ✓ Flag needsReview=true only if confidence < 0.7
 ✓ Determine difficulty: easy (basic recall), medium (application), hard (analysis/synthesis)
@@ -726,27 +745,15 @@ ${extractedText}`;
 
           // 3) If still failing, sanitize LaTeX and other bad escapes and retry
           if (!questions) {
-            console.log('[Vertex AI] Standard parse failed. Attempting LaTeX escape sanitization...');
+            console.log('[Vertex AI] Standard parse failed. Attempting JSON repair...');
             let sanitized = jsonMatch[0];
             
-            // Strategy: Pre-process the raw JSON string to properly escape backslashes
-            // In JSON strings, backslashes must be escaped as \\ 
-            // But the AI might output LaTeX like \frac which should be \\frac in JSON
+            // Strategy: The AI should already output properly escaped JSON
+            // If it fails to parse, it's likely due to other issues
+            // Only do minimal cleaning - remove control characters and extra whitespace
             
-            // First pass: Find all string values in JSON (between quotes)
-            // and properly escape backslashes within them
-            sanitized = sanitized.replace(
-              /"((?:[^"\\]|\\.)*)"/g,
-              (match, content) => {
-                // Within quoted strings, ensure backslashes are doubled
-                // But preserve already-escaped sequences
-                let escaped = content
-                  .replace(/\\\\/g, '\\u0000') // Temp marker for already-escaped backslashes
-                  .replace(/\\/g, '\\\\')       // Escape all remaining backslashes
-                  .replace(/\\u0000/g, '\\\\'); // Restore the already-escaped ones
-                return `"${escaped}"`;
-              }
-            );
+            // Remove any control characters that might break JSON
+            sanitized = sanitized.replace(/[\x00-\x1F\x7F-\x9F]/g, ' ');
             
             try {
               questions = JSON.parse(sanitized) as ExtractedQuestion[];

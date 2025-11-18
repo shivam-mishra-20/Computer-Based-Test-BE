@@ -141,11 +141,34 @@ export async function getAttemptView(attemptId: string, userId: string) {
         sanitized.explanation = q.explanation;
       }
     }
-    // Reorder options if snapshot exists
-    const optOrder = attempt.snapshot.optionOrderByQuestion?.[qid];
-    if (sanitized.options && optOrder && optOrder.length === sanitized.options.length) {
-      const byId: Record<string, any> = Object.fromEntries(sanitized.options.map((o: any) => [o._id.toString(), o]));
-      sanitized.options = optOrder.map((id) => byId[id.toString()]);
+    // If result is published, show correct answers and explanations
+    if (attempt.resultPublished) {
+      if (q.explanation) {
+        sanitized.explanation = q.explanation;
+      }
+      // Include isCorrect flag for students to see correct answers after results are published
+      if (q.options) {
+        sanitized.options = q.options.map((o) => ({ 
+          _id: o._id, 
+          text: o.text,
+          isCorrect: o.isCorrect // Include correct answer flag when results are published
+        }));
+      }
+    }
+    // Reorder options if snapshot exists (only if options haven't been rebuilt above)
+    if (!attempt.resultPublished) {
+      const optOrder = attempt.snapshot.optionOrderByQuestion?.[qid];
+      if (sanitized.options && optOrder && optOrder.length === sanitized.options.length) {
+        const byId: Record<string, any> = Object.fromEntries(sanitized.options.map((o: any) => [o._id.toString(), o]));
+        sanitized.options = optOrder.map((id) => byId[id.toString()]);
+      }
+    } else {
+      // For published results, also maintain the order but with isCorrect
+      const optOrder = attempt.snapshot.optionOrderByQuestion?.[qid];
+      if (sanitized.options && optOrder && optOrder.length === sanitized.options.length) {
+        const byId: Record<string, any> = Object.fromEntries(sanitized.options.map((o: any) => [o._id.toString(), o]));
+        sanitized.options = optOrder.map((id) => byId[id.toString()]);
+      }
     }
     questionDict[qid] = sanitized;
   }
@@ -175,8 +198,16 @@ export async function getAttemptViewForTeacher(attemptId: string) {
   const questionDict: Record<string, any> = {};
   for (const [qid, q] of qmap) {
     const base: any = sanitizeQuestion(q);
-    // For teacher show explanation
+    // For teacher, show explanation and correct answers
     if (q.explanation) base.explanation = q.explanation;
+    // Include isCorrect flag for teachers to see correct answers
+    if (q.options) {
+      base.options = q.options.map((o) => ({ 
+        _id: o._id, 
+        text: o.text,
+        isCorrect: o.isCorrect // Include the correct answer flag for teachers
+      }));
+    }
     questionDict[qid] = base;
   }
   return { attempt, exam: { _id: exam._id, title: exam.title, totalDurationMins: exam.totalDurationMins }, sections, questions: questionDict };
@@ -347,10 +378,23 @@ export async function listPendingReviewAttempts() {
 export async function adjustAnswerScore(attemptId: string, answerId: string, score: number, feedback?: string) {
   const attempt = await Attempt.findById(attemptId);
   if (!attempt) throw new Error('Attempt not found');
-  const ans = attempt.answers.find(a => a.questionId.toString() === answerId);
-  if (!ans) throw new Error('Answer not found');
-  ans.scoreAwarded = score;
-  if (feedback) ans.aiFeedback = feedback;
+  
+  // Find existing answer or create a new one if it doesn't exist
+  let ans = attempt.answers.find(a => a.questionId.toString() === answerId);
+  if (!ans) {
+    // Create a new answer entry if the student didn't answer this question
+    const newAnswer: IAnswerItem = {
+      questionId: new Types.ObjectId(answerId),
+      scoreAwarded: score,
+    } as IAnswerItem;
+    if (feedback) newAnswer.aiFeedback = feedback;
+    attempt.answers.push(newAnswer);
+  } else {
+    // Update existing answer
+    ans.scoreAwarded = score;
+    if (feedback) ans.aiFeedback = feedback;
+  }
+  
   // recompute total
   attempt.totalScore = attempt.answers.reduce((sum, a) => sum + (typeof a.scoreAwarded === 'number' ? a.scoreAwarded : 0), 0);
   await attempt.save();

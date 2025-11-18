@@ -31,7 +31,16 @@ export async function normalizeMathematicalExpressions(text: string): Promise<st
     const prompt = `You are a mathematical notation expert. Convert ALL mathematical expressions in the following text to proper LaTeX format wrapped in $ for inline math or $$ for display math.
 
 CRITICAL RULES:
-1. Use proper LaTeX commands for all mathematical symbols:
+1. CONVERT UNICODE MATHEMATICAL SYMBOLS TO LATEX:
+   - Superscripts: ² → ^2, ³ → ^3, ⁴ → ^4, etc.
+   - Infinity: ∞ → \\infty
+   - Multiplication: × → \\times
+   - Division: ÷ → \\div
+   - Inequalities: ≤ → \\leq, ≥ → \\geq, ≠ → \\neq, ≈ → \\approx
+   - Greek: α → \\alpha, β → \\beta, π → \\pi, θ → \\theta, etc.
+   - Subscripts: ₁ → _1, ₂ → _2, etc.
+
+2. Use proper LaTeX commands for all mathematical symbols:
    - Fractions: \\frac{numerator}{denominator}
    - Square roots: \\sqrt{expression} or \\sqrt[n]{expression}
    - Integrals: \\int, \\iint, \\iiint with proper limits \\int_{a}^{b}
@@ -52,12 +61,25 @@ CRITICAL RULES:
    - Logic: \\forall, \\exists, \\implies, \\iff
    - Arrows: \\rightarrow, \\Rightarrow, \\leftrightarrow
    - Special: \\infty, \\pm, \\times, \\div, \\cdot
+   - Ellipsis: ... can stay as is or use \\ldots, \\cdots
 
-2. Simple inline expressions like "x + 5 = 10" become "$x + 5 = 10$"
-3. Complex multi-line equations use $$...$$
-4. Preserve ALL non-mathematical text exactly as is
-5. Chemical formulas: H₂O becomes H_2O, CO₂ becomes CO_2 (or use \\ce{H2O} with mhchem)
-6. Physics units: use \\text{} for units, e.g., "$5 \\text{ m/s}^2$"
+3. PRESERVE ALL SPACING:
+   - Maintain spaces before and after $ delimiters
+   - Keep spaces between words and equations
+   - Example: "If $A = 1 + r + r^2$ then" (spaces preserved)
+
+4. Simple inline expressions like "x + 5 = 10" become "$x + 5 = 10$"
+5. Complex multi-line equations use $$...$$
+6. Preserve ALL non-mathematical text exactly as is
+7. Chemical formulas: H₂O becomes $H_2O$, CO₂ becomes $CO_2$
+8. Physics units: use \\text{} for units, e.g., "$5 \\text{ m/s}^2$"
+
+EXAMPLES:
+Input: "If A = 1 + r + r² + ............∞, then the value of r will be"
+Output: "If $A = 1 + r + r^2 + ... + \\infty$, then the value of r will be"
+
+Input: "The limit is lim(x→∞) f(x) = 0"
+Output: "The limit is $\\lim_{x \\to \\infty} f(x) = 0$"
 
 Return the ENTIRE text with mathematical expressions properly formatted in LaTeX. Do NOT add explanations, ONLY return the processed text.
 
