@@ -105,7 +105,19 @@ export async function generateSolutionsForPaper(paper: GeneratedPaperResult): Pr
     });
   
   const sections: { title: string; solutions: { solutionText: string }[] }[] = [];
+  
+  // Validate input
+  if (!paper.sections || paper.sections.length === 0) {
+    throw new Error('Paper has no sections to generate solutions for');
+  }
+  
   for (const sec of paper.sections) {
+    if (!sec.questions || sec.questions.length === 0) {
+      console.warn(`Section "${sec.title}" has no questions, skipping...`);
+      sections.push({ title: sec.title, solutions: [] });
+      continue;
+    }
+    
     const questionsText = sec.questions
       .map((q, i) => {
         const base = `${i + 1}. ${q.text}`;
@@ -121,11 +133,30 @@ export async function generateSolutionsForPaper(paper: GeneratedPaperResult): Pr
         return base;
       })
       .join('\n\n');
-    const prompt = `Provide concise, step-by-step model solutions for the following exam questions. Keep each solution focused, accurate, and avoid unnecessary verbosity. Where relevant, show key formulas or reasoning. Return STRICT JSON ONLY with schema: { "solutions": [{ "solutionText": string }] } and ensure the number of solutions equals the number of questions in order.
-Exam: ${paper.examTitle} ${paper.subject ? `\nSubject: ${paper.subject}` : ''}
-Section: ${sec.title}${sec.instructions ? `\nInstructions: ${sec.instructions}` : ''}
+    const prompt = `You are an expert educator providing detailed, accurate solutions for exam questions.
 
-QUESTIONS:\n${questionsText}`;
+CRITICAL JSON FORMATTING RULES:
+1. Return ONLY a valid JSON object, nothing else
+2. All solution text MUST be on a single line (no newlines within strings)
+3. Escape all special characters: quotes as \\" and backslashes as \\\\
+4. For mathematical equations, use LaTeX: inline $...$ or display $$...$$
+5. Keep solutions clear, accurate, and step-by-step
+6. Provide exactly ${sec.questions.length} solutions in order
+
+REQUIRED JSON STRUCTURE:
+{
+  "solutions": [
+    { "solutionText": "Single line solution with $LaTeX$ escaped properly" }
+  ]
+}
+
+Exam: ${paper.examTitle}${paper.subject ? ` | Subject: ${paper.subject}` : ''}
+Section: ${sec.title}${sec.instructions ? ` | ${sec.instructions}` : ''}
+
+QUESTIONS:
+${questionsText}
+
+Return ONLY the JSON object:`;
     
     const result = await model.generateContent({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -133,11 +164,62 @@ QUESTIONS:\n${questionsText}`;
     const raw = result.response.candidates?.[0]?.content?.parts?.[0]?.text || '';
     let parsed: any;
     try {
-      parsed = JSON.parse(raw);
-    } catch {
-      const m = raw.match(/\{[\s\S]*\}/);
-      if (!m) throw new Error('Failed to parse solutions JSON');
-      parsed = JSON.parse(m[0]);
+      // Clean up the response - remove markdown code blocks if present
+      let cleaned = raw.trim();
+      cleaned = cleaned.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+      cleaned = cleaned.trim();
+      
+      // Try direct parse first
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch (e1) {
+        // Extract JSON object from response
+        const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) {
+          throw new Error('No JSON object found in response');
+        }
+        
+        let jsonStr = jsonMatch[0];
+        
+        // Aggressive cleanup for common JSON issues
+        // 1. Fix unescaped newlines within strings
+        jsonStr = jsonStr.replace(/"solutionText":\s*"([^"]*(?:\\"[^"]*)*)"/g, (match, content) => {
+          // Replace actual newlines with \\n
+          const fixed = content.replace(/\n/g, '\\n').replace(/\r/g, '');
+          return `"solutionText": "${fixed}"`;
+        });
+        
+        // 2. Remove trailing commas before closing brackets
+        jsonStr = jsonStr.replace(/,\s*([\]}])/g, '$1');
+        
+        // 3. Try parsing again
+        try {
+          parsed = JSON.parse(jsonStr);
+        } catch (e2) {
+          // Last resort: try to extract solutions manually using regex
+          console.warn('Falling back to manual solution extraction');
+          const solutionMatches = [...jsonStr.matchAll(/"solutionText"\s*:\s*"((?:[^"\\]|\\.)*)"/g)];
+          if (solutionMatches.length > 0) {
+            parsed = {
+              solutions: solutionMatches.map(m => ({
+                solutionText: m[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+              }))
+            };
+          } else {
+            throw e2;
+          }
+        }
+      }
+    } catch (parseError) {
+      console.error('Failed to parse AI response:', raw);
+      console.error('Parse error:', parseError);
+      throw new Error(`Failed to parse solutions JSON: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`);
+    }
+    
+    // Validate parsed response
+    if (!parsed || !Array.isArray(parsed.solutions)) {
+      console.error('Invalid AI response structure:', parsed);
+      throw new Error('AI response missing solutions array');
     }
     const sols = Array.isArray(parsed?.solutions)
       ? parsed.solutions.map((s: any) => ({ solutionText: String(s.solutionText || '').slice(0, 4000) }))
@@ -149,7 +231,10 @@ QUESTIONS:\n${questionsText}`;
       adjusted = adjusted.concat(Array.from({ length: count - adjusted.length }, () => ({ solutionText: 'Solution forthcoming.' })));
     }
     sections.push({ title: sec.title, solutions: adjusted });
+    console.log(`✓ Generated ${adjusted.length} solutions for section: ${sec.title}`);
   }
+  
+  console.log(`✓ Successfully generated solutions for ${sections.length} sections`);
   return { sections };
   } catch (error) {
     console.error('[AI Service] Error generating solutions:', error);

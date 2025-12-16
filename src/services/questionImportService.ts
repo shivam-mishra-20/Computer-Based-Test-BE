@@ -85,19 +85,19 @@ export class QuestionImportService {
       chapter?: string;
       section?: string;
       marks?: number;
-      model?: 'gemini-2.5-flash' | 'gemini-2.5-pro' | 'gemini-2.0-flash';
+      model?: 'gemini-2.5-flash' | 'gemini-2.5-pro';
     } = {}
   ): Promise<ImportResult> {
     const startTime = Date.now();
-    // Default to Flash for speed, Pro for complex papers
-    let selectedModel = options.model || 'gemini-2.5-flash';
+    // Default to Gemini 2.5 Pro for best performance
+    let selectedModel = options.model || 'gemini-2.5-pro';
     
     console.log(`[Import] DEBUG: Received model = "${selectedModel}"`);
     
     // Strip "publishers/google/models/" prefix if present (frontend may send full path)
     if (selectedModel.includes('/')) {
       const originalModel = selectedModel;
-      selectedModel = (selectedModel.split('/').pop() || 'gemini-2.5-flash') as typeof selectedModel;
+      selectedModel = (selectedModel.split('/').pop() || 'gemini-2.5-pro') as typeof selectedModel;
       console.log(`[Import] DEBUG: Stripped "${originalModel}" → "${selectedModel}"`);
     }
     
@@ -458,18 +458,12 @@ export class QuestionImportService {
       subject?: string;
       topic?: string;
       batchId: Types.ObjectId;
-      model?: 'gemini-2.5-flash' | 'gemini-2.5-pro' | 'gemini-2.0-flash';
+      model?: 'gemini-2.5-flash' | 'gemini-2.5-pro' | 'gemini-2.0-flash' | 'gemini-3.0' | 'gemini-3.0-pro';
     }
   ): Promise<ExtractedQuestion[]> {
     try {
-      let modelName = options.model || 'gemini-2.5-flash';
-      
-      // Strip "publishers/google/models/" prefix if present (frontend may send full path)
-      if (modelName.includes('/')) {
-        modelName = (modelName.split('/').pop() || 'gemini-2.5-flash') as typeof modelName;
-      }
-      
-      console.log(`[Vertex AI] Structuring with ${modelName}...`);
+      const modelName = options.model || 'gemini-2.5-pro';
+      console.log(`[Vertex AI] Using model: ${modelName}`);
       
       const vertexAI = getVertexAI();
       const generativeModel = vertexAI.getGenerativeModel({
@@ -478,123 +472,68 @@ export class QuestionImportService {
           temperature: 0.0, // Maximum consistency
           topP: 0.95,
           topK: 40,
-          maxOutputTokens: 32768, // Increased for math-heavy content with LaTeX
+          maxOutputTokens: 16384, // Increased to handle more questions (up to ~20-30 questions)
         },
       });
 
-      const prompt = `You are an elite question paper analyzer with expertise in mathematical, scientific, and academic content extraction. Your task is to parse Google Cloud Vision API output and structure it into a precise JSON array of questions.
+      const prompt = `You are a production-grade academic question extraction engine.
 
-🎯 PRIMARY MISSION: PRESERVE EXACT SOURCE TEXT
-• Use the EXACT words, numbers, and phrases from the Vision API output
-• Do NOT paraphrase, rewrite, or "improve" the text
-• Do NOT correct spelling, grammar, or formatting
-• ONLY add LaTeX markup around mathematical expressions
-• Maintain original question numbering exactly as shown (Q1, 1., Question 1, etc.)
-• Keep option labels exactly as shown: (a), (b), a), A., etc.
-• PRESERVE ALL SPACING - especially around mathematical expressions
+Your task:
+Extract ALL questions from the OCR text below and return clean, structured content
+that can be safely stored, displayed, and reused for exams, PDFs, and question banks.
 
-⚠️ JSON FORMATTING - CRITICAL:
-• Return ONLY a valid JSON array - no markdown code blocks, no explanations
-• In JSON strings, backslashes MUST be escaped with ONE backslash: use \\ for LaTeX backslashes
-• Example: "text": "$\\frac{1}{2}$" NOT "text": "$\\\\frac{1}{2}$"
-• Example: "$x^2 + 5x + 6 = 0$" (powers don't need backslash, just ^)
-• Example: "$\\sin(x)$" NOT "$sin(x)$"
-• ALWAYS close all JSON objects and arrays properly
-• Ensure output is complete - never truncate mid-object
+🎯 CRITICAL REQUIREMENTS:
+- Extract EVERY SINGLE question from the source - DO NOT SKIP ANY
+- If the source has 10 questions, you MUST output exactly 10 question blocks
+- Preserve the original wording EXACTLY - no paraphrasing, no rewriting
+- Do NOT correct grammar or spelling errors
+- Do NOT output JSON, markdown, or any other format
+- ONLY add LaTeX markup around mathematical expressions using $...$
+- COMPLETE THE ENTIRE OUTPUT - do not stop until all questions are extracted
 
-📐 CRITICAL LATEX FORMATTING RULES:
-1. ALL mathematical expressions MUST use LaTeX formatting
-2. Inline math: $x^2 + 5x + 6 = 0$ (single dollar signs)
-3. Display equations: $$\\int_0^{\\pi} \\sin(x)\\, dx$$ (double dollar signs for display)
-4. Wrap ONLY the mathematical part, preserve surrounding text and spaces verbatim
-5. Remember: In JSON strings, ONE backslash for each LaTeX command
-6. PRESERVE SPACES: "text": "If $A = 1 + r + r^2 + ...$ then" (spaces around equations maintained)
-7. ELLIPSIS: Use "..." for ellipsis unless LaTeX dots (\\ldots or \\cdots) clearly needed
-8. UNICODE: Convert Unicode math symbols to LaTeX (∞→\\infty, ²→^2, ×→\\times, ÷→\\div)
+Return output in the EXACT format below.
+Repeat the block for EACH AND EVERY question.
 
-COMPREHENSIVE LATEX REFERENCE (Remember: Single backslash in JSON for LaTeX commands!):
-Basic Operations:
-- Addition: $a + b$
-- Subtraction: $a - b$  
-- Multiplication: $a \\times b$ or $a \\cdot b$
-- Division: $a \\div b$ or $\\frac{a}{b}$
-- Equals: $=$, Not equals: $\\neq$
+------------------------------------
+QUESTION_NUMBER: <as in source or sequential>
+QUESTION_TEXT: <exact question text with LaTeX>
+QUESTION_TYPE: mcq | truefalse | fill | short | long | integer | assertionreason
 
-Powers and Roots:
-- Superscript: $x^2$, $x^{2n}$, $e^{-x}$
-- Subscript: $x_1$, $x_{n+1}$
-- Square root: $\\sqrt{x}$, $\\sqrt{x^2 + y^2}$
-- Nth root: $\\sqrt[3]{x}$, $\\sqrt[n]{x}$
+OPTION_A: <text or EMPTY>
+OPTION_B: <text or EMPTY>
+OPTION_C: <text or EMPTY>
+OPTION_D: <text or EMPTY>
 
-Fractions:
-- Simple: $\\frac{a}{b}$
-- Complex: $\\frac{x^2 + 1}{x - 1}$
-- Mixed: $2\\frac{1}{3}$
+CORRECT_OPTION: A | B | C | D | UNKNOWN
+CORRECT_ANSWER_TEXT: <text or EMPTY>
 
-Greek Letters:
-- Lowercase: $\\alpha$, $\\beta$, $\\gamma$, $\\delta$, $\\epsilon$, $\\theta$, $\\lambda$, $\\mu$, $\\pi$, $\\sigma$, $\\omega$
-- Uppercase: $\\Gamma$, $\\Delta$, $\\Sigma$, $\\Omega$, $\\Phi$
+SUBJECT: ${options.subject || 'Unknown'}
+TOPIC: ${options.topic || 'General'}
+DIFFICULTY: easy | medium | hard
 
-Trigonometry:
-- $\\sin(x)$, $\\cos(x)$, $\\tan(x)$
-- $\\sin^2(x)$, $\\cos^{-1}(x)$
-- $\\sec(x)$, $\\csc(x)$, $\\cot(x)$
+CONFIDENCE: <0.0 – 1.0>
+NEEDS_REVIEW: true | false
+------------------------------------
 
-Calculus:
-- Derivative: $\\frac{dy}{dx}$, $\\frac{d^2y}{dx^2}$
-- Partial: $\\frac{\\partial f}{\\partial x}$
-- Integral: $\\int f(x)\\, dx$
-- Definite: $\\int_a^b f(x)\\, dx$
-- Double: $\\iint$, Triple: $\\iiint$
-- Limit: $\\lim_{x \\to a} f(x)$
-- Summation: $\\sum_{i=1}^{n} a_i$
-- Product: $\\prod_{i=1}^{n} a_i$
+RULES (STRICT):
+- Each field must be on a SINGLE LINE
+- Preserve LaTeX exactly as-is using $...$
+- Do NOT escape LaTeX for JSON
+- Do NOT invent answers or options
+- If answer is unclear, set CORRECT_OPTION to UNKNOWN
+- If OCR text is unclear, set NEEDS_REVIEW to true
+- Every question must be in its own block
+- If an option doesn't exist, write EMPTY
+- EXTRACT ALL QUESTIONS - Count them in the source and match that count exactly
+- Do NOT stop generating until you've processed every question
 
-Relations:
-- $<$, $>$, $\\leq$, $\\geq$, $\\neq$
-- $\\approx$, $\\equiv$, $\\propto$
-- $\\in$ (element of), $\\notin$
-- $\\subset$, $\\subseteq$, $\\supset$
-
-Sets and Logic:
-- Union: $\\cup$, Intersection: $\\cap$
-- Empty set: $\\emptyset$ or $\\varnothing$
-- $\\forall$ (for all), $\\exists$ (exists)
-- $\\implies$ (implies), $\\iff$ (if and only if)
-- $\\land$ (and), $\\lor$ (or), $\\neg$ (not)
-
-Special Symbols:
-- Infinity: $\\infty$ (convert ∞ to this)
-- Plus-minus: $\\pm$, Minus-plus: $\\mp$
-- Dot product: $\\cdot$, Cross: $\\times$ (convert × to this)
-- Angle: $\\angle$, Degree: $^{\\circ}$
-- Perpendicular: $\\perp$, Parallel: $\\parallel$
-- Ellipsis in math: $\\ldots$ (for ..., but simple ... is also acceptable)
-
-Matrices and Vectors:
-- Vector: $\\vec{v}$ or $\\mathbf{v}$
-- Matrix: $\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}$
-- Determinant: $\\begin{vmatrix} a & b \\\\ c & d \\end{vmatrix}$
-
-Piecewise Functions (IMPORTANT):
-- Use begin{cases}: $\\begin{cases} 1+x^2, & 0 \\le x \\le 1 \\\\ 1-x, & x>1 \\end{cases}$
-- Each case on its own line with \\\\ separator
-
-Chemistry (if present):
-- Use subscripts: $H_2O$, $CO_2$, $NaCl$
-- Reactions: $2H_2 + O_2 \\rightarrow 2H_2O$
-
-Physics:
-- Units in text mode: $5 \\text{ m/s}^2$
-- Vectors: $\\vec{F} = m\\vec{a}$
-
-PRESERVE SOURCE TEXT EXACTLY (CRITICAL):
-• Use the EXACT words from the extracted text
-• Do NOT paraphrase, correct spelling, or rephrase
-• Only wrap mathematical expressions in $ or $$
-• Preserve original numbering: Q1, Q.1, 1., (1), etc.
-• Keep option labels as-is: (a), a), A., etc.
-• PRESERVE ALL SPACES before and after $ delimiters
+LATEX FORMATTING:
+- Use $...$ for inline math (e.g., $x^2 + 5x + 6 = 0$)
+- Use $$...$$ for display equations
+- Common: $\frac{a}{b}$, $\sqrt{x}$, $x^2$, $x_1$, $\sum$, $\int$, $\lim$
+- Greek: $\alpha$, $\beta$, $\gamma$, $\theta$, $\pi$
+- Relations: $\leq$, $\geq$, $\neq$, $\approx$
+- Convert Unicode: ∞→$\infty$, ²→$^2$, ×→$\times$
 
 QUESTION TYPE DETECTION:
 - mcq: Has 4-5 options with (a)/(b)/(c)/(d) or A/B/C/D labels
@@ -605,80 +544,32 @@ QUESTION TYPE DETECTION:
 - integer: Asks for numeric answer only
 - assertionreason: Has "Assertion:" and "Reason:" statements
 
-JSON SCHEMA (STRICT - Remember single backslash for LaTeX in JSON!):
-[
-  {
-    "text": "If $f(x)=\\begin{cases} 1+x^2, & 0 \\le x \\le 1 \\\\ 1-x, & x>1 \\end{cases}$ then find the limit.",
-    "type": "mcq",
-    "options": [
-      {"text": "$\\lim_{x \\to 1} f(x) \\neq 0$", "isCorrect": false},
-      {"text": "$\\lim_{x \\to 1} f(x) = 2$", "isCorrect": true},
-      {"text": "f is discontinuous at $x = 1$", "isCorrect": false},
-      {"text": "none of these", "isCorrect": false}
-    ],
-    "questionNumber": "1",
-    "subject": "${options.subject || 'Unknown'}",
-    "topic": "${options.topic || 'General'}",
-    "difficulty": "medium",
-    "confidence": 0.95,
-    "needsReview": false
-  },
-  {
-    "text": "What is $\\frac{dy}{dx}$ if $y = x^2 + 3x + 5$?",
-    "type": "short",
-    "correctAnswerText": "$2x + 3$",
-    "questionNumber": "2",
-    "subject": "${options.subject || 'Unknown'}",
-    "topic": "${options.topic || 'General'}",
-    "difficulty": "easy",
-    "confidence": 0.98,
-    "needsReview": false
-  },
-  {
-    "text": "If $A = 1 + r + r^2 + ... + \\infty$, then find the value of $r$.",
-    "type": "short",
-    "correctAnswerText": "$|r| < 1$ for convergence",
-    "questionNumber": "3",
-    "subject": "${options.subject || 'Unknown'}",
-    "topic": "${options.topic || 'General'}",
-    "difficulty": "medium",
-    "confidence": 0.90,
-    "needsReview": false
-  }
-]
+EXAMPLE OUTPUT:
+------------------------------------
+QUESTION_NUMBER: 1
+QUESTION_TEXT: If $f(x) = x^2 + 3x + 5$, find $\frac{dy}{dx}$.
+QUESTION_TYPE: mcq
 
-SCHEMA FIELDS:
-- text: Question text (REQUIRED)
-- type: mcq|truefalse|fill|short|long|integer|assertionreason (REQUIRED)
-- options: Array of {text, isCorrect} for MCQ/True-False (REQUIRED for mcq/truefalse)
-- correctAnswerText: Answer for non-MCQ types
-- integerAnswer: Numeric answer for integer type
-- assertion/reason: For assertion-reason questions
-- questionNumber, subject, topic, difficulty, confidence, needsReview (all REQUIRED)
+OPTION_A: $2x + 3$
+OPTION_B: $x^2 + 3$
+OPTION_C: $2x$
+OPTION_D: $3x + 5$
 
-🔍 QUESTION COUNT GUARANTEE:
-• If the source has 11 questions → output MUST have exactly 11 JSON objects
-• Do NOT merge multiple questions into one
-• Do NOT split one question into multiple parts
-• Each distinct question number = one JSON object
-• Preserve sequential order strictly
+CORRECT_OPTION: A
+CORRECT_ANSWER_TEXT: EMPTY
 
-✅ QUALITY CHECKLIST:
-✓ Extract ALL questions (count must match source exactly)
-✓ Preserve exact wording (no paraphrasing)
-✓ Identify correct answers from answer keys if present
-✓ ALL math expressions in LaTeX with SINGLE BACKSLASH ($\\frac{1}{2}$, NOT $\\\\frac{1}{2}$)
-✓ Convert Unicode to LaTeX: ∞→\\infty, ²→^2, ³→^3, ×→\\times, ÷→\\div, ≤→\\leq, ≥→\\geq
-✓ Preserve ALL spaces around $ delimiters
-✓ Set confidence=0.95 for clear text, 0.7-0.8 for unclear
-✓ Flag needsReview=true only if confidence < 0.7
-✓ Determine difficulty: easy (basic recall), medium (application), hard (analysis/synthesis)
-✓ Return ONLY valid JSON array (no markdown fences, no explanations, no preamble)
-✓ COMPLETE THE ENTIRE RESPONSE - close all JSON objects and arrays properly
-✓ Never truncate mid-object - ensure output ends with ]
+SUBJECT: Mathematics
+TOPIC: Calculus
+DIFFICULTY: easy
 
-📄 VISION API OUTPUT TO PARSE:
-${extractedText}`;
+CONFIDENCE: 0.95
+NEEDS_REVIEW: false
+------------------------------------
+
+OCR TEXT TO PROCESS:
+<<<BEGIN>>>
+${extractedText}
+<<<END>>>`;
 
       console.log(`[Vertex AI] Sending ${extractedText.length} chars for structuring...`);
       
@@ -701,109 +592,19 @@ ${extractedText}`;
         }
       }
       
-      // Clean response from code fences and whitespace
-      let cleanedResponse = responseText.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
-
-      // Check if response appears truncated
-      const isTruncated = !cleanedResponse.endsWith(']') && !cleanedResponse.endsWith('}]');
-      if (isTruncated) {
-        console.warn('[Vertex AI] ⚠ Response appears truncated. Attempting repair...');
-        // Try to close incomplete JSON structures
-        const openBraces = (cleanedResponse.match(/\{/g) || []).length;
-        const closeBraces = (cleanedResponse.match(/\}/g) || []).length;
-        const openBrackets = (cleanedResponse.match(/\[/g) || []).length;
-        const closeBrackets = (cleanedResponse.match(/\]/g) || []).length;
-        
-        // Close any unclosed objects/arrays
-        for (let i = 0; i < openBraces - closeBraces; i++) {
-          cleanedResponse += '\n  }';
-        }
-        for (let i = 0; i < openBrackets - closeBrackets; i++) {
-          cleanedResponse += '\n]';
-        }
-        console.log('[Vertex AI] Attempted to repair truncated JSON');
+      // Parse the text-based format instead of JSON
+      const questions = this.parseTextBlockResponse(responseText, options);
+      
+      if (!questions || questions.length === 0) {
+        throw new Error('Failed to parse any questions from Gemini response');
       }
-
-      // Robust JSON parsing: try direct parse, then extract array, then attempt to sanitize
-      let questions: ExtractedQuestion[] | null = null;
-      const attemptParse = (text: string) => {
-        try {
-          return JSON.parse(text) as ExtractedQuestion[];
-        } catch (err) {
-          return null;
-        }
-      };
-
-      // 1) Direct parse
-      questions = attemptParse(cleanedResponse);
-
-      // 2) Extract first JSON array-looking substring and try parse
-      if (!questions) {
-        const jsonMatch = cleanedResponse.match(/\[[\s\S]*\]/);
-        if (jsonMatch) {
-          questions = attemptParse(jsonMatch[0]);
-
-          // 3) If still failing, sanitize LaTeX and other bad escapes and retry
-          if (!questions) {
-            console.log('[Vertex AI] Standard parse failed. Attempting JSON repair...');
-            let sanitized = jsonMatch[0];
-            
-            // Strategy: The AI should already output properly escaped JSON
-            // If it fails to parse, it's likely due to other issues
-            // Only do minimal cleaning - remove control characters and extra whitespace
-            
-            // Remove any control characters that might break JSON
-            sanitized = sanitized.replace(/[\x00-\x1F\x7F-\x9F]/g, ' ');
-            
-            try {
-              questions = JSON.parse(sanitized) as ExtractedQuestion[];
-              console.log('[Vertex AI] ✓ Successfully parsed after LaTeX sanitization');
-            } catch (finalErr) {
-              // Last attempt: remove control characters that may break JSON
-              const ctrlClean = sanitized.replace(/[\x00-\x1F\x7F-\x9F]/g, '');
-              try {
-                questions = JSON.parse(ctrlClean) as ExtractedQuestion[];
-                console.log('[Vertex AI] ✓ Successfully parsed after removing control characters');
-              } catch (finalErr2) {
-                // Final fallback: Extract complete question objects from truncated JSON
-                console.warn('[Vertex AI] JSON parsing failed. Attempting to extract complete questions from partial response...');
-                const extractedQuestions: ExtractedQuestion[] = [];
-                const objRegex = /\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g;
-                const matches = ctrlClean.match(objRegex);
-                
-                if (matches) {
-                  for (const match of matches) {
-                    try {
-                      // Try to parse each object individually
-                      if (match.includes('"text"') && match.includes('"type"')) {
-                        const obj = JSON.parse(match);
-                        if (obj.text && obj.type) {
-                          extractedQuestions.push(obj as ExtractedQuestion);
-                        }
-                      }
-                    } catch {
-                      // Skip invalid objects
-                    }
-                  }
-                }
-                
-                if (extractedQuestions.length > 0) {
-                  console.log(`[Vertex AI] ⚠ Recovered ${extractedQuestions.length} complete questions from truncated response`);
-                  questions = extractedQuestions;
-                } else {
-                  console.error('[Vertex AI] All parse attempts failed');
-                  throw new Error(
-                    `Failed to parse JSON from Gemini response. Last parse error: ${finalErr2 instanceof Error ? finalErr2.message : String(finalErr2)}. Response snippet: ${ctrlClean.slice(0,1200)}`
-                  );
-                }
-              }
-            }
-          }
-        }
-      }
-
-      if (!questions) {
-        throw new Error('Failed to parse JSON response from Gemini');
+      
+      console.log(`[Vertex AI] ✓ Successfully parsed ${questions.length} questions from text format`);
+      
+      // Warn if question count seems suspiciously low
+      if (questions.length < 5) {
+        console.warn(`[Vertex AI] ⚠️ Only ${questions.length} questions extracted - this may be incomplete!`);
+        console.warn(`[Vertex AI] Consider checking if the OCR text contains more questions.`);
       }
 
       // Validate and clean questions
@@ -829,6 +630,150 @@ ${extractedText}`;
     } catch (error) {
       throw new Error(`Question structuring failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
+  }
+
+  /**
+   * Parse the text-block format response from Gemini
+   * Format: Blocks separated by dashes, each field on its own line
+   */
+  private static parseTextBlockResponse(
+    responseText: string,
+    options: { subject?: string; topic?: string }
+  ): ExtractedQuestion[] {
+    const questions: ExtractedQuestion[] = [];
+    
+    // Log the raw response for debugging
+    console.log(`[TextParser] Raw response length: ${responseText.length} chars`);
+    console.log(`[TextParser] First 500 chars: ${responseText.slice(0, 500)}`);
+    
+    // Split by the separator line - be flexible with the pattern
+    // Match: newline, 4+ dashes, optional spaces, newline
+    let blocks = responseText.split(/\n\s*-{4,}\s*\n/).filter(block => block.trim());
+    
+    // If no blocks found with standard separator, try alternative patterns
+    if (blocks.length <= 1) {
+      console.log(`[TextParser] Standard separator not found, trying alternative patterns...`);
+      // Try without newline requirement
+      blocks = responseText.split(/-{10,}/).filter(block => block.trim() && block.includes('QUESTION_'));
+    }
+    
+    // Additional fallback: try to split by QUESTION_NUMBER: pattern if still no blocks
+    if (blocks.length <= 1 && responseText.includes('QUESTION_NUMBER:')) {
+      console.log(`[TextParser] Trying to split by QUESTION_NUMBER pattern...`);
+      const questionSplits = responseText.split(/(?=QUESTION_NUMBER:)/);
+      blocks = questionSplits.filter(block => block.trim() && block.includes('QUESTION_TEXT'));
+    }
+    
+    console.log(`[TextParser] Found ${blocks.length} potential question blocks`);
+    
+    if (blocks.length === 0) {
+      console.error(`[TextParser] No question blocks found! Response preview:\n${responseText.slice(0, 1000)}`);
+      return [];
+    }
+    
+    for (let i = 0; i < blocks.length; i++) {
+      const block = blocks[i];
+      console.log(`[TextParser] Processing block ${i + 1}/${blocks.length}...`);
+      
+      try {
+        const lines = block.split('\n').map(l => l.trim()).filter(l => l);
+        
+        // Extract fields using regex - case insensitive for robustness
+        const getValue = (key: string): string => {
+          const line = lines.find(l => l.toUpperCase().startsWith(`${key.toUpperCase()}:`));
+          if (!line) return '';
+          const colonIndex = line.indexOf(':');
+          return line.substring(colonIndex + 1).trim();
+        };
+        
+        const questionNumber = getValue('QUESTION_NUMBER');
+        const questionText = getValue('QUESTION_TEXT');
+        const questionType = getValue('QUESTION_TYPE').toLowerCase() as ExtractedQuestion['type'];
+        
+        // Skip if no question text found
+        if (!questionText) {
+          console.warn(`[TextParser] Block ${i + 1} skipped - no question text found`);
+          console.log(`[TextParser] Block preview: ${block.slice(0, 200)}`);
+          continue;
+        }
+        
+        const optionA = getValue('OPTION_A');
+        const optionB = getValue('OPTION_B');
+        const optionC = getValue('OPTION_C');
+        const optionD = getValue('OPTION_D');
+        
+        const correctOption = getValue('CORRECT_OPTION').toUpperCase();
+        const correctAnswerText = getValue('CORRECT_ANSWER_TEXT');
+        
+        const subject = getValue('SUBJECT') || options.subject || 'Unknown';
+        const topic = getValue('TOPIC') || options.topic || 'General';
+        const difficultyStr = (getValue('DIFFICULTY') || 'medium').toLowerCase();
+        const difficulty = (['easy', 'medium', 'hard'].includes(difficultyStr) ? difficultyStr : 'medium') as ExtractedQuestion['difficulty'];
+        
+        const confidenceStr = getValue('CONFIDENCE');
+        const confidence = confidenceStr ? parseFloat(confidenceStr) : 0.85;
+        
+        const needsReviewStr = getValue('NEEDS_REVIEW').toLowerCase();
+        const needsReview = needsReviewStr === 'true';
+        
+        // Build options array for MCQ
+        let questionOptions: ExtractedQuestion['options'] = undefined;
+        if (questionType === 'mcq' || questionType === 'truefalse') {
+          const opts: Array<{ text: string; isCorrect: boolean }> = [];
+          
+          if (optionA && optionA !== 'EMPTY') {
+            opts.push({ text: optionA, isCorrect: correctOption === 'A' });
+          }
+          if (optionB && optionB !== 'EMPTY') {
+            opts.push({ text: optionB, isCorrect: correctOption === 'B' });
+          }
+          if (optionC && optionC !== 'EMPTY') {
+            opts.push({ text: optionC, isCorrect: correctOption === 'C' });
+          }
+          if (optionD && optionD !== 'EMPTY') {
+            opts.push({ text: optionD, isCorrect: correctOption === 'D' });
+          }
+          
+          if (opts.length > 0) {
+            questionOptions = opts;
+          }
+        }
+        
+        const question: ExtractedQuestion = {
+          text: questionText,
+          type: questionType || 'short',
+          options: questionOptions,
+          correctAnswerText: (correctAnswerText && correctAnswerText !== 'EMPTY') ? correctAnswerText : undefined,
+          questionNumber: questionNumber || `${questions.length + 1}`,
+          subject,
+          topic,
+          difficulty,
+          confidence: Math.min(Math.max(confidence, 0), 1),
+          needsReview
+        };
+        
+        questions.push(question);
+        console.log(`[TextParser] ✓ Parsed question ${question.questionNumber}: ${question.type}`);
+        
+      } catch (parseError) {
+        console.warn(`[TextParser] Failed to parse block ${i + 1}:`, parseError);
+        console.log(`[TextParser] Failed block preview: ${block.slice(0, 300)}`);
+        // Continue to next block
+      }
+    }
+    
+    console.log(`[TextParser] ===== PARSING SUMMARY =====`);
+    console.log(`[TextParser] Total blocks found: ${blocks.length}`);
+    console.log(`[TextParser] Successfully parsed: ${questions.length}`);
+    console.log(`[TextParser] Failed to parse: ${blocks.length - questions.length}`);
+    
+    if (questions.length < 5 && blocks.length <= 3) {
+      console.warn(`[TextParser] ⚠️ WARNING: Only ${questions.length} questions extracted!`);
+      console.warn(`[TextParser] This may indicate the LLM response was incomplete or incorrectly formatted.`);
+      console.warn(`[TextParser] Full response for debugging:\n${responseText}`);
+    }
+    
+    return questions;
   }
 
   /**

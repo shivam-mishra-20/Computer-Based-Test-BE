@@ -58,6 +58,7 @@ export interface AIGenerationOptions {
   count: number;
   difficulty?: 'easy' | 'medium' | 'hard' | 'mixed';
   questionTypes?: Array<'mcq' | 'truefalse' | 'fill' | 'short' | 'long' | 'integer' | 'assertionreason'>;
+  model?: 'gemini-2.5-pro' | 'gemini-2.5-flash';
   
   // User context
   createdBy: Types.ObjectId;
@@ -138,17 +139,19 @@ export async function generateQuestionsFromText(
   const startTime = Date.now();
   
   try {
-    console.log(`[AI Generation] Generating ${options.count} questions with Gemini 2.5 Pro...`);
+    const selectedModel = options.model || 'gemini-2.5-pro';
+    console.log(`[AI Generation] Using model: ${selectedModel}`);
+    console.log(`[AI Generation] Generating ${options.count} questions...`);
     console.log(`[AI Generation] Metadata: Class=${options.class}, Subject=${options.subject}, Topic=${options.topic || 'N/A'}`);
     
     const vertexAI = getVertexAI();
     const model = vertexAI.getGenerativeModel({
-      model: 'gemini-2.5-pro',
+      model: selectedModel,
       generationConfig: {
         temperature: 0.7,
         topP: 0.95,
         topK: 40,
-        maxOutputTokens: 32768,
+        maxOutputTokens: 8192, // Maximum supported by Gemini models
       },
     });
     

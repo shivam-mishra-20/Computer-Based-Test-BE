@@ -1,11 +1,12 @@
 import { Router } from 'express';
-import { register, login, me } from '../../controllers/authController';
+import { register, login, me, publicRegister } from '../../controllers/authController';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 
 const router = Router();
 
 // POST endpoints used by clients
 router.post('/register', register);
+router.post('/public-register', publicRegister);
 router.post('/login', login);
 router.get('/me', authMiddleware, me);
 

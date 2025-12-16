@@ -2,6 +2,48 @@ import { Request, Response } from 'express';
 import User, { IUser, UserRole } from '../models/User';
 import { logAudit } from '../utils/logger';
 
+// Admin-only: Get pending user registrations
+export const adminGetPendingUsers = async (req: Request, res: Response) => {
+	try {
+		const pendingUsers = await User.find({ status: 'pending' }).select('-password').sort({ createdAt: -1 });
+		res.json(pendingUsers);
+	} catch (err) {
+		res.status(500).json({ message: 'Server error' });
+	}
+};
+
+// Admin-only: Approve user registration
+export const adminApproveUser = async (req: Request, res: Response) => {
+	try {
+		const user = await User.findById(req.params.id);
+		if (!user) return res.status(404).json({ message: 'User not found' });
+		
+		user.status = 'approved';
+		await user.save();
+		
+		await logAudit((req as any).user?.id, 'admin.user.approve', String(user._id), { email: user.email, name: user.name });
+		res.json({ message: 'User approved successfully', user: { id: user._id, name: user.name, email: user.email, status: user.status } });
+	} catch (err) {
+		res.status(500).json({ message: 'Server error' });
+	}
+};
+
+// Admin-only: Reject user registration
+export const adminRejectUser = async (req: Request, res: Response) => {
+	try {
+		const user = await User.findById(req.params.id);
+		if (!user) return res.status(404).json({ message: 'User not found' });
+		
+		user.status = 'rejected';
+		await user.save();
+		
+		await logAudit((req as any).user?.id, 'admin.user.reject', String(user._id), { email: user.email, name: user.name });
+		res.json({ message: 'User rejected successfully', user: { id: user._id, name: user.name, email: user.email, status: user.status } });
+	} catch (err) {
+		res.status(500).json({ message: 'Server error' });
+	}
+};
+
 // Admin-only: Create a user with role teacher or student
 export const adminCreateUser = async (req: Request, res: Response) => {
 	try {
