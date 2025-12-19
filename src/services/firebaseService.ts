@@ -10,14 +10,33 @@ export function initFirebaseAdmin() {
     const projectId = process.env.FIREBASE_PROJECT_ID;
     const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
     const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
-    if (projectId && clientEmail && privateKey) {
-      admin.initializeApp({
-        credential: admin.credential.cert({ projectId, clientEmail, privateKey }),
-      });
-      initialized = true;
+    const storageBucket = process.env.FIREBASE_STORAGE_BUCKET;
+    
+    // Debug: Log which env vars are present
+    console.log('Firebase Init Check:', {
+      hasProjectId: !!projectId,
+      hasClientEmail: !!clientEmail,
+      hasPrivateKey: !!privateKey,
+      hasStorageBucket: !!storageBucket,
+    });
+    
+    if (!projectId || !clientEmail || !privateKey) {
+      console.error('Firebase Admin SDK: Missing required environment variables:');
+      if (!projectId) console.error('  - FIREBASE_PROJECT_ID is missing');
+      if (!clientEmail) console.error('  - FIREBASE_CLIENT_EMAIL is missing');
+      if (!privateKey) console.error('  - FIREBASE_PRIVATE_KEY is missing');
+      if (!storageBucket) console.error('  - FIREBASE_STORAGE_BUCKET is missing (needed for storage)');
+      return;
     }
-  } catch {
-    // ignore init errors; Firebase integration is optional
+    
+    admin.initializeApp({
+      credential: admin.credential.cert({ projectId, clientEmail, privateKey }),
+      storageBucket: storageBucket,
+    });
+    initialized = true;
+    console.log('Firebase Admin SDK initialized successfully');
+  } catch (err) {
+    console.error('Firebase Admin SDK initialization error:', err);
   }
 }
 

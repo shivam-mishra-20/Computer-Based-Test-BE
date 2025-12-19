@@ -23,6 +23,7 @@ export function sanitizeQuestion(q: IQuestion) {
     reason: q.reason,
     tags: q.tags,
     explanation: undefined,
+    diagramUrl: q.diagramUrl,
   };
 }
 

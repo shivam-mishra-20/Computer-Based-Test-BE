@@ -67,7 +67,7 @@ app.use('/api/reports', reportRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/admin', adminRoutes);
-app.use('/api/upload', uploadRoutes);
+app.use('/api/uploads', uploadRoutes);
 app.use('/api/papers', paperRoutes);
 app.use('/api', importRoutes);
 

@@ -2,7 +2,10 @@ import { Types } from 'mongoose';
 import Exam, { IExam } from '../models/Exam';
 import Question, { IQuestion } from '../models/Question';
 import Blueprint, { IBlueprint } from '../models/Blueprint';
+import { ImportedQuestion } from '../models/ImportedQuestion';
+import { getClassQuestionModel } from '../models/ClassQuestion';
 import type { GeneratedPaperResult } from './aiService';
+import mongoose from 'mongoose';
 
 export const createQuestion = async (payload: Partial<IQuestion> & { createdBy: Types.ObjectId }): Promise<IQuestion> => {
   const q = await Question.create(payload as IQuestion);
@@ -10,10 +13,99 @@ export const createQuestion = async (payload: Partial<IQuestion> & { createdBy: 
 };
 
 export const listQuestions = async (filter: any = {}, limit = 50, skip = 0) => {
-  const [items, total] = await Promise.all([
-    Question.find(filter).limit(limit).skip(skip).sort({ createdAt: -1 }),
-    Question.countDocuments(filter),
-  ]);
+  // Aggregate questions from:
+  // 1. ImportedQuestions collection
+  // 2. All class_* collections (class_7, class_8, class_11, etc.)
+
+  const allQuestions: any[] = [];
+
+  // 1. Get questions from ImportedQuestions collection
+  const importedQuestions = await ImportedQuestion.find().limit(1000).sort({ createdAt: -1 }).lean();
+  allQuestions.push(...importedQuestions.map((q: any) => ({
+    ...q,
+    _id: q._id,
+    text: q.text,
+    type: q.type,
+    options: q.options,
+    correctAnswerText: q.correctAnswerText,
+    imageUrl: q.diagramUrl,
+    explanation: q.originalText || '',
+    source: 'imported',
+    tags: {
+      subject: q.subject,
+      topic: q.topic,
+      difficulty: q.difficulty,
+      chapter: q.chapter,
+    }
+  })));
+
+  // 3. Get all class_* collections dynamically
+  const db = mongoose.connection.db;
+  if (db) {
+    const collections = await db.listCollections().toArray();
+    const classCollections = collections
+      .map(c => c.name)
+      .filter(name => name.startsWith('class_'));
+
+    // Fetch questions from each class collection
+    for (const collectionName of classCollections) {
+      try {
+        // Extract class name from collection (e.g., class_11 -> 11)
+        const className = collectionName.replace('class_', '');
+        const ClassModel = getClassQuestionModel(className);
+        const classQuestions = await ClassModel.find().limit(1000).sort({ createdAt: -1 }).lean();
+        
+        allQuestions.push(...classQuestions.map((q: any) => ({
+          ...q,
+          _id: q._id,
+          text: q.text,
+          type: q.type,
+          options: q.options,
+          correctAnswerText: q.correctAnswerText,
+          imageUrl: q.diagramUrl,
+          explanation: q.explanation,
+          source: 'Smart Import',
+          tags: {
+            subject: q.subject,
+            topic: q.topic,
+            difficulty: q.difficulty,
+            chapter: q.chapter,
+          }
+        })));
+      } catch (err) {
+        console.error(`Error fetching from ${collectionName}:`, err);
+      }
+    }
+  }
+
+  // Apply filters to aggregated questions
+  let filtered = allQuestions;
+
+  if (filter.text) {
+    const regex = new RegExp(filter.text.$regex || filter.text, 'i');
+    filtered = filtered.filter(q => regex.test(q.text));
+  }
+  if (filter['tags.subject']) {
+    filtered = filtered.filter(q => q.tags?.subject === filter['tags.subject']);
+  }
+  if (filter['tags.topic']) {
+    filtered = filtered.filter(q => q.tags?.topic === filter['tags.topic']);
+  }
+  if (filter['tags.difficulty']) {
+    filtered = filtered.filter(q => q.tags?.difficulty === filter['tags.difficulty']);
+  }
+
+  // Sort by creation date (newest first)
+  filtered.sort((a, b) => {
+    const dateA = new Date(a.createdAt || 0).getTime();
+    const dateB = new Date(b.createdAt || 0).getTime();
+    return dateB - dateA;
+  });
+
+  // Apply pagination
+  const total = filtered.length;
+  const items = filtered.slice(skip, skip + limit);
+
   return { items, total };
 };
 

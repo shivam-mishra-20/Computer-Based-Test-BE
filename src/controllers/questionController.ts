@@ -180,3 +180,317 @@ export const getClassQuestionFiltersCtrl = async (req: Request, res: Response) =
     });
   }
 };
+
+/**
+ * Update a question in class-specific collection
+ * PUT /api/ai/questions/class/:class/:id
+ */
+export const updateClassQuestionCtrl = async (req: Request, res: Response) => {
+  try {
+    const { class: className, id } = req.params;
+    const updateData = req.body;
+
+    if (!className || !id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Class and question ID are required'
+      });
+    }
+
+    const { getClassQuestionModel } = await import('../models/ClassQuestion');
+    const ClassQuestionModel = getClassQuestionModel(className as string);
+
+    // Find and update the question
+    const updated = await ClassQuestionModel.findByIdAndUpdate(
+      id,
+      { 
+        $set: {
+          text: updateData.text,
+          type: updateData.type,
+          subject: updateData.subject || updateData.tags?.subject,
+          topic: updateData.topic || updateData.tags?.topic,
+          chapter: updateData.chapter || updateData.tags?.chapter,
+          difficulty: updateData.difficulty || updateData.tags?.difficulty,
+          board: updateData.board,
+          section: updateData.section,
+          marks: updateData.marks,
+          options: updateData.options,
+          correctAnswerText: updateData.correctAnswerText,
+          explanation: updateData.explanation,
+          diagramUrl: updateData.diagramUrl,
+          assertion: updateData.assertion,
+          reason: updateData.reason,
+          updatedAt: new Date()
+        }
+      },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({
+        success: false,
+        message: 'Question not found'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: updated
+    });
+  } catch (error) {
+    console.error('[Update Class Question] Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update question',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+};
+
+/**
+ * Delete a question from class-specific collection
+ * DELETE /api/ai/questions/class/:class/:id
+ */
+export const deleteClassQuestionCtrl = async (req: Request, res: Response) => {
+  try {
+    const { class: className, id } = req.params;
+
+    if (!className || !id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Class and question ID are required'
+      });
+    }
+
+    const { getClassQuestionModel } = await import('../models/ClassQuestion');
+    const ClassQuestionModel = getClassQuestionModel(className as string);
+
+    // Soft delete by setting isActive to false
+    const deleted = await ClassQuestionModel.findByIdAndUpdate(
+      id,
+      { $set: { isActive: false, updatedAt: new Date() } },
+      { new: true }
+    );
+
+    if (!deleted) {
+      return res.status(404).json({
+        success: false,
+        message: 'Question not found'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Question deleted successfully'
+    });
+  } catch (error) {
+    console.error('[Delete Class Question] Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete question',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+};
+
+/**
+ * Use AI to solve a single MCQ question and mark the correct answer
+ * POST /api/ai/questions/class/:class/:id/solve
+ */
+export const solveClassQuestionCtrl = async (req: Request, res: Response) => {
+  try {
+    const { class: className, id } = req.params;
+
+    if (!className || !id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Class and question ID are required'
+      });
+    }
+
+    const { getClassQuestionModel } = await import('../models/ClassQuestion');
+    const ClassQuestionModel = getClassQuestionModel(className as string);
+
+    // Find the question
+    const question = await ClassQuestionModel.findById(id);
+    if (!question) {
+      return res.status(404).json({
+        success: false,
+        message: 'Question not found'
+      });
+    }
+
+    // Check if it's an MCQ
+    if (!['mcq', 'mcq-single', 'Multiple Choice'].includes(question.type)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Only MCQ questions can be solved by AI'
+      });
+    }
+
+    // Check if already has correct answer
+    const hasCorrectAnswer = question.options?.some(opt => opt.isCorrect);
+    if (hasCorrectAnswer) {
+      return res.status(400).json({
+        success: false,
+        message: 'Question already has a correct answer marked'
+      });
+    }
+
+    // Solve with AI
+    const { solveQuestionWithAI } = await import('../services/answerGenerationService');
+    const result = await solveQuestionWithAI({
+      _id: question._id?.toString(),
+      text: question.text,
+      type: question.type,
+      options: question.options,
+      subject: question.subject,
+      topic: question.topic,
+      chapter: question.chapter,
+    });
+
+    // Update the question with correct answer
+    const updatedOptions = question.options?.map((opt, idx) => ({
+      ...opt,
+      isCorrect: idx === result.correctOptionIndex
+    }));
+
+    const updated = await ClassQuestionModel.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          options: updatedOptions,
+          correctAnswerText: question.options?.[result.correctOptionIndex]?.text,
+          explanation: result.explanation || question.explanation,
+          updatedAt: new Date()
+        }
+      },
+      { new: true }
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: updated,
+      aiResult: {
+        correctOptionIndex: result.correctOptionIndex,
+        confidence: result.confidence,
+        explanation: result.explanation
+      }
+    });
+  } catch (error) {
+    console.error('[Solve Class Question] Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to solve question',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+};
+
+/**
+ * Solve multiple MCQ questions in batch
+ * POST /api/ai/questions/class/:class/solve-batch
+ */
+export const solveBatchQuestionsCtrl = async (req: Request, res: Response) => {
+  try {
+    const { class: className } = req.params;
+    const { questionIds } = req.body;
+
+    if (!className) {
+      return res.status(400).json({
+        success: false,
+        message: 'Class parameter is required'
+      });
+    }
+
+    if (!questionIds || !Array.isArray(questionIds) || questionIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'questionIds array is required'
+      });
+    }
+
+    const { getClassQuestionModel } = await import('../models/ClassQuestion');
+    const ClassQuestionModel = getClassQuestionModel(className as string);
+    const { solveQuestionWithAI } = await import('../services/answerGenerationService');
+
+    const results: { id: string; success: boolean; error?: string }[] = [];
+    let solved = 0;
+    let failed = 0;
+
+    for (const id of questionIds) {
+      try {
+        const question = await ClassQuestionModel.findById(id);
+        if (!question) {
+          results.push({ id, success: false, error: 'Not found' });
+          failed++;
+          continue;
+        }
+
+        if (!['mcq', 'mcq-single', 'Multiple Choice'].includes(question.type)) {
+          results.push({ id, success: false, error: 'Not an MCQ' });
+          failed++;
+          continue;
+        }
+
+        if (question.options?.some(opt => opt.isCorrect)) {
+          results.push({ id, success: false, error: 'Already has answer' });
+          failed++;
+          continue;
+        }
+
+        // Solve with AI
+        const result = await solveQuestionWithAI({
+          _id: question._id?.toString(),
+          text: question.text,
+          type: question.type,
+          options: question.options,
+          subject: question.subject,
+          topic: question.topic,
+          chapter: question.chapter,
+        });
+
+        // Update the question
+        const updatedOptions = question.options?.map((opt, idx) => ({
+          ...opt,
+          isCorrect: idx === result.correctOptionIndex
+        }));
+
+        await ClassQuestionModel.findByIdAndUpdate(id, {
+          $set: {
+            options: updatedOptions,
+            correctAnswerText: question.options?.[result.correctOptionIndex]?.text,
+            explanation: result.explanation || question.explanation,
+            updatedAt: new Date()
+          }
+        });
+
+        results.push({ id, success: true });
+        solved++;
+
+        // Small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 300));
+      } catch (error) {
+        results.push({ id, success: false, error: error instanceof Error ? error.message : 'Unknown error' });
+        failed++;
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        total: questionIds.length,
+        solved,
+        failed,
+        results
+      }
+    });
+  } catch (error) {
+    console.error('[Solve Batch Questions] Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to solve questions',
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+};

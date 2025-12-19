@@ -504,23 +504,25 @@ router.post('/import-paper/question/:questionId/diagram', authMiddleware, memUpl
     if (!Types.ObjectId.isValid(questionId)) return errorResponse(res, 'Invalid question ID', 400);
     if (!(req as any).file) return errorResponse(res, 'Image is required', 400);
 
-    // Re-use uploadImageCtrl logic inline to get a URL
-    const fs = await import('fs');
-    const path = await import('path');
-    const uploadsDir = path.resolve(process.cwd(), 'uploads');
-    if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-    const safeBase = (((req as any).file.originalname as string) || 'image').replace(/[^a-zA-Z0-9-_\.]/g, '_');
-    const fileName = `${Date.now()}_${safeBase}`;
-    const absPath = path.join(uploadsDir, fileName);
-    fs.writeFileSync(absPath, (req as any).file.buffer);
-    const base = process.env.PUBLIC_BASE_URL || '';
-    const urlPath = `/uploads/${fileName}`;
-    const publicUrl = base ? `${base.replace(/\/$/, '')}${urlPath}` : urlPath;
+    // Upload to Firebase Storage
+    const { uploadToFirebase } = await import('../../services/firebaseService');
+    const file = (req as any).file;
+    const safeBase = ((file.originalname as string) || 'image').replace(/[^a-zA-Z0-9-_\.]/g, '_');
+    const fileName = `diagrams/${Date.now()}_${safeBase}`;
+    
+    console.log(`Uploading diagram to Firebase: ${fileName}`);
+    const publicUrl = await uploadToFirebase(
+      file.buffer,
+      fileName,
+      file.mimetype || 'image/jpeg'
+    );
+    console.log(`Diagram uploaded successfully: ${publicUrl}`);
 
     const updated = await ImportedQuestion.findByIdAndUpdate(questionId, { diagramUrl: publicUrl }, { new: true });
     if (!updated) return errorResponse(res, 'Question not found', 404);
     return successResponse(res, { message: 'Diagram attached', question: updated });
   } catch (e) {
+    console.error('Failed to attach diagram:', e);
     return errorResponse(res, 'Failed to attach diagram', 500);
   }
 });

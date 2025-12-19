@@ -535,6 +535,123 @@ LATEX FORMATTING:
 - Relations: $\leq$, $\geq$, $\neq$, $\approx$
 - Convert Unicode: ∞→$\infty$, ²→$^2$, ×→$\times$
 
+LATEX FORMATTING (STRICT · PRODUCTION · ENFORCED):
+
+GENERAL RULES:
+
+Use $...$ only for inline mathematical expressions
+Example: $x^2 + 5x + 6 = 0$
+
+Use 
+.
+.
+.
+... only for standalone, multi-line, or long equations
+(integrals, summations, limits, derivations)
+
+Do NOT wrap full sentences in LaTeX
+Wrap only the smallest valid mathematical expression
+
+Use inline math by default.
+Display math is an exception, not the default.
+
+STANDARD LATEX SYNTAX:
+
+Fractions: $\frac{a}{b}$
+
+Roots: $\sqrt{x}$
+
+Powers: $x^2$
+
+Subscripts: $x_1$
+
+Summation: $\sum$
+
+Integration: $\int$
+
+Limits: $\lim$
+
+GREEK LETTERS:
+
+Use lowercase unless explicitly required:
+$\alpha$, $\beta$, $\gamma$, $\theta$, $\pi$
+
+RELATIONS & OPERATORS:
+
+$\leq$, $\geq$, $\neq$, $\approx$
+
+$=$, $+$, $-$, $\times$, $\div$
+
+UNICODE → LATEX CONVERSION (MANDATORY):
+
+∞ → $\infty$
+
+² → $^2$, ³ → $^3$
+
+× → $\times$, ÷ → $\div$
+
+√ → $\sqrt{}$
+
+≤ → $\leq$, ≥ → $\geq$, ≠ → $\neq$
+
+π → $\pi$
+
+Unicode minus (−) → -
+
+DO NOT RULES (STRICT):
+
+Do NOT wrap entire sentences in $...$
+
+Do NOT mix $...$ and 
+.
+.
+.
+... for the same expression
+
+Do NOT invent, simplify, or rewrite expressions
+
+Do NOT escape LaTeX (no \, no JSON escaping)
+
+Do NOT output malformed LaTeX (unbalanced $, {}, or )
+
+Do NOT normalize text that already contains valid LaTeX
+
+BACKEND ENFORCEMENT RULES:
+
+$ count must be even
+
+Curly braces {} must be balanced
+
+Replace 
+.
+.
+.
+... with $...$ unless expression contains \int, \sum, or \lim, or is longer than 20 characters
+
+Reject any remaining Unicode math symbols
+
+Each LaTeX expression must remain on a single line
+
+If $ already exists in text, skip further normalization
+
+RENDERING & STORAGE GUARANTEES:
+
+Fully compatible with MathJax and KaTeX
+
+Safe for database storage and retrieval
+
+Safe for screen rendering and PDF generation
+
+Safe for question papers, exams, and downloads
+
+Safe for review workflows and exports (PDF / DOCX / HTML)
+
+PRESERVATION GUARANTEE:
+
+Preserve LaTeX exactly as written
+
+Do not modify, expand, or auto-correct expressions
+
 QUESTION TYPE DETECTION:
 - mcq: Has 4-5 options with (a)/(b)/(c)/(d) or A/B/C/D labels
 - truefalse: Explicitly asks "True or False" or has only 2 options
@@ -965,7 +1082,9 @@ ${extractedText}
     for (const question of questions) {
       try {
         // Check if text already has LaTeX formatting (has $ signs)
-        const hasLatex = (text: string) => text.includes('$') && (text.includes('\\') || /\^|\{|\}/.test(text));
+        const hasLatex = (text: string) =>
+  /\$(.+?)\$/.test(text) || /\$\$(.+?)\$\$/.test(text);
+
         
         // Only normalize if NO LaTeX is present yet
         // If Vertex AI already added LaTeX, skip normalization to avoid corruption

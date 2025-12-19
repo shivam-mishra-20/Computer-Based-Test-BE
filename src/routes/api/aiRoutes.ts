@@ -3,7 +3,7 @@ import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
 import { parseAnyFiles } from '../../middlewares/formData';
 import { evaluateSubjective, generateFromPdf, generateFromText, generatePaper, refineQuestion, generatePaperFromPdf, generateFromImage, createGuidance, listGuidance, updateGuidance, deleteGuidance, generatePaperFromImage, aiGenerateFromPDF, aiGenerateFromImage, aiGenerateFromText } from '../../controllers/aiController';
 import { upload } from '../../middlewares/upload';
-import { saveValidatedQuestionsCtrl, getClassQuestionsCtrl, getClassQuestionFiltersCtrl } from '../../controllers/questionController';
+import { saveValidatedQuestionsCtrl, getClassQuestionsCtrl, getClassQuestionFiltersCtrl, updateClassQuestionCtrl, deleteClassQuestionCtrl, solveClassQuestionCtrl, solveBatchQuestionsCtrl } from '../../controllers/questionController';
 
 const router = Router();
 
@@ -27,6 +27,14 @@ router.post('/save-questions', authMiddleware, requireRole('teacher', 'admin'), 
 // Fetch class-wise questions with filters
 router.get('/questions/class/:class', authMiddleware, requireRole('teacher', 'admin'), getClassQuestionsCtrl);
 router.get('/questions/class/:class/filters', authMiddleware, requireRole('teacher', 'admin'), getClassQuestionFiltersCtrl);
+
+// Update and delete class-wise questions
+router.put('/questions/class/:class/:id', authMiddleware, requireRole('teacher', 'admin'), updateClassQuestionCtrl);
+router.delete('/questions/class/:class/:id', authMiddleware, requireRole('teacher', 'admin'), deleteClassQuestionCtrl);
+
+// AI-powered question solving
+router.post('/questions/class/:class/:id/solve', authMiddleware, requireRole('teacher', 'admin'), solveClassQuestionCtrl);
+router.post('/questions/class/:class/solve-batch', authMiddleware, requireRole('teacher', 'admin'), solveBatchQuestionsCtrl);
 
 // On-demand subjective evaluation (teachers/admins)
 router.post('/evaluate/subjective', authMiddleware, requireRole('teacher', 'admin'), evaluateSubjective);
