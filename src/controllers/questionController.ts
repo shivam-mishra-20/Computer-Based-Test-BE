@@ -300,6 +300,7 @@ export const deleteClassQuestionCtrl = async (req: Request, res: Response) => {
 export const solveClassQuestionCtrl = async (req: Request, res: Response) => {
   try {
     const { class: className, id } = req.params;
+    const { preview } = req.body;
 
     if (!className || !id) {
       return res.status(400).json({
@@ -329,12 +330,15 @@ export const solveClassQuestionCtrl = async (req: Request, res: Response) => {
     }
 
     // Check if already has correct answer
-    const hasCorrectAnswer = question.options?.some(opt => opt.isCorrect);
-    if (hasCorrectAnswer) {
-      return res.status(400).json({
-        success: false,
-        message: 'Question already has a correct answer marked'
-      });
+    // If preview is requested, we allow solving even if answer exists (to double check)
+    if (!preview) {
+        const hasCorrectAnswer = question.options?.some(opt => opt.isCorrect);
+        if (hasCorrectAnswer) {
+        return res.status(400).json({
+            success: false,
+            message: 'Question already has a correct answer marked'
+        });
+        }
     }
 
     // Solve with AI
@@ -349,6 +353,19 @@ export const solveClassQuestionCtrl = async (req: Request, res: Response) => {
       chapter: question.chapter,
     });
 
+    // If preview mode, return result without saving
+    if (preview) {
+        return res.status(200).json({
+          success: true,
+          data: question,
+          aiResult: {
+            correctOptionIndex: result.correctOptionIndex,
+            confidence: result.confidence,
+            explanation: result.explanation
+          }
+        });
+    }
+
     // Update the question with correct answer
     const updatedOptions = question.options?.map((opt, idx) => ({
       ...opt,
@@ -360,7 +377,7 @@ export const solveClassQuestionCtrl = async (req: Request, res: Response) => {
       {
         $set: {
           options: updatedOptions,
-          correctAnswerText: question.options?.[result.correctOptionIndex]?.text,
+          correctAnswerText: (typeof result.correctOptionIndex === 'number' && question.options && question.options[result.correctOptionIndex]) ? question.options[result.correctOptionIndex].text : undefined,
           explanation: result.explanation || question.explanation,
           updatedAt: new Date()
         }
@@ -394,7 +411,7 @@ export const solveClassQuestionCtrl = async (req: Request, res: Response) => {
 export const solveBatchQuestionsCtrl = async (req: Request, res: Response) => {
   try {
     const { class: className } = req.params;
-    const { questionIds } = req.body;
+    const { questionIds, preview } = req.body;
 
     if (!className) {
       return res.status(400).json({
@@ -414,7 +431,7 @@ export const solveBatchQuestionsCtrl = async (req: Request, res: Response) => {
     const ClassQuestionModel = getClassQuestionModel(className as string);
     const { solveQuestionWithAI } = await import('../services/answerGenerationService');
 
-    const results: { id: string; success: boolean; error?: string }[] = [];
+    const results: { id: string; success: boolean; error?: string; aiResult?: any }[] = [];
     let solved = 0;
     let failed = 0;
 
@@ -433,7 +450,7 @@ export const solveBatchQuestionsCtrl = async (req: Request, res: Response) => {
           continue;
         }
 
-        if (question.options?.some(opt => opt.isCorrect)) {
+        if (!preview && question.options?.some(opt => opt.isCorrect)) {
           results.push({ id, success: false, error: 'Already has answer' });
           failed++;
           continue;
@@ -450,23 +467,35 @@ export const solveBatchQuestionsCtrl = async (req: Request, res: Response) => {
           chapter: question.chapter,
         });
 
-        // Update the question
-        const updatedOptions = question.options?.map((opt, idx) => ({
-          ...opt,
-          isCorrect: idx === result.correctOptionIndex
-        }));
+        if (preview) {
+             results.push({ 
+               id, 
+               success: true, 
+               aiResult: {
+                 correctOptionIndex: result.correctOptionIndex,
+                 confidence: result.confidence,
+                 explanation: result.explanation
+               } 
+             });
+             solved++;
+        } else {
+             // Update the question
+             const updatedOptions = question.options?.map((opt, idx) => ({
+                ...opt,
+                isCorrect: idx === result.correctOptionIndex
+             }));
 
-        await ClassQuestionModel.findByIdAndUpdate(id, {
-          $set: {
-            options: updatedOptions,
-            correctAnswerText: question.options?.[result.correctOptionIndex]?.text,
-            explanation: result.explanation || question.explanation,
-            updatedAt: new Date()
-          }
-        });
-
-        results.push({ id, success: true });
-        solved++;
+             await ClassQuestionModel.findByIdAndUpdate(id, {
+                $set: {
+                  options: updatedOptions,
+                  correctAnswerText: (typeof result.correctOptionIndex === 'number' && question.options && question.options[result.correctOptionIndex]) ? question.options[result.correctOptionIndex].text : undefined,
+                  explanation: result.explanation || question.explanation,
+                  updatedAt: new Date()
+                }
+             });
+             results.push({ id, success: true });
+             solved++;
+        }
 
         // Small delay to avoid rate limiting
         await new Promise(resolve => setTimeout(resolve, 300));
@@ -491,6 +520,63 @@ export const solveBatchQuestionsCtrl = async (req: Request, res: Response) => {
       success: false,
       message: 'Failed to solve questions',
       error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+};
+
+/**
+ * Bulk update mapped questions
+ * PUT /api/ai/questions/class/:class/bulk-update
+ */
+export const bulkUpdateClassQuestionsCtrl = async (req: Request, res: Response) => {
+  try {
+    const { class: className } = req.params;
+    const { updates } = req.body; 
+
+    if (!className) {
+      return res.status(400).json({ success: false, message: 'Class parameter required' });
+    }
+    if (!updates || !Array.isArray(updates)) {
+      return res.status(400).json({ success: false, message: 'Updates array required' });
+    }
+
+    const { getClassQuestionModel } = await import('../models/ClassQuestion');
+    const ClassQuestionModel = getClassQuestionModel(className as string);
+
+    let updatedCount = 0;
+    let errors = 0;
+
+    for (const update of updates) {
+      if (!update.id) continue;
+      try {
+        await ClassQuestionModel.findByIdAndUpdate(update.id, {
+           $set: {
+             options: update.options,
+             correctAnswerText: update.correctAnswerText,
+             explanation: update.explanation,
+             updatedAt: new Date()
+           }
+        });
+        updatedCount++;
+      } catch (err) {
+        console.error(`Failed to update question ${update.id}:`, err);
+        errors++;
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        updated: updatedCount,
+        errors
+      }
+    });
+  } catch (error) {
+    console.error('[Bulk Update] Error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to bulk update',
+      error: (error instanceof Error) ? error.message : 'Unknown error'
     });
   }
 };

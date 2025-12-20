@@ -3,29 +3,35 @@ import { getVertexClient } from '../lib/googleClients';
 
 /**
  * Answer Generation Service
- * Uses Vertex AI Gemini to solve MCQ questions and identify correct answers
+ * Uses Vertex AI Gemini to solve questions of all types
  */
 
-interface MCQOption {
+interface QuestionOption {
   text: string;
   isCorrect?: boolean;
 }
 
-interface MCQQuestion {
+interface Question {
   _id?: string;
   text: string;
   type: string;
-  options?: MCQOption[];
+  options?: QuestionOption[];
   subject?: string;
   topic?: string;
   chapter?: string;
   explanation?: string;
+  assertion?: string;
+  reason?: string;
 }
 
 interface SolveResult {
-  correctOptionIndex: number;
+  // For MCQ questions
+  correctOptionIndex?: number;
+  // For text-based answers (short answer, fill-in-blank, etc.)
+  correctAnswerText?: string;
   explanation: string;
   confidence: 'high' | 'medium' | 'low';
+  questionType: string;
 }
 
 let vertexAI: VertexAI | null = null;
@@ -36,18 +42,16 @@ function getVertexAI(): VertexAI {
 }
 
 /**
- * Use AI to solve an MCQ question and determine the correct answer
+ * Determine if a question type is MCQ-based
  */
-export async function solveQuestionWithAI(question: MCQQuestion): Promise<SolveResult> {
-  // Validate question
-  if (!question.options || question.options.length < 2) {
-    throw new Error('Question must have at least 2 options');
-  }
+function isMCQType(type: string): boolean {
+  return ['mcq', 'mcq-single', 'mcq-multi', 'Multiple Choice', 'true-false', 'truefalse', 'assertionreason'].includes(type);
+}
 
-  if (question.type !== 'mcq' && question.type !== 'mcq-single' && question.type !== 'Multiple Choice') {
-    throw new Error('Only MCQ questions are supported for AI solving');
-  }
-
+/**
+ * Use AI to solve any type of question
+ */
+export async function solveQuestionWithAI(question: Question): Promise<SolveResult> {
   const vertex = getVertexAI();
   const model = vertex.getGenerativeModel({
     model: 'gemini-2.5-flash',
@@ -59,22 +63,29 @@ export async function solveQuestionWithAI(question: MCQQuestion): Promise<SolveR
     },
   });
 
-  // Build options text
-  const optionsText = question.options
-    .map((opt, idx) => `${String.fromCharCode(65 + idx)}. ${opt.text}`)
-    .join('\n');
-
   const contextInfo = [
     question.subject && `Subject: ${question.subject}`,
     question.topic && `Topic: ${question.topic}`,
     question.chapter && `Chapter: ${question.chapter}`,
   ].filter(Boolean).join(' | ');
 
-  const prompt = `You are an expert educator and subject matter expert. Your task is to solve the following multiple-choice question (MCQ) and identify the correct answer.
+  let prompt: string;
+  let isMCQ = isMCQType(question.type);
+
+  if (isMCQ && question.options && question.options.length >= 2) {
+    // MCQ-style question
+    const optionsText = question.options
+      .map((opt, idx) => `${String.fromCharCode(65 + idx)}. ${opt.text}`)
+      .join('\n');
+
+    prompt = `You are an expert educator and subject matter expert. Your task is to solve the following multiple-choice question and identify the correct answer.
 
 ${contextInfo ? `Context: ${contextInfo}\n` : ''}
+QUESTION TYPE: ${question.type}
 QUESTION:
 ${question.text}
+${question.assertion ? `\nAssertion (A): ${question.assertion}` : ''}
+${question.reason ? `Reason (R): ${question.reason}` : ''}
 
 OPTIONS:
 ${optionsText}
@@ -98,7 +109,37 @@ IMPORTANT:
 - Provide a clear explanation
 - Return ONLY the JSON object, no additional text`;
 
-  console.log(`[AI Solve] Solving MCQ: "${question.text.substring(0, 80)}..."`);
+  } else {
+    // Text-based question (short answer, long answer, fill-in-blank, etc.)
+    prompt = `You are an expert educator and subject matter expert. Your task is to provide the correct answer to the following question.
+
+${contextInfo ? `Context: ${contextInfo}\n` : ''}
+QUESTION TYPE: ${question.type}
+QUESTION:
+${question.text}
+
+INSTRUCTIONS:
+1. Carefully analyze the question
+2. Provide a clear, accurate, and complete answer
+3. For fill-in-the-blank, provide the missing word(s)
+4. For short answer, keep response concise but complete
+5. For long answer, provide a comprehensive response
+
+Return your response in STRICT JSON format:
+{
+  "correctAnswerText": "<the correct answer>",
+  "explanation": "<brief explanation of why this is correct>",
+  "confidence": "<high|medium|low>"
+}
+
+IMPORTANT:
+- correctAnswerText should be the direct answer
+- For numerical answers, include units if applicable
+- Be thorough and accurate
+- Return ONLY the JSON object, no additional text`;
+  }
+
+  console.log(`[AI Solve] Solving ${question.type}: "${question.text.substring(0, 80)}..."`);
 
   const result = await model.generateContent({
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -127,26 +168,38 @@ IMPORTANT:
     throw new Error(`Failed to parse AI response: ${parseError instanceof Error ? parseError.message : 'Unknown error'}`);
   }
 
-  // Validate result
-  const correctIndex = Number(parsed.correctOptionIndex);
-  if (isNaN(correctIndex) || correctIndex < 0 || correctIndex >= question.options.length) {
-    throw new Error(`Invalid correctOptionIndex: ${parsed.correctOptionIndex}`);
+  // Build result based on question type
+  if (isMCQ && question.options && question.options.length >= 2) {
+    const correctIndex = Number(parsed.correctOptionIndex);
+    if (isNaN(correctIndex) || correctIndex < 0 || correctIndex >= question.options.length) {
+      throw new Error(`Invalid correctOptionIndex: ${parsed.correctOptionIndex}`);
+    }
+
+    console.log(`[AI Solve] ✓ Answer: Option ${String.fromCharCode(65 + correctIndex)} (confidence: ${parsed.confidence})`);
+
+    return {
+      correctOptionIndex: correctIndex,
+      explanation: String(parsed.explanation || '').slice(0, 2000),
+      confidence: ['high', 'medium', 'low'].includes(parsed.confidence) ? parsed.confidence : 'medium',
+      questionType: question.type,
+    };
+  } else {
+    console.log(`[AI Solve] ✓ Answer: "${String(parsed.correctAnswerText || '').substring(0, 50)}..." (confidence: ${parsed.confidence})`);
+
+    return {
+      correctAnswerText: String(parsed.correctAnswerText || '').slice(0, 5000),
+      explanation: String(parsed.explanation || '').slice(0, 2000),
+      confidence: ['high', 'medium', 'low'].includes(parsed.confidence) ? parsed.confidence : 'medium',
+      questionType: question.type,
+    };
   }
-
-  console.log(`[AI Solve] ✓ Answer: Option ${String.fromCharCode(65 + correctIndex)} (confidence: ${parsed.confidence})`);
-
-  return {
-    correctOptionIndex: correctIndex,
-    explanation: String(parsed.explanation || '').slice(0, 2000),
-    confidence: ['high', 'medium', 'low'].includes(parsed.confidence) ? parsed.confidence : 'medium',
-  };
 }
 
 /**
  * Solve multiple questions in batch
  */
 export async function solveQuestionsInBatch(
-  questions: MCQQuestion[],
+  questions: Question[],
   onProgress?: (completed: number, total: number) => void
 ): Promise<{ solved: number; failed: number; results: Map<string, SolveResult | Error> }> {
   const results = new Map<string, SolveResult | Error>();

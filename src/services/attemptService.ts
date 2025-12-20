@@ -410,8 +410,8 @@ export async function listAttemptsForUser(userId: string, opts: { published?: bo
     .lean()
     .then(list => list.map(a => ({
       _id: a._id,
-      examId: a.examId instanceof Types.ObjectId ? a.examId.toString() : (a.examId as any)._id?.toString?.(),
-      examTitle: (a as any).examId?.title || 'Exam',
+      examId: a.examId ? (a.examId instanceof Types.ObjectId ? a.examId.toString() : (a.examId as any)._id?.toString()) : null,
+      examTitle: (a as any).examId?.title || 'Exam Not Found',
       submittedAt: a.submittedAt,
       totalScore: a.totalScore,
       maxScore: a.maxScore,

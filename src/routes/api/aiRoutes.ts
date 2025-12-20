@@ -28,13 +28,14 @@ router.post('/save-questions', authMiddleware, requireRole('teacher', 'admin'), 
 router.get('/questions/class/:class', authMiddleware, requireRole('teacher', 'admin'), getClassQuestionsCtrl);
 router.get('/questions/class/:class/filters', authMiddleware, requireRole('teacher', 'admin'), getClassQuestionFiltersCtrl);
 
-// Update and delete class-wise questions
+// Update and delete class-wise questions (bulk-update MUST come before :id routes)
+router.put('/questions/class/:class/bulk-update', authMiddleware, requireRole('teacher', 'admin'), require('../../controllers/questionController').bulkUpdateClassQuestionsCtrl);
 router.put('/questions/class/:class/:id', authMiddleware, requireRole('teacher', 'admin'), updateClassQuestionCtrl);
 router.delete('/questions/class/:class/:id', authMiddleware, requireRole('teacher', 'admin'), deleteClassQuestionCtrl);
 
 // AI-powered question solving
-router.post('/questions/class/:class/:id/solve', authMiddleware, requireRole('teacher', 'admin'), solveClassQuestionCtrl);
 router.post('/questions/class/:class/solve-batch', authMiddleware, requireRole('teacher', 'admin'), solveBatchQuestionsCtrl);
+router.post('/questions/class/:class/:id/solve', authMiddleware, requireRole('teacher', 'admin'), solveClassQuestionCtrl);
 
 // On-demand subjective evaluation (teachers/admins)
 router.post('/evaluate/subjective', authMiddleware, requireRole('teacher', 'admin'), evaluateSubjective);
