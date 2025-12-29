@@ -21,6 +21,11 @@ export interface IUser extends Document {
   classLevel?: string;
   batch?: string;
   authProvider?: 'local' | 'firebase';
+  // Password reset
+  passwordResetToken?: string;
+  passwordResetExpires?: Date;
+  // Onboarding
+  welcomeTutorialCompleted?: boolean;
   comparePassword(password: string): Promise<boolean>;
 }
 
@@ -37,6 +42,9 @@ const userSchema = new Schema<IUser>({
   classLevel: { type: String, index: true },
   batch: { type: String, index: true },
   authProvider: { type: String, enum: ['local', 'firebase'], default: 'local' },
+  passwordResetToken: { type: String },
+  passwordResetExpires: { type: Date },
+  welcomeTutorialCompleted: { type: Boolean, default: false },
 }, { timestamps: true });
 
 userSchema.pre('save', async function (next) {

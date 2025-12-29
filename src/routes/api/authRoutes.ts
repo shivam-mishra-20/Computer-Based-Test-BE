@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { register, login, me, publicRegister } from '../../controllers/authController';
+import { register, login, me, publicRegister, changePassword } from '../../controllers/authController';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 
 const router = Router();
@@ -9,6 +9,7 @@ router.post('/register', register);
 router.post('/public-register', publicRegister);
 router.post('/login', login);
 router.get('/me', authMiddleware, me);
+router.post('/change-password', authMiddleware, changePassword);
 
 // Provide helpful responses for accidental browser GETs (avoid 404 spam)
 router.get('/register', (_req, res) => {

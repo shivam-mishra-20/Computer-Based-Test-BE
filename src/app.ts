@@ -14,6 +14,17 @@ import paperRoutes from './routes/api/paperRoutes';
 import analyticsRoutes from './routes/api/analyticsRoutes';
 import adminRoutes from './routes/api/adminRoutes';
 import importRoutes from './routes/api/importRoutes';
+import courseRoutes from './routes/api/courseRoutes';
+import attendanceRoutes from './routes/api/attendanceRoutes';
+import materialRoutes from './routes/api/materialRoutes';
+import announcementRoutes from './routes/api/announcementRoutes';
+import scheduleRoutes from './routes/api/scheduleRoutes';
+import leaderboardRoutes from './routes/api/leaderboardRoutes';
+import bookmarkRoutes from './routes/api/bookmarkRoutes';
+import passwordResetRoutes from './routes/api/passwordResetRoutes';
+import doubtRoutes from './routes/api/doubtRoutes';
+import lectureRoutes from './routes/api/lectureRoutes';
+import teacherRoutes from './routes/api/teacherRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import path from 'path';
 // Use require to avoid transient module resolution issues in some TS setups
@@ -39,7 +50,17 @@ app.get('/', (_req, res) => {
 		name: 'CBT Exam Backend',
 		status: 'ok',
 		health: '/api/tests/health',
-		docs: 'See README for API routes'
+		docs: 'See README for API routes',
+		timestamp: new Date().toISOString()
+	});
+});
+
+// Health check endpoint for mobile app connectivity testing
+app.get('/api/health', (_req, res) => {
+	res.json({
+		status: 'healthy',
+		timestamp: new Date().toISOString(),
+		uptime: process.uptime()
 	});
 });
 
@@ -59,6 +80,7 @@ app.get('/register', (_req, res) => {
 
 // API routes
 app.use('/api/auth', authRoutes);
+app.use('/api/auth', passwordResetRoutes); // Password reset under /api/auth
 app.use('/api/users', userRoutes);
 app.use('/api/tests', testRoutes);
 app.use('/api/exams', examRoutes);
@@ -70,8 +92,21 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/uploads', uploadRoutes);
 app.use('/api/papers', paperRoutes);
 app.use('/api', importRoutes);
+// New routes for enhanced student app
+app.use('/api/courses', courseRoutes);
+app.use('/api/attendance', attendanceRoutes);
+app.use('/api/materials', materialRoutes);
+app.use('/api/announcements', announcementRoutes);
+app.use('/api/schedule', scheduleRoutes);
+app.use('/api/leaderboard', leaderboardRoutes);
+app.use('/api/bookmarks', bookmarkRoutes);
+// Teacher dashboard routes
+app.use('/api/doubts', doubtRoutes);
+app.use('/api/lectures', lectureRoutes);
+app.use('/api/teacher', teacherRoutes);
 
 // Error handler
 app.use(errorHandler);
 
 export default app;
+
