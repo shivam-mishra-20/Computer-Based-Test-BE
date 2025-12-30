@@ -146,3 +146,74 @@ export const adminDashboard = async (_req: Request, res: Response) => {
 		res.status(500).json({ message: 'Server error' });
 	}
 };
+
+// User settings management (for authenticated users)
+export const getUserSettings = async (req: Request, res: Response) => {
+	try {
+		const userId = (req as any).user?.id;
+		const user = await User.findById(userId).select('settings');
+		if (!user) return res.status(404).json({ message: 'User not found' });
+		
+		// Default settings if not set
+		const settings = (user as any).settings || {
+			pushNotifications: true,
+			emailNotifications: true,
+			examReminders: true,
+			doubtAlerts: true,
+			autoSave: true,
+			language: 'English',
+		};
+		
+		res.json(settings);
+	} catch (err) {
+		res.status(500).json({ message: 'Server error' });
+	}
+};
+
+export const updateUserSettings = async (req: Request, res: Response) => {
+	try {
+		const userId = (req as any).user?.id;
+		const settings = req.body;
+		
+		const user = await User.findById(userId);
+		if (!user) return res.status(404).json({ message: 'User not found' });
+		
+		(user as any).settings = settings;
+		await user.save();
+		
+		await logAudit(userId, 'user.settings.update', userId, { settings });
+		res.json({ message: 'Settings updated successfully', settings });
+	} catch (err) {
+		res.status(500).json({ message: 'Server error' });
+	}
+};
+
+// Change password (for authenticated users)
+export const changePassword = async (req: Request, res: Response) => {
+	try {
+		const userId = (req as any).user?.id;
+		const { currentPassword, newPassword } = req.body;
+		
+		if (!currentPassword || !newPassword) {
+			return res.status(400).json({ message: 'Current password and new password are required' });
+		}
+		
+		const user = await User.findById(userId);
+		if (!user) return res.status(404).json({ message: 'User not found' });
+		
+		// Verify current password
+		const isMatch = await user.comparePassword(currentPassword);
+		if (!isMatch) {
+			return res.status(400).json({ message: 'Current password is incorrect' });
+		}
+		
+		// Update password
+		user.password = newPassword;
+		await user.save();
+		
+		await logAudit(userId, 'user.password.change', userId);
+		res.json({ message: 'Password changed successfully' });
+	} catch (err) {
+		res.status(500).json({ message: 'Server error' });
+	}
+};

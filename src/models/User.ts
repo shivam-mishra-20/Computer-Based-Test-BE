@@ -26,6 +26,15 @@ export interface IUser extends Document {
   passwordResetExpires?: Date;
   // Onboarding
   welcomeTutorialCompleted?: boolean;
+  // User settings
+  settings?: {
+    pushNotifications?: boolean;
+    emailNotifications?: boolean;
+    examReminders?: boolean;
+    doubtAlerts?: boolean;
+    autoSave?: boolean;
+    language?: string;
+  };
   comparePassword(password: string): Promise<boolean>;
 }
 
@@ -45,6 +54,24 @@ const userSchema = new Schema<IUser>({
   passwordResetToken: { type: String },
   passwordResetExpires: { type: Date },
   welcomeTutorialCompleted: { type: Boolean, default: false },
+  settings: {
+    type: {
+      pushNotifications: { type: Boolean, default: true },
+      emailNotifications: { type: Boolean, default: true },
+      examReminders: { type: Boolean, default: true },
+      doubtAlerts: { type: Boolean, default: true },
+      autoSave: { type: Boolean, default: true },
+      language: { type: String, default: 'English' },
+    },
+    default: () => ({
+      pushNotifications: true,
+      emailNotifications: true,
+      examReminders: true,
+      doubtAlerts: true,
+      autoSave: true,
+      language: 'English',
+    }),
+  },
 }, { timestamps: true });
 
 userSchema.pre('save', async function (next) {

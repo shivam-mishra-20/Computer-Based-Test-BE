@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
-     import { adminCreateUser, adminListUsers, adminGetUser, adminUpdateUser, adminDeleteUser, adminDashboard, adminGetPendingUsers, adminApproveUser, adminRejectUser } from '../../controllers/userController';
+import { adminCreateUser, adminListUsers, adminGetUser, adminUpdateUser, adminDeleteUser, adminDashboard, adminGetPendingUsers, adminApproveUser, adminRejectUser, getUserSettings, updateUserSettings, changePassword } from '../../controllers/userController';
 
 const router = Router();
 
@@ -18,5 +18,12 @@ router.get('/', authMiddleware, requireRole('admin'), adminListUsers);
 router.get('/:id', authMiddleware, requireRole('admin'), adminGetUser);
 router.put('/:id', authMiddleware, requireRole('admin'), adminUpdateUser);
 router.delete('/:id', authMiddleware, requireRole('admin'), adminDeleteUser);
+
+// User settings (for all authenticated users)
+router.get('/me/settings', authMiddleware, getUserSettings);
+router.put('/me/settings', authMiddleware, updateUserSettings);
+
+// Change password (for all authenticated users)
+router.post('/me/change-password', authMiddleware, changePassword);
 
 export default router;

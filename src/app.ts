@@ -25,6 +25,7 @@ import passwordResetRoutes from './routes/api/passwordResetRoutes';
 import doubtRoutes from './routes/api/doubtRoutes';
 import lectureRoutes from './routes/api/lectureRoutes';
 import teacherRoutes from './routes/api/teacherRoutes';
+import notificationRoutes from './routes/api/notificationRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import path from 'path';
 // Use require to avoid transient module resolution issues in some TS setups
@@ -100,6 +101,7 @@ app.use('/api/announcements', announcementRoutes);
 app.use('/api/schedule', scheduleRoutes);
 app.use('/api/leaderboard', leaderboardRoutes);
 app.use('/api/bookmarks', bookmarkRoutes);
+app.use('/api/notifications', notificationRoutes);
 // Teacher dashboard routes
 app.use('/api/doubts', doubtRoutes);
 app.use('/api/lectures', lectureRoutes);
