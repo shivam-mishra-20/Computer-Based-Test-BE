@@ -26,6 +26,7 @@ import doubtRoutes from './routes/api/doubtRoutes';
 import lectureRoutes from './routes/api/lectureRoutes';
 import teacherRoutes from './routes/api/teacherRoutes';
 import notificationRoutes from './routes/api/notificationRoutes';
+import resultRoutes from './routes/api/resultRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import path from 'path';
 // Use require to avoid transient module resolution issues in some TS setups
@@ -106,6 +107,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/doubts', doubtRoutes);
 app.use('/api/lectures', lectureRoutes);
 app.use('/api/teacher', teacherRoutes);
+app.use('/api/results', resultRoutes);
 
 // Error handler
 app.use(errorHandler);

@@ -89,12 +89,17 @@ router.get('/students', authMiddleware, async (req: AuthRequest, res: Response) 
 
     const filter: any = {
       role: 'student',
-      status: 'approved',
-      batch: { $in: allowedBatches }
+      status: 'approved'
     };
 
+    // Only filter by allowed batches if we have them
+    if (allowedBatches.length > 0) {
+      filter.batch = { $in: allowedBatches };
+    }
+
     // Apply additional filters
-    if (batch && allowedBatches.includes(batch as string)) {
+    // If batch param is provided, filter by that specific batch
+    if (batch) {
       filter.batch = batch;
     }
     if (classLevel) filter.classLevel = classLevel;

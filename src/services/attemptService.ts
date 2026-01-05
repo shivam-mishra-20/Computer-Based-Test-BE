@@ -366,7 +366,8 @@ export async function publishResult(attemptId: string, publish = true) {
 }
 
 export async function listPendingReviewAttempts() {
-  const attempts = await Attempt.find({ submittedAt: { $ne: null }, resultPublished: { $ne: true } })
+  // Fetch ALL submitted attempts (both pending and published) for the reviews dashboard
+  const attempts = await Attempt.find({ submittedAt: { $ne: null } })
     .populate('userId', 'name email classLevel batch firebaseUid')
     .populate('examId', 'title')
     .sort({ submittedAt: -1 })

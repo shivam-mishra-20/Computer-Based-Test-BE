@@ -175,7 +175,7 @@ export const getQuestionsForPaperCtrl = async (req: Request, res: Response) => {
       topic,
       type,
       difficulty,
-      limit = '100',
+      limit = '0', // Default to 0 = fetch all
       skip = '0'
     } = req.query as any;
     if (!className) return res.status(400).json({ message: 'class is required' });
@@ -197,18 +197,27 @@ export const getQuestionsForPaperCtrl = async (req: Request, res: Response) => {
   if (brd) filter.board = brd;
   if (ch) filter.chapter = ch;
 
-    const questions = await ClassQuestion.find(filter)
-      .limit(parseInt(limit, 10))
-      .skip(parseInt(skip, 10))
-      .sort({ createdAt: -1 })
+    const limitNum = parseInt(limit, 10);
+    const skipNum = parseInt(skip, 10);
+    
+    // Build query - fetch all if limit is 0
+    let query = ClassQuestion.find(filter)
+      .sort({ chapter: 1, type: 1, createdAt: -1 })
       .lean();
+    
+    // Only apply limit if > 0
+    if (limitNum > 0) {
+      query = query.limit(limitNum).skip(skipNum);
+    }
+    
+    const questions = await query;
     const total = await ClassQuestion.countDocuments(filter);
     
     res.json({
       items: questions,
       total,
-      page: Math.floor(parseInt(skip, 10) / parseInt(limit, 10)) + 1,
-      pageSize: parseInt(limit, 10),
+      page: limitNum > 0 ? Math.floor(skipNum / limitNum) + 1 : 1,
+      pageSize: limitNum > 0 ? limitNum : total,
     });
   } catch (err: any) {
     res.status(500).json({ message: err.message || 'Failed to fetch questions' });
