@@ -5,6 +5,8 @@ import Blueprint, { IBlueprint } from '../models/Blueprint';
 import { ImportedQuestion } from '../models/ImportedQuestion';
 import { getClassQuestionModel } from '../models/ClassQuestion';
 import type { GeneratedPaperResult } from './aiService';
+import User from '../models/User';
+import notificationService from './notificationService';
 import mongoose from 'mongoose';
 
 export const createQuestion = async (payload: Partial<IQuestion> & { createdBy: Types.ObjectId }): Promise<IQuestion> => {
@@ -146,6 +148,37 @@ export const assignExam = async (id: string, users?: string[], groups?: string[]
     groups,
   };
   await exam.save();
+
+  // Trigger Notifications
+  try {
+    const userIds = new Set<string>();
+    
+    // Add directly assigned users
+    if (users) users.forEach(u => userIds.add(u));
+
+    // Resolve groups to users
+    if (groups && groups.length > 0) {
+      const groupUsers = await User.find({
+        $or: [
+          { batch: { $in: groups } },
+          { classLevel: { $in: groups } }
+        ]
+      }).select('_id');
+      groupUsers.forEach((u: any) => userIds.add(u._id.toString()));
+    }
+
+    if (userIds.size > 0) {
+      await notificationService.broadcastNotification(Array.from(userIds), {
+        type: 'exam',
+        title: 'New Exam Assigned',
+        message: `You have been assigned a new exam: ${exam.title}`,
+        data: { examId: exam._id, type: 'exam' }
+      });
+    }
+  } catch (err) {
+    console.error('Error sending exam assignment notifications:', err);
+  }
+
   return exam;
 };
 

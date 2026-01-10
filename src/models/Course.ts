@@ -20,9 +20,16 @@ export interface ICourse extends Document {
     description?: string;
     lectures: {
       title: string;
-      videoUrl?: string;
+      videoUrl?: string; // Kept for backward compatibility or other video types
+      youtubeVideoId?: string; // New field for YouTube ID
       duration?: number; // in minutes
       order: number;
+      youtubeMeta?: {
+        durationSec: number;
+        thumbnail: string;
+        title: string;
+        fetchedAt: Date;
+      };
     }[];
   }[];
   createdAt: Date;
@@ -48,11 +55,37 @@ const courseSchema = new Schema<ICourse>({
     lectures: [{
       title: { type: String, required: true },
       videoUrl: { type: String },
+      youtubeVideoId: { type: String },
       duration: { type: Number },
-      order: { type: Number, default: 0 }
+      order: { type: Number, default: 0 },
+      youtubeMeta: {
+        durationSec: { type: Number },
+        thumbnail: { type: String },
+        title: { type: String },
+        fetchedAt: { type: Date }
+      }
     }]
   }]
 }, { timestamps: true });
+
+// Pre-save hook to ensure youtubeVideoId is populated if videoUrl is a YouTube link
+courseSchema.pre('save', function(next) {
+  const course = this;
+  if (course.syllabus) {
+    course.syllabus.forEach(chapter => {
+      chapter.lectures.forEach(lecture => {
+        if (!lecture.youtubeVideoId && lecture.videoUrl) {
+          // Attempt to extract ID if missing
+          const match = lecture.videoUrl.match(/(?:youtu\.be\/|youtube\.com\/watch\?v=|youtube\.com\/embed\/)([^#&?]*)/);
+          if (match && match[1]) {
+            lecture.youtubeVideoId = match[1];
+          }
+        }
+      });
+    });
+  }
+  next();
+});
 
 // Index for efficient queries
 courseSchema.index({ status: 1, classLevel: 1, subject: 1 });

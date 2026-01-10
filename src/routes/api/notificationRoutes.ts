@@ -8,6 +8,7 @@ import {
   deleteAllReadNotifications,
   createNotification,
   createBulkNotifications,
+  registerToken,
 } from '../../controllers/notificationController';
 
 const router = Router();
@@ -18,6 +19,9 @@ router.put('/:id/read', authMiddleware, markNotificationAsRead);
 router.put('/read-all', authMiddleware, markAllNotificationsAsRead);
 router.delete('/:id', authMiddleware, deleteNotification);
 router.delete('/read/clear', authMiddleware, deleteAllReadNotifications);
+
+// Register push token
+router.post('/register-token', authMiddleware, registerToken);
 
 // Admin/System endpoints for creating notifications
 router.post('/', authMiddleware, requireRole('admin'), createNotification);

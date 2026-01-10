@@ -84,10 +84,14 @@ router.get('/:courseId', authMiddleware, async (req: Request, res: Response) => 
       enrolledStudents: undefined,
       syllabus: course.syllabus?.map(section => ({
         ...section,
-        lectures: section.lectures.map(lecture => ({
-          ...lecture,
-          videoUrl: (isEnrolled || course.isFree) ? lecture.videoUrl : undefined
-        }))
+        lectures: section.lectures.map(lecture => {
+           const hasAccess = isEnrolled || course.isFree;
+           return {
+             ...lecture,
+             videoUrl: hasAccess ? lecture.videoUrl : undefined,
+             youtubeVideoId: hasAccess ? lecture.youtubeVideoId : undefined
+           };
+        })
       }))
     };
     
@@ -302,4 +306,251 @@ router.put('/:courseId', authMiddleware, async (req: Request, res: Response) => 
   }
 });
 
+// Admin: Delete course
+router.delete('/:courseId', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!['admin', 'teacher'].includes(user.role)) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    const course = await Course.findByIdAndDelete(req.params.courseId);
+    
+    if (!course) {
+      return res.status(404).json({ error: 'Course not found' });
+    }
+    
+    res.json({ success: true, message: 'Course deleted successfully' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ Module Management ============
+
+// Add module to course
+router.post('/:courseId/modules', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!['admin', 'teacher'].includes(user.role)) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    const { title, description } = req.body;
+    if (!title) {
+      return res.status(400).json({ error: 'Module title is required' });
+    }
+    
+    const course = await Course.findById(req.params.courseId);
+    if (!course) {
+      return res.status(404).json({ error: 'Course not found' });
+    }
+    
+    if (!course.syllabus) {
+      course.syllabus = [];
+    }
+    
+    course.syllabus.push({
+      title,
+      description,
+      lectures: []
+    });
+    
+    await course.save();
+    res.status(201).json(course);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update module
+router.put('/:courseId/modules/:moduleIndex', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!['admin', 'teacher'].includes(user.role)) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    const { title, description } = req.body;
+    const moduleIndex = parseInt(req.params.moduleIndex);
+    
+    const course = await Course.findById(req.params.courseId);
+    if (!course || !course.syllabus || !course.syllabus[moduleIndex]) {
+      return res.status(404).json({ error: 'Module not found' });
+    }
+    
+    if (title) course.syllabus[moduleIndex].title = title;
+    if (description !== undefined) course.syllabus[moduleIndex].description = description;
+    
+    await course.save();
+    res.json(course);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete module
+router.delete('/:courseId/modules/:moduleIndex', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!['admin', 'teacher'].includes(user.role)) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    const moduleIndex = parseInt(req.params.moduleIndex);
+    
+    const course = await Course.findById(req.params.courseId);
+    if (!course || !course.syllabus || !course.syllabus[moduleIndex]) {
+      return res.status(404).json({ error: 'Module not found' });
+    }
+    
+    course.syllabus.splice(moduleIndex, 1);
+    await course.save();
+    
+    res.json({ success: true, message: 'Module deleted' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============ Lecture Management ============
+
+import youtubeService from '../../services/youtubeService';
+
+// Add lecture to module
+router.post('/:courseId/modules/:moduleIndex/lectures', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!['admin', 'teacher'].includes(user.role)) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    const { title, videoUrl, youtubeVideoId } = req.body;
+    const moduleIndex = parseInt(req.params.moduleIndex);
+    
+    if (!title) {
+      return res.status(400).json({ error: 'Lecture title is required' });
+    }
+    
+    const course = await Course.findById(req.params.courseId);
+    if (!course || !course.syllabus || !course.syllabus[moduleIndex]) {
+      return res.status(404).json({ error: 'Module not found' });
+    }
+    
+    // Extract YouTube ID from URL or use provided ID
+    const ytId = youtubeVideoId || youtubeService.extractYouTubeId(videoUrl || '');
+    
+    const lectureIndex = course.syllabus[moduleIndex].lectures.length;
+    
+    course.syllabus[moduleIndex].lectures.push({
+      title,
+      videoUrl,
+      youtubeVideoId: ytId || undefined,
+      order: lectureIndex,
+      duration: undefined
+    });
+    
+    await course.save();
+    
+    // Update lecture count
+    let totalLectures = 0;
+    course.syllabus.forEach(m => { totalLectures += m.lectures.length; });
+    course.lectureCount = totalLectures;
+    await course.save();
+    
+    // Enqueue YouTube meta fetch job if we have a video ID
+    if (ytId) {
+      youtubeService.enqueueYouTubeMetaJob(
+        ytId,
+        String(course._id),
+        moduleIndex,
+        lectureIndex
+      );
+    }
+    
+    res.status(201).json(course);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update lecture
+router.put('/:courseId/modules/:moduleIndex/lectures/:lectureIndex', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!['admin', 'teacher'].includes(user.role)) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    const { title, videoUrl, youtubeVideoId } = req.body;
+    const moduleIndex = parseInt(req.params.moduleIndex);
+    const lectureIndex = parseInt(req.params.lectureIndex);
+    
+    const course = await Course.findById(req.params.courseId);
+    if (!course || !course.syllabus?.[moduleIndex]?.lectures?.[lectureIndex]) {
+      return res.status(404).json({ error: 'Lecture not found' });
+    }
+    
+    const lecture = course.syllabus[moduleIndex].lectures[lectureIndex];
+    const oldYtId = lecture.youtubeVideoId;
+    
+    if (title) lecture.title = title;
+    if (videoUrl !== undefined) lecture.videoUrl = videoUrl;
+    
+    // Handle YouTube ID update
+    const newYtId = youtubeVideoId || youtubeService.extractYouTubeId(videoUrl || '');
+    if (newYtId && newYtId !== oldYtId) {
+      lecture.youtubeVideoId = newYtId;
+      // Re-fetch metadata for new video
+      youtubeService.enqueueYouTubeMetaJob(
+        newYtId,
+        String(course._id),
+        moduleIndex,
+        lectureIndex
+      );
+    }
+    
+    await course.save();
+    res.json(course);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete lecture
+router.delete('/:courseId/modules/:moduleIndex/lectures/:lectureIndex', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!['admin', 'teacher'].includes(user.role)) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+    
+    const moduleIndex = parseInt(req.params.moduleIndex);
+    const lectureIndex = parseInt(req.params.lectureIndex);
+    
+    const course = await Course.findById(req.params.courseId);
+    if (!course || !course.syllabus?.[moduleIndex]?.lectures?.[lectureIndex]) {
+      return res.status(404).json({ error: 'Lecture not found' });
+    }
+    
+    course.syllabus[moduleIndex].lectures.splice(lectureIndex, 1);
+    
+    // Re-index orders
+    course.syllabus[moduleIndex].lectures.forEach((lec, idx) => {
+      lec.order = idx;
+    });
+    
+    // Update lecture count
+    let totalLectures = 0;
+    course.syllabus.forEach(m => { totalLectures += m.lectures.length; });
+    course.lectureCount = totalLectures;
+    
+    await course.save();
+    res.json({ success: true, message: 'Lecture deleted' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
+

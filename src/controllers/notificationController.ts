@@ -1,5 +1,26 @@
 import { Request, Response } from 'express';
 import Notification from '../models/Notification';
+import notificationService from '../services/notificationService';
+import User from '../models/User';
+
+// Register push token
+export const registerToken = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+    const { pushToken } = req.body;
+
+    if (!pushToken) {
+      return res.status(400).json({ message: 'Push token is required' });
+    }
+
+    await User.findByIdAndUpdate(userId, { pushToken });
+
+    res.json({ message: 'Push token registered successfully' });
+  } catch (err) {
+    console.error('Error registering push token:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
 
 // Get notifications for the authenticated user
 export const getUserNotifications = async (req: Request, res: Response) => {
@@ -124,10 +145,10 @@ export const createNotification = async (req: Request, res: Response) => {
       });
     }
 
-    const notification = await Notification.create({
+    const notification = await notificationService.createAndSendNotification({
       userId,
       type,
-      priority: priority || 'medium',
+      priority,
       title,
       message,
       data,
@@ -159,23 +180,23 @@ export const createBulkNotifications = async (req: Request, res: Response) => {
       });
     }
 
-    const notifications = userIds.map(userId => ({
-      userId,
+    // Use broadcast service to send push notifications too
+    // Note: optimization for valid tokens might be needed for large broadcasts
+    await notificationService.broadcastNotification(userIds, {
       type,
-      priority: priority || 'medium',
+      priority,
       title,
       message,
       data,
-      actionUrl,
-    }));
-
-    await Notification.insertMany(notifications);
+      actionUrl
+    });
 
     res.status(201).json({ 
-      message: `${notifications.length} notifications created` 
+      message: `${userIds.length} notifications queued for creation` 
     });
   } catch (err) {
     console.error('Error creating bulk notifications:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };
+

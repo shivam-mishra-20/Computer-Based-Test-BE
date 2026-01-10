@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import User from '../models/User';
 import jwt from 'jsonwebtoken';
 import { AuthPayload } from '../middlewares/authMiddleware';
-import { firebaseSignInWithEmailPassword, getFirestoreUserProfile, getFirestoreUserByEmail, getFirestoreUserByEmailAny } from '../services/firebaseService';
+import { firebaseSignInWithEmailPassword, getFirestoreUserProfile, getFirestoreUserByEmail, getFirestoreUserByEmailAny, uploadToFirebase } from '../services/firebaseService';
 import bcrypt from 'bcrypt';
 
 // Public registration endpoint for general users (with admin approval)
@@ -231,5 +231,96 @@ export const changePassword = async (req: Request, res: Response) => {
   } catch (err) {
     console.error('Change password error:', err);
     res.status(500).json({ message: 'Server error while changing password' });
+  }
+};
+
+// Update user profile
+export const updateProfile = async (req: Request, res: Response) => {
+  try {
+    const current = (req as any).user as { id: string; role?: string } | undefined;
+    if (!current) return res.status(401).json({ message: 'Unauthorized' });
+
+    const { name, phone, targetExams, studyGoals, profileImage } = req.body;
+    
+    const user = await User.findById(current.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // Update allowed fields
+    if (name) user.name = name;
+    if (phone !== undefined) (user as any).phone = phone;
+    if (targetExams !== undefined) (user as any).targetExams = targetExams;
+    if (studyGoals !== undefined) (user as any).studyGoals = studyGoals;
+    if (profileImage !== undefined) (user as any).profileImage = profileImage;
+
+    await user.save();
+
+    res.json({
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      phone: (user as any).phone,
+      classLevel: (user as any).classLevel,
+      batch: (user as any).batch,
+      targetExams: (user as any).targetExams,
+      studyGoals: (user as any).studyGoals,
+      profileImage: (user as any).profileImage,
+      firebaseUid: (user as any).firebaseUid,
+    });
+  } catch (err) {
+    console.error('Update profile error:', err);
+    res.status(500).json({ message: 'Server error while updating profile' });
+  }
+};
+
+// Upload profile image to Firebase Storage
+export const uploadProfileImage = async (req: Request, res: Response) => {
+  try {
+    const current = (req as any).user as { id: string; role?: string } | undefined;
+    if (!current) return res.status(401).json({ message: 'Unauthorized' });
+
+    const file = (req as any).file;
+    if (!file) {
+      return res.status(400).json({ message: 'No image file provided' });
+    }
+
+    // Validate file type
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    if (!allowedTypes.includes(file.mimetype)) {
+      return res.status(400).json({ message: 'Invalid file type. Only JPEG, PNG, GIF, and WebP are allowed.' });
+    }
+
+    // Generate unique filename
+    const ext = file.originalname.split('.').pop() || 'jpg';
+    const fileName = `profile-images/${current.id}_${Date.now()}.${ext}`;
+
+    // Upload to Firebase Storage
+    const imageUrl = await uploadToFirebase(file.buffer, fileName, file.mimetype);
+
+    // Update user's profile image URL
+    const user = await User.findByIdAndUpdate(
+      current.id,
+      { profileImage: imageUrl },
+      { new: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    res.json({
+      message: 'Profile image uploaded successfully',
+      profileImage: imageUrl,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        profileImage: (user as any).profileImage,
+      }
+    });
+  } catch (err) {
+    console.error('Upload profile image error:', err);
+    res.status(500).json({ message: 'Server error while uploading profile image' });
   }
 };
