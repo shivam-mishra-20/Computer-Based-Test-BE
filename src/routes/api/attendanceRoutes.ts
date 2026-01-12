@@ -28,7 +28,7 @@ router.get('/my', authMiddleware, async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'User name or class level not found' });
     }
     
-    const records = await getStudentAttendance(user.name, user.classLevel);
+    const records = await getStudentAttendance(user.name, user.classLevel, authUser.id);
     
     // Parse optional query params for filtering
     const { month, year } = req.query;
@@ -75,7 +75,7 @@ router.get('/summary', authMiddleware, async (req: Request, res: Response) => {
       return res.status(400).json({ error: 'User name or class level not found' });
     }
     
-    const summary = await getAttendanceSummary(user.name, user.classLevel);
+    const summary = await getAttendanceSummary(user.name, user.classLevel, authUser.id);
     res.json(summary);
   } catch (error) {
     console.error('Error fetching attendance summary:', error);

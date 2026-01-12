@@ -1,4 +1,6 @@
 import { initFirebaseAdmin } from './firebaseService';
+import Attendance from '../models/Attendance';
+import User from '../models/User';
 
 let admin: any = null;
 
@@ -18,6 +20,8 @@ export interface AttendanceEntry {
   clockIn: string;
   clockOut: string;
   dayAndDate: string;
+  source?: 'firebase' | 'mongodb';
+  status?: 'present' | 'absent' | 'late' | 'excused';
 }
 
 export interface StudentLeaveDoc {
@@ -33,7 +37,7 @@ const buildDocId = (name: string, cls: string) =>
 /**
  * Get student attendance from Firebase Firestore studentLeaves collection
  */
-export async function getStudentAttendance(name: string, classLevel: string): Promise<AttendanceEntry[]> {
+async function getFirebaseAttendance(name: string, classLevel: string): Promise<AttendanceEntry[]> {
   const firebase = getAdmin();
   if (!firebase) return [];
   
@@ -48,7 +52,8 @@ export async function getStudentAttendance(name: string, classLevel: string): Pr
     
     if (!snap.empty) {
       const data = snap.docs[0].data() as StudentLeaveDoc;
-      return Array.isArray(data.attendance) ? data.attendance : [];
+      const records = Array.isArray(data.attendance) ? data.attendance : [];
+      return records.map(r => ({ ...r, source: 'firebase' as const }));
     }
     
     // Try by doc ID
@@ -56,21 +61,71 @@ export async function getStudentAttendance(name: string, classLevel: string): Pr
     const doc = await db.collection('studentLeaves').doc(docId).get();
     if (doc.exists) {
       const data = doc.data() as StudentLeaveDoc;
-      return Array.isArray(data.attendance) ? data.attendance : [];
+      const records = Array.isArray(data.attendance) ? data.attendance : [];
+      return records.map(r => ({ ...r, source: 'firebase' as const }));
     }
     
     return [];
   } catch (error) {
-    console.error('Error fetching student attendance:', error);
+    console.error('Error fetching Firebase attendance:', error);
     return [];
   }
 }
 
 /**
+ * Get student attendance from MongoDB Attendance collection
+ */
+async function getMongoAttendance(userId: string): Promise<AttendanceEntry[]> {
+  try {
+    const records = await Attendance.find({ studentId: userId })
+      .sort({ date: -1 })
+      .lean();
+    
+    return records.map(r => ({
+      clockIn: r.status === 'present' || r.status === 'late' ? '09:00 AM' : '--:--',
+      clockOut: r.status === 'present' || r.status === 'late' ? '04:00 PM' : '--:--',
+      dayAndDate: r.date.toISOString().split('T')[0],
+      source: 'mongodb' as const,
+      status: r.status,
+    }));
+  } catch (error) {
+    console.error('Error fetching MongoDB attendance:', error);
+    return [];
+  }
+}
+
+/**
+ * Get student attendance from both Firebase and MongoDB, combined
+ */
+export async function getStudentAttendance(name: string, classLevel: string, userId?: string): Promise<AttendanceEntry[]> {
+  // Fetch from both sources in parallel
+  const [firebaseRecords, mongoRecords] = await Promise.all([
+    getFirebaseAttendance(name, classLevel),
+    userId ? getMongoAttendance(userId) : Promise.resolve([]),
+  ]);
+  
+  // Combine records, using date as key to avoid duplicates
+  // Firebase records take priority if same date exists in both
+  const byDate = new Map<string, AttendanceEntry>();
+  
+  // Add MongoDB records first
+  for (const rec of mongoRecords) {
+    byDate.set(rec.dayAndDate, rec);
+  }
+  
+  // Firebase records override if same date (biometric is more accurate)
+  for (const rec of firebaseRecords) {
+    byDate.set(rec.dayAndDate, rec);
+  }
+  
+  return Array.from(byDate.values());
+}
+
+/**
  * Get attendance summary for a student
  */
-export async function getAttendanceSummary(name: string, classLevel: string) {
-  const records = await getStudentAttendance(name, classLevel);
+export async function getAttendanceSummary(name: string, classLevel: string, userId?: string) {
+  const records = await getStudentAttendance(name, classLevel, userId);
   
   const presentDays = records.filter(r => r.clockIn !== '--:--' && r.clockOut !== '--:--').length;
   const totalDays = records.length;

@@ -1,88 +1,167 @@
 import { Expo, ExpoPushMessage } from 'expo-server-sdk';
-import Notification, { INotification, NotificationType, NotificationPriority } from '../models/Notification';
 import User from '../models/User';
 
+// Initialize Expo SDK
 const expo = new Expo();
 
-interface CreateNotificationParams {
-  userId: string;
-  type: NotificationType;
-  title: string;
-  message: string;
-  priority?: NotificationPriority;
-  data?: any;
-  actionUrl?: string;
+// Check if a string is a valid MongoDB ObjectId
+function isValidObjectId(id: string): boolean {
+  return /^[0-9a-fA-F]{24}$/.test(id);
 }
 
-export const sendPushNotification = async (pushToken: string, title: string, body: string, data?: any) => {
-  if (!Expo.isExpoPushToken(pushToken)) {
-    console.warn(`Push token ${pushToken} is not a valid Expo push token`);
-    return;
-  }
-
-  const messages: ExpoPushMessage[] = [{
-    to: pushToken,
-    sound: 'default',
-    title,
-    body,
-    data,
-  }];
-
+/**
+ * Send push notifications to users based on class/batch
+ */
+export async function sendScheduleNotification(
+  title: string,
+  body: string,
+  classLevel?: string,
+  batch?: string
+) {
   try {
+    // Find users who match criteria and have push tokens
+    const query: any = {
+      role: 'student',
+      pushToken: { $exists: true, $ne: null }
+    };
+    
+    if (classLevel) {
+      query.classLevel = classLevel;
+    }
+    if (batch) {
+      query.batch = batch;
+    }
+    
+    const users = await User.find(query).select('pushToken');
+    const pushTokens = users.map(u => u.pushToken).filter(t => Expo.isExpoPushToken(t));
+    
+    if (pushTokens.length === 0) return;
+    
+    // Create messages
+    const messages: ExpoPushMessage[] = [];
+    for (const pushToken of pushTokens) {
+      messages.push({
+        to: pushToken,
+        sound: 'default',
+        title: title,
+        body: body,
+        data: { type: 'schedule_update' },
+      });
+    }
+    
+    // Chunk and send
     const chunks = expo.chunkPushNotifications(messages);
+    const tickets = [];
+    
     for (const chunk of chunks) {
       try {
         const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
-        console.log('Push notification sent:', ticketChunk);
-        // NOTE: For production, you should handle receipts to check for errors/invalid tokens
+        tickets.push(...ticketChunk);
       } catch (error) {
         console.error('Error sending push notification chunk:', error);
       }
     }
-  } catch (error) {
-    console.error('Error sending push notification:', error);
-  }
-};
-
-export const createAndSendNotification = async (params: CreateNotificationParams): Promise<INotification> => {
-  const { userId, type, title, message, priority = 'medium', data, actionUrl } = params;
-
-  // 1. Create Notification in DB
-  const notification = await Notification.create({
-    userId,
-    type,
-    priority,
-    title,
-    message,
-    data,
-    actionUrl,
-  });
-
-  // 2. Fetch User to get Push Token
-  try {
-    const user = await User.findById(userId).select('pushToken settings');
     
-    // Check if user allows push notifications
-    if (user && user.pushToken && user.settings?.pushNotifications !== false) {
-      // 3. Send Push Notification
-      await sendPushNotification(user.pushToken, title, message, { ...data, notificationId: notification._id });
-    }
+    return tickets;
   } catch (error) {
-    console.error(`Error sending push notification for user ${userId}:`, error);
-    // Don't throw, we still successfully created the DB notification
+    console.error('Error sending schedule notifications:', error);
   }
-
-  return notification;
-};
-
-export const broadcastNotification = async (userIds: string[], params: Omit<CreateNotificationParams, 'userId'>) => {
-    // This could be optimized safely with bulk lookup
-    const results = await Promise.all(userIds.map(userId => createAndSendNotification({ ...params, userId })));
-    return results;
 }
 
-export default {
-  sendPushNotification,
-  createAndSendNotification,
-  broadcastNotification
-};
+/**
+ * Send push notification to a specific teacher
+ * Supports both MongoDB ObjectId and Firebase document ID
+ */
+export async function sendTeacherNotification(
+  teacherId: string,
+  title: string,
+  body: string
+) {
+  try {
+    let teacher = null;
+    
+    // Try to find by MongoDB ObjectId first
+    if (isValidObjectId(teacherId)) {
+      teacher = await User.findById(teacherId).select('pushToken');
+    }
+    
+    // If not found, try to find by firebaseUid field
+    if (!teacher) {
+      teacher = await User.findOne({ firebaseUid: teacherId }).select('pushToken');
+    }
+    
+    if (!teacher?.pushToken || !Expo.isExpoPushToken(teacher.pushToken)) {
+      console.log(`Teacher ${teacherId} has no valid push token`);
+      return;
+    }
+    
+    const message: ExpoPushMessage = {
+      to: teacher.pushToken,
+      sound: 'default',
+      title,
+      body,
+      data: { type: 'schedule_update' },
+    };
+    
+    await expo.sendPushNotificationsAsync([message]);
+  } catch (error) {
+    console.error('Error sending teacher notification:', error);
+  }
+}
+
+/**
+ * Send push notifications to specific students
+ * Supports both MongoDB ObjectIds and Firebase document IDs
+ */
+export async function sendStudentNotifications(
+  studentIds: string[],
+  title: string,
+  body: string
+) {
+  try {
+    // Separate MongoDB ObjectIds from Firebase IDs
+    const objectIds = studentIds.filter(isValidObjectId);
+    const firebaseIds = studentIds.filter(id => !isValidObjectId(id));
+    
+    // Find by MongoDB ObjectIds
+    const mongoStudents = objectIds.length > 0 
+      ? await User.find({
+          _id: { $in: objectIds },
+          pushToken: { $exists: true, $ne: null }
+        }).select('pushToken')
+      : [];
+    
+    // Find by Firebase IDs
+    const firebaseStudents = firebaseIds.length > 0
+      ? await User.find({
+          firebaseUid: { $in: firebaseIds },
+          pushToken: { $exists: true, $ne: null }
+        }).select('pushToken')
+      : [];
+    
+    const allStudents = [...mongoStudents, ...firebaseStudents];
+    const pushTokens = allStudents.map(s => s.pushToken).filter(t => Expo.isExpoPushToken(t));
+    
+    if (pushTokens.length === 0) return;
+    
+    const messages: ExpoPushMessage[] = pushTokens.map(token => ({
+      to: token,
+      sound: 'default' as const,
+      title,
+      body,
+      data: { type: 'schedule_update' },
+    }));
+    
+    const chunks = expo.chunkPushNotifications(messages);
+    
+    for (const chunk of chunks) {
+      try {
+        await expo.sendPushNotificationsAsync(chunk);
+      } catch (error) {
+        console.error('Error sending student notification chunk:', error);
+      }
+    }
+  } catch (error) {
+    console.error('Error sending student notifications:', error);
+  }
+}
