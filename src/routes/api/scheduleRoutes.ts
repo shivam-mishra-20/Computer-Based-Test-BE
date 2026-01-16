@@ -97,6 +97,7 @@ function isValidObjectId(id: string): boolean {
  * Sync a Firebase teacher to MongoDB Users collection
  * This ensures Firebase teachers can receive notifications
  */
+// Sync Firebase teacher to MongoDB users collection
 async function syncFirebaseTeacherToMongo(firebaseTeacherId: string, teacherName: string) {
   try {
     // Skip if it's already a valid MongoDB ObjectId
@@ -130,6 +131,53 @@ async function syncFirebaseTeacherToMongo(firebaseTeacherId: string, teacherName
       console.error(`Failed to sync Firebase teacher ${firebaseTeacherId}:`, error.message);
     }
   }
+}
+
+/**
+ * Resolve teacher name from ID (Mongo ObjectId, Mongo firebaseUid, or Firebase Doc ID)
+ * And sync to MongoDB if found in Firebase but not Mongo
+ */
+async function resolveTeacherNameAndSync(teacherId: string): Promise<string> {
+  let teacherName = '';
+  
+  // 1. Try MongoDB first (if it's a valid ObjectId)
+  try {
+    if (isValidObjectId(teacherId)) {
+      const teacher = await User.findById(teacherId).select('name');
+      return teacher?.name || '';
+    }
+  } catch { /* not a MongoDB ObjectId */ }
+  
+  // 2. Try MongoDB by firebaseUid if not found
+  try {
+    const syncedTeacher = await User.findOne({ firebaseUid: teacherId }).select('name');
+    if (syncedTeacher) {
+      return syncedTeacher.name;
+    }
+  } catch (e) { console.error('Error finding teacher by firebaseUid:', e); }
+
+  // 3. If still not found, try Firebase and sync to MongoDB
+  const admin = getFirebaseAdmin();
+  if (admin) {
+    try {
+      const db = admin.firestore();
+      const doc = await db.collection('Users').doc(teacherId).get();
+      if (doc.exists) {
+        const data = doc.data();
+        const att = data?.attendance || {};
+        teacherName = att.name || data?.name || data?.displayName || '';
+        
+        // Sync Firebase teacher to MongoDB for notifications
+        if (teacherName) {
+           await syncFirebaseTeacherToMongo(teacherId, teacherName);
+        }
+      }
+    } catch (fbError) {
+      console.error('Firebase teacher lookup failed:', fbError);
+    }
+  }
+  
+  return teacherName;
 }
 
 // ========================
@@ -402,6 +450,101 @@ router.get('/firebase/batches', authMiddleware, async (req: Request, res: Respon
   }
 });
 
+// Get students from both MongoDB and Firebase (combined)
+router.get('/students', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { classLevel, batch } = req.query;
+    const students: any[] = [];
+    const emailsAdded = new Set<string>();
+    
+    // 1. Fetch from MongoDB first
+    const mongoQuery: any = { role: 'student' };
+    if (classLevel) mongoQuery.classLevel = classLevel;
+    if (batch) mongoQuery.batch = batch;
+    
+    const mongoStudents = await User.find(mongoQuery)
+      .select('_id name email classLevel batch phone firebaseUid')
+      .sort({ name: 1 });
+    
+    mongoStudents.forEach((s: any) => {
+      if (s.email) {
+        students.push({
+          id: s._id.toString(),
+          name: s.name,
+          email: s.email,
+          classLevel: s.classLevel,
+          batch: s.batch,
+          phone: s.phone,
+          source: 'mongodb'
+        });
+        emailsAdded.add(s.email.toLowerCase());
+      }
+    });
+    
+    // 2. Fetch from Firebase and add only new students
+    const admin = getFirebaseAdmin();
+    if (admin) {
+      try {
+        const db = admin.firestore();
+        const snapshot = await db.collection('Users').get();
+        
+        snapshot.forEach((doc: any) => {
+          const data = doc.data();
+          const att = data.attendance || {};
+          const res = data.results || {};
+          
+          const role = res.role || data.role || '';
+          if (role === 'teacher' || role === 'Teacher' || role === 'admin' || role === 'Admin') {
+            return;
+          }
+          
+          const rawClass = data.Class || data.classLevel || '';
+          const studentClass = String(rawClass).replace(/^Class\s*/i, '').trim();
+          const studentBatch = att.batch || data.batch || '';
+          const studentName = att.name || data.name || data.displayName || '';
+          const studentEmail = (att.email || data.email || '').toLowerCase();
+          
+          if (!studentClass) return;
+          
+          // Filter by class
+          if (classLevel) {
+            const queryClass = String(classLevel).replace(/^Class\s*/i, '').trim();
+            if (studentClass !== queryClass) return;
+          }
+          
+          // Filter by batch
+          if (batch && studentBatch && studentBatch !== batch) return;
+          
+          // Only add if email not already in MongoDB
+          if (studentEmail && !emailsAdded.has(studentEmail)) {
+            students.push({
+              id: doc.id,
+              name: studentName || 'Unknown',
+              email: studentEmail,
+              classLevel: studentClass,
+              batch: studentBatch,
+              phone: att.phone || data.phone,
+              source: 'firebase'
+            });
+            emailsAdded.add(studentEmail);
+          }
+        });
+      } catch (fbError) {
+        console.error('Error fetching from Firebase:', fbError);
+      }
+    }
+    
+    // Sort by name
+    students.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    
+    console.log(`Combined students: Found ${students.length} students for class=${classLevel}, batch=${batch}`);
+    res.json(students);
+  } catch (error: any) {
+    console.error('Error fetching combined students:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ========================
 // TEACHERS & ROOMS
 // ========================
@@ -488,6 +631,67 @@ router.get('/timetable', authMiddleware, async (req: Request, res: Response) => 
 // LIVE SCHEDULE
 // ========================
 
+// Get institute-wide view of all classes for a specific date
+router.get('/institute-view', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const { date } = req.query;
+    
+    // Parse date or use today
+    const targetDate = date ? new Date(date as string) : new Date();
+    const dayOfWeek = targetDate.getDay();
+    
+    // Get start and end of the day
+    const startOfDay = new Date(targetDate);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(targetDate);
+    endOfDay.setHours(23, 59, 59, 999);
+    
+    // Fetch all regular schedules for this day of week
+    const regularSchedules = await Schedule.find({
+      scheduleType: 'regular',
+      dayOfWeek,
+      isActive: true
+    })
+      .populate('teacherId', 'name')
+      .sort({ startTimeSlot: 1 })
+      .lean();
+    
+    // Fetch all custom schedules for this specific date
+    const customSchedules = await Schedule.find({
+      scheduleType: 'custom',
+      date: { $gte: startOfDay, $lte: endOfDay },
+      isActive: true
+    })
+      .populate('teacherId', 'name')
+      .sort({ startTimeSlot: 1 })
+      .lean();
+    
+    // Combine and format all schedules
+    const allSchedules = [...regularSchedules, ...customSchedules].map((schedule: any) => ({
+      _id: schedule._id,
+      title: schedule.title,
+      scheduleType: schedule.scheduleType,
+      type: schedule.type,
+      dayOfWeek: schedule.dayOfWeek,
+      startTimeSlot: schedule.startTimeSlot,
+      endTimeSlot: schedule.endTimeSlot,
+      date: schedule.date,
+      subject: schedule.subject,
+      classLevel: schedule.classLevel,
+      batch: schedule.batch,
+      roomNumber: schedule.roomNumber,
+      teacherId: schedule.teacherId?._id || schedule.teacherId,
+      teacherName: schedule.teacherName || schedule.teacherId?.name,
+      students: schedule.students || []
+    }));
+    
+    res.json(allSchedules);
+  } catch (error: any) {
+    console.error('Error fetching institute view:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Get current and next class for a user
 router.get('/live', authMiddleware, async (req: Request, res: Response) => {
   try {
@@ -528,9 +732,16 @@ router.get('/live', authMiddleware, async (req: Request, res: Response) => {
         { students: user.firebaseUid }
       ];
     } else if (user.role === 'teacher') {
+      // Match by teacherId OR teacherName (case-insensitive)
+      // Note: Some schedules store teacher name in teacherId field
       baseQuery.$or = [
         { teacherId: user.id },
-        { teacherId: user.firebaseUid }
+        { teacherId: user.firebaseUid },
+        { teacherId: user._id?.toString() },
+        { teacherId: user.name }, // Some schedules store name in teacherId
+        { teacherId: { $regex: new RegExp(`^${user.name?.trim()}$`, 'i') } },
+        { teacherName: user.name },
+        { teacherName: { $regex: new RegExp(`^${user.name?.trim()}$`, 'i') } }
       ];
     }
     
@@ -682,6 +893,118 @@ function formatScheduleResponse(schedule: any) {
 }
 
 // ========================
+// DAY VIEW - Student's personalized schedule for a specific date
+// ========================
+
+// Get schedules for the logged-in user for a specific day (used by "My Schedule" in the app)
+router.get('/day-view', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const authUser = (req as any).user;
+    const user = await User.findById(authUser.id);
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    const { date } = req.query;
+    
+    // Parse date or use today
+    const targetDate = date ? new Date(date as string) : new Date();
+    const dayOfWeek = targetDate.getDay();
+    
+    // Get start and end of the day for custom schedule lookup
+    const startOfDay = new Date(targetDate);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(targetDate);
+    endOfDay.setHours(23, 59, 59, 999);
+    
+    // Normalize class level (remove "Class " prefix if present)
+    const userClassLevel = String(user.classLevel || '').replace(/^Class\s*/i, '').trim();
+    const userBatch = user.batch || '';
+    
+    console.log(`[Day View] User: ${user.name}, Class: ${userClassLevel}, Batch: ${userBatch}, Day: ${dayOfWeek}, Date: ${date}`);
+    
+    // Build query based on user role
+    const baseQuery: any = { isActive: true };
+    
+    if (user.role === 'student') {
+      // Match schedules by classLevel (normalized) OR specific student targeting
+      baseQuery.$or = [
+        { 
+          classLevel: { $in: [userClassLevel, `Class ${userClassLevel}`, user.classLevel] },
+          // Match user's batch OR 'All Batches' OR 'All'
+          ...(userBatch ? { batch: { $in: [userBatch, 'All Batches', 'All'] } } : {}) 
+        },
+        { students: user.id },
+        { students: user.firebaseUid }
+      ];
+    } else if (user.role === 'teacher') {
+      // Match by teacherId OR teacherName (case-insensitive)
+      // Note: Some schedules store teacher name in teacherId field
+      baseQuery.$or = [
+        { teacherId: user.id },
+        { teacherId: user.firebaseUid },
+        { teacherId: user._id?.toString() },
+        { teacherId: user.name },
+        { teacherId: { $regex: new RegExp(`^${user.name?.trim()}$`, 'i') } },
+        { teacherName: user.name },
+        { teacherName: { $regex: new RegExp(`^${user.name?.trim()}$`, 'i') } }
+      ];
+    }
+    
+    // Fetch regular schedules for this day of week
+    let regularSchedules = await Schedule.find({
+      ...baseQuery,
+      scheduleType: 'regular',
+      dayOfWeek
+    }).lean();
+    
+    // FALLBACK for students: If strict match returns nothing, try without batch restriction
+    if (regularSchedules.length === 0 && user.role === 'student' && userBatch) {
+      console.log('[Day View] Strict match failed, trying loose batch match...');
+      const looseQuery: any = { 
+        isActive: true,
+        $or: [
+          { classLevel: { $in: [userClassLevel, `Class ${userClassLevel}`, user.classLevel] } },
+          { students: user.id },
+          { students: user.firebaseUid }
+        ]
+      };
+      
+      regularSchedules = await Schedule.find({
+        ...looseQuery,
+        scheduleType: 'regular',
+        dayOfWeek
+      }).lean();
+    }
+    
+    // Fetch custom schedules for this specific date
+    const customSchedules = await Schedule.find({
+      ...baseQuery,
+      scheduleType: 'custom',
+      date: { $gte: startOfDay, $lte: endOfDay }
+    }).lean();
+    
+    // Merge and sort
+    const allSchedules = [...regularSchedules, ...customSchedules];
+    
+    // Helper to get start time safely
+    const getStartTime = (s: any) => s.startTimeSlot || s.startTimeslot || '00:00';
+    
+    allSchedules.sort((a, b) => {
+      return getStartTime(a).localeCompare(getStartTime(b));
+    });
+    
+    console.log(`[Day View] Found ${regularSchedules.length} regular + ${customSchedules.length} custom schedules`);
+    
+    res.json(allSchedules.map(formatScheduleResponse));
+  } catch (error: any) {
+    console.error('Error in day-view:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ========================
 // SCHEDULE CRUD
 // ========================
 
@@ -712,7 +1035,17 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
         { students: user.id }
       ];
     } else if (user.role === 'teacher') {
-      query.teacherId = user.id;
+      // Match by teacherId OR teacherName (case-insensitive)
+      // Note: Some schedules store teacher name in teacherId field
+      query.$or = [
+        { teacherId: user.id },
+        { teacherId: user._id?.toString() },
+        { teacherId: user.firebaseUid },
+        { teacherId: user.name },
+        { teacherId: { $regex: new RegExp(`^${user.name?.trim()}$`, 'i') } },
+        { teacherName: user.name },
+        { teacherName: { $regex: new RegExp(`^${user.name?.trim()}$`, 'i') } }
+      ];
     }
     
     const schedules = await Schedule.find(query)
@@ -725,35 +1058,55 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
-// Get today's schedule
-router.get('/today', authMiddleware, async (req: Request, res: Response) => {
+// Get schedule for a specific day (defaults to today)
+router.get('/day-view', authMiddleware, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const today = new Date();
-    const dayOfWeek = today.getDay();
+    const dateStr = req.query.date as string;
+    
+    // Use provided date or default to today
+    const targetDate = dateStr ? new Date(dateStr) : new Date();
+    
+    // check if valid date
+    if (isNaN(targetDate.getTime())) {
+      return res.status(400).json({ error: 'Invalid date format' });
+    }
+
+    const dayOfWeek = targetDate.getDay();
     
     const baseQuery: any = { isActive: true };
     
     if (user.role === 'student') {
       baseQuery.$or = [
         { classLevel: user.classLevel, batch: user.batch },
-        { students: user.id }
+        { students: user.id },
+        { students: user.firebaseUid }
       ];
     } else if (user.role === 'teacher') {
-      baseQuery.teacherId = user.id;
+      // Match by teacherId OR teacherName (case-insensitive)
+      // Note: Some schedules store teacher name in teacherId field
+      baseQuery.$or = [
+        { teacherId: user.id },
+        { teacherId: user._id?.toString() },
+        { teacherId: user.firebaseUid },
+        { teacherId: user.name },
+        { teacherId: { $regex: new RegExp(`^${user.name?.trim()}$`, 'i') } },
+        { teacherName: user.name },
+        { teacherName: { $regex: new RegExp(`^${user.name?.trim()}$`, 'i') } }
+      ];
     }
     
-    // Regular schedule for today's day of week
+    // Regular schedule for this day of week
     const regularSchedules = await Schedule.find({
       ...baseQuery,
       scheduleType: 'regular',
       dayOfWeek
     }).sort({ startTimeSlot: 1 });
     
-    // Custom schedules for today's date
-    const startOfDay = new Date(today);
+    // Custom schedules for this specific date
+    const startOfDay = new Date(targetDate);
     startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(today);
+    const endOfDay = new Date(targetDate);
     endOfDay.setHours(23, 59, 59, 999);
     
     const customSchedules = await Schedule.find({
@@ -762,6 +1115,44 @@ router.get('/today', authMiddleware, async (req: Request, res: Response) => {
       date: { $gte: startOfDay, $lte: endOfDay }
     }).sort({ startTimeSlot: 1 });
     
+    res.json([...regularSchedules, ...customSchedules].map(formatScheduleResponse));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get complete institute schedule for a specific date (Admin/Public view)
+router.get('/institute-view', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const dateStr = req.query.date as string;
+    const targetDate = dateStr ? new Date(dateStr) : new Date();
+
+    if (isNaN(targetDate.getTime())) {
+      return res.status(400).json({ error: 'Invalid date format' });
+    }
+
+    const dayOfWeek = targetDate.getDay();
+    const baseQuery: any = { isActive: true };
+
+    // Regular schedule matching day of week
+    const regularSchedules = await Schedule.find({
+      ...baseQuery,
+      scheduleType: 'regular',
+      dayOfWeek
+    }).sort({ startTimeSlot: 1, classLevel: 1, batch: 1 });
+
+    // Custom schedules for this specific date
+    const startOfDay = new Date(targetDate);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(targetDate);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    const customSchedules = await Schedule.find({
+      ...baseQuery,
+      scheduleType: 'custom',
+      date: { $gte: startOfDay, $lte: endOfDay }
+    }).sort({ startTimeSlot: 1, classLevel: 1, batch: 1 });
+
     res.json([...regularSchedules, ...customSchedules].map(formatScheduleResponse));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -781,42 +1172,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
     // Get teacher name for denormalization (try MongoDB first, then Firebase)
     let teacherName = '';
     if (teacherId) {
-      // Try MongoDB first (if it's a valid ObjectId)
-      try {
-        if (isValidObjectId(teacherId)) {
-          const teacher = await User.findById(teacherId).select('name');
-          teacherName = teacher?.name || '';
-        }
-      } catch { /* not a MongoDB ObjectId */ }
-      
-      // Try MongoDB by firebaseUid if not found
-      if (!teacherName) {
-        const syncedTeacher = await User.findOne({ firebaseUid: teacherId }).select('name');
-        if (syncedTeacher) {
-          teacherName = syncedTeacher.name || '';
-        }
-      }
-      
-      // If still not found, try Firebase and sync to MongoDB
-      if (!teacherName) {
-        const admin = getFirebaseAdmin();
-        if (admin) {
-          try {
-            const db = admin.firestore();
-            const doc = await db.collection('Users').doc(teacherId).get();
-            if (doc.exists) {
-              const data = doc.data();
-              const att = data?.attendance || {};
-              teacherName = att.name || data?.name || data?.displayName || '';
-              
-              // Sync Firebase teacher to MongoDB for notifications
-              await syncFirebaseTeacherToMongo(teacherId, teacherName);
-            }
-          } catch (fbError) {
-            console.error('Firebase teacher lookup failed:', fbError);
-          }
-        }
-      }
+      teacherName = await resolveTeacherNameAndSync(teacherId);
     }
     
     // Check for conflicts
@@ -906,8 +1262,8 @@ router.put('/:scheduleId', authMiddleware, async (req: Request, res: Response) =
     
     // Get teacher name if changed
     if (teacherId) {
-      const teacher = await User.findById(teacherId).select('name');
-      updateData.teacherName = teacher?.name || '';
+      const name = await resolveTeacherNameAndSync(teacherId);
+      updateData.teacherName = name || '';
       updateData.teacherId = teacherId;
     }
     
@@ -936,6 +1292,83 @@ router.put('/:scheduleId', authMiddleware, async (req: Request, res: Response) =
 });
 
 // Delete schedule
+// Get students from both MongoDB and Firebase for targeting
+router.get('/students', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!['admin', 'teacher'].includes(user.role)) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+
+    const { classLevel, batch, search } = req.query;
+    const students: any[] = [];
+
+    // 1. Fetch from MongoDB
+    const mongoQuery: any = { role: 'student' };
+    if (classLevel) mongoQuery.classLevel = classLevel;
+    if (batch) mongoQuery.batch = batch;
+    if (search) {
+      mongoQuery.name = { $regex: search, $options: 'i' };
+    }
+
+    const mongoStudents = await User.find(mongoQuery)
+      .select('name email classLevel batch fcmToken')
+      .lean();
+
+    students.push(...mongoStudents.map(s => ({
+      id: s._id,
+      name: s.name,
+      email: s.email,
+      classLevel: s.classLevel,
+      batch: s.batch,
+      source: 'mongo',
+      pushToken: s.pushToken
+    })));
+
+    // 2. Fetch from Firebase
+    try {
+      const admin = getFirebaseAdmin();
+      if (admin) {
+        let firestoreQuery = admin.firestore().collection('users')
+          .where('role', '==', 'student');
+        
+        if (classLevel) firestoreQuery = firestoreQuery.where('classLevel', '==', classLevel);
+        if (batch) firestoreQuery = firestoreQuery.where('batch', '==', batch);
+        
+        const snapshot = await firestoreQuery.get();
+        
+        snapshot.docs.forEach((doc: any) => {
+          const data = doc.data();
+          // Simple client-side search filter for Firebase results if search param exists
+          if (search && !data.name?.toLowerCase().includes((search as string).toLowerCase())) {
+            return;
+          }
+          
+          // Avoid duplicates if user exists in both (matching by email)
+          if (!students.find(s => s.email === data.email)) {
+            students.push({
+              id: doc.id,
+              name: data.name || 'Unknown Student',
+              email: data.email,
+              classLevel: data.classLevel,
+              batch: data.batch,
+              source: 'firebase',
+              fcmToken: data.fcmToken
+            });
+          }
+        });
+      }
+    } catch (fbError) {
+      console.error('Error fetching from Firebase:', fbError);
+      // Continue with just Mongo students if Firebase fails
+    }
+
+    res.json(students);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.delete('/:scheduleId', authMiddleware, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;

@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import Notification from '../models/Notification';
-import notificationService from '../services/notificationService';
+import * as notificationService from '../services/notificationService';
 import User from '../models/User';
 
 // Register push token

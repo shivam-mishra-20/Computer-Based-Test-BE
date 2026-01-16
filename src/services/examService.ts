@@ -6,7 +6,7 @@ import { ImportedQuestion } from '../models/ImportedQuestion';
 import { getClassQuestionModel } from '../models/ClassQuestion';
 import type { GeneratedPaperResult } from './aiService';
 import User from '../models/User';
-import notificationService from './notificationService';
+import * as notificationService from './notificationService';
 import mongoose from 'mongoose';
 
 export const createQuestion = async (payload: Partial<IQuestion> & { createdBy: Types.ObjectId }): Promise<IQuestion> => {

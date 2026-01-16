@@ -109,7 +109,8 @@ export const login = async (req: Request, res: Response) => {
           status: user.status,
           classLevel: (user as any).classLevel, 
           batch: (user as any).batch, 
-          firebaseUid: (user as any).firebaseUid 
+          firebaseUid: (user as any).firebaseUid,
+          profileImage: (user as any).profileImage
         } 
       });
     }
@@ -190,9 +191,9 @@ export const me = async (req: Request, res: Response) => {
   try {
     const current = (req as any).user as { id: string; role?: string } | undefined;
     if (!current) return res.status(401).json({ message: 'Unauthorized' });
-    const user = await User.findById(current.id).select('name email role classLevel batch firebaseUid');
+    const user = await User.findById(current.id).select('name email role classLevel batch firebaseUid profileImage');
     if (!user) return res.status(404).json({ message: 'User not found' });
-    res.json({ id: user._id, name: user.name, email: user.email, role: user.role, classLevel: (user as any).classLevel, batch: (user as any).batch, firebaseUid: (user as any).firebaseUid });
+    res.json({ id: user._id, name: user.name, email: user.email, role: user.role, classLevel: (user as any).classLevel, batch: (user as any).batch, firebaseUid: (user as any).firebaseUid, profileImage: (user as any).profileImage });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }

@@ -1,7 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export interface ISchedule extends Document {
-  title: string;
+  title?: string;
   description?: string;
   scheduleType: 'regular' | 'custom';
   type: 'class' | 'exam' | 'event' | 'holiday';
@@ -29,7 +29,7 @@ export interface ISchedule extends Document {
 }
 
 const scheduleSchema = new Schema<ISchedule>({
-  title: { type: String, required: true },
+  title: { type: String },
   description: { type: String },
   scheduleType: { type: String, enum: ['regular', 'custom'], required: true, index: true },
   type: { type: String, enum: ['class', 'exam', 'event', 'holiday'], default: 'class' },
