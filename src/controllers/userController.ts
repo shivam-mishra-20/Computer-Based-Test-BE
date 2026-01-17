@@ -47,13 +47,14 @@ export const adminRejectUser = async (req: Request, res: Response) => {
 // Admin-only: Create a user with role teacher or student
 export const adminCreateUser = async (req: Request, res: Response) => {
 	try {
-		const { name, email, password, role, classLevel, batch } = req.body as {
+		const { name, email, password, role, classLevel, batch, empCode } = req.body as {
 			name: string;
 			email: string;
 			password: string;
 			role: UserRole;
 			classLevel?: string;
 			batch?: string;
+			empCode?: string;
 		};
 		if (!name || !email || !password || !role) {
 			return res.status(400).json({ message: 'name, email, password and role are required' });
@@ -61,13 +62,29 @@ export const adminCreateUser = async (req: Request, res: Response) => {
 		if (!['teacher', 'student', 'admin'].includes(role)) {
 			return res.status(400).json({ message: 'Role must be one of admin, teacher, or student' });
 		}
+		
+		// Enforce empCode for teachers and students
+		if ((role === 'teacher' || role === 'student') && !empCode) {
+			return res.status(400).json({ message: 'empCode is mandatory for teachers and students' });
+		}
+
 	const lcEmail = email.toLowerCase();
-	const existing = await User.findOne({ email: lcEmail });
-		if (existing) return res.status(400).json({ message: 'Email already in use' });
-	const user = await User.create({ name, email: lcEmail, password, role, classLevel, batch });
-		await logAudit((req as any).user?.id, 'admin.user.create', String(user._id), { name, email: lcEmail, role });
-		res.status(201).json({ id: user._id, name: user.name, email: user.email, role: user.role });
+	const sanitizedEmpCode = empCode ? empCode.trim() : undefined;
+
+	const existingEmail = await User.findOne({ email: lcEmail });
+		if (existingEmail) return res.status(400).json({ message: 'Email already in use' });
+
+		// Check empCode uniqueness
+		if (sanitizedEmpCode) {
+			const existingEmp = await User.findOne({ empCode: sanitizedEmpCode });
+			if (existingEmp) return res.status(400).json({ message: 'empCode already in use by another user' });
+		}
+
+	const user = await User.create({ name, email: lcEmail, password, role, classLevel, batch, empCode: sanitizedEmpCode });
+		await logAudit((req as any).user?.id, 'admin.user.create', String(user._id), { name, email: lcEmail, role, empCode: sanitizedEmpCode });
+		res.status(201).json({ id: user._id, name: user.name, email: user.email, role: user.role, empCode: user.empCode });
 	} catch (err) {
+		console.error('Create User Error:', err);
 		res.status(500).json({ message: 'Server error' });
 	}
 };
@@ -100,22 +117,31 @@ export const adminGetUser = async (req: Request, res: Response) => {
 	}
 };
 
-// Admin-only: Update user (name, email, role, password)
+// Admin-only: Update user (name, email, role, password, empCode)
 export const adminUpdateUser = async (req: Request, res: Response) => {
 	try {
-		const { name, email, role, password, classLevel, batch } = req.body as Partial<IUser> & { role?: UserRole };
+		const { name, email, role, password, classLevel, batch, empCode } = req.body as Partial<IUser> & { role?: UserRole };
 		const user = await User.findById(req.params.id);
 		if (!user) return res.status(404).json({ message: 'User not found' });
+		
 		if (name) user.name = name;
 		if (email) user.email = email;
 		if (role) user.role = role;
 		if (password) user.password = password; // will be hashed by pre-save
 		if (classLevel !== undefined) (user as any).classLevel = classLevel;
 		if (batch !== undefined) (user as any).batch = batch;
+		
+		if (empCode && empCode.trim() !== user.empCode) {
+			const sanitizedEmpCode = empCode.trim();
+			const existing = await User.findOne({ empCode: sanitizedEmpCode });
+			if (existing) return res.status(400).json({ message: `empCode ${sanitizedEmpCode} is already assigned to ${existing.name}` });
+			user.empCode = sanitizedEmpCode;
+		}
+
 		await user.save();
-		await logAudit((req as any).user?.id, 'admin.user.update', String(user._id), { name, email, role, classLevel, batch });
-		const { _id, name: n, email: e, role: r } = user;
-		res.json({ id: _id, name: n, email: e, role: r, classLevel: (user as any).classLevel, batch: (user as any).batch });
+		await logAudit((req as any).user?.id, 'admin.user.update', String(user._id), { name, email, role, classLevel, batch, empCode: user.empCode });
+		const { _id, name: n, email: e, role: r, empCode: ec } = user;
+		res.json({ id: _id, name: n, email: e, role: r, empCode: ec, classLevel: (user as any).classLevel, batch: (user as any).batch });
 	} catch (err) {
 		res.status(500).json({ message: 'Server error' });
 	}

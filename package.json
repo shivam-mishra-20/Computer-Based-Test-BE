@@ -22,6 +22,7 @@
     "@heroicons/react": "^2.2.0",
     "@hungknguyen/docx-math-converter": "^1.1.4",
     "@sparticuz/chromium": "^140.0.0",
+    "@types/socket.io": "^3.0.1",
     "axios": "^1.7.9",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
@@ -43,6 +44,7 @@
     "puppeteer": "^23.11.1",
     "puppeteer-core": "^24.22.3",
     "sharp": "^0.34.4",
+    "socket.io": "^4.8.3",
     "tesseract.js": "^6.0.1"
   },
   "devDependencies": {

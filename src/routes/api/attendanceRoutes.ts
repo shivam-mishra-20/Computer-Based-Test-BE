@@ -14,7 +14,7 @@ const router = Router();
 
 /**
  * @route   GET /api/attendance/my
- * @desc    Get current student's attendance records
+ * @desc    Get current student's attendance records (Legacy - uses name matching)
  * @access  Private (Student)
  */
 router.get('/my', authMiddleware, async (req: Request, res: Response) => {
@@ -55,6 +55,138 @@ router.get('/my', authMiddleware, async (req: Request, res: Response) => {
     });
   } catch (error) {
     console.error('Error fetching attendance:', error);
+    res.status(500).json({ error: 'Failed to fetch attendance' });
+  }
+});
+
+/**
+ * @route   GET /api/attendance/me
+ * @desc    Get current user's (teacher/student) attendance from Attendance collection
+ *          Groups multiple punches per day: first punch = Clock IN, last punch = Clock OUT
+ * @access  Private
+ */
+router.get('/me', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const authUser = (req as any).user;
+    const { from, to, month, year } = req.query;
+    const mongoose = require('mongoose');
+    const Attendance = require('../../models/Attendance').default;
+    
+    // Fetch user to get empCode and other info
+    const user = await User.findById(authUser.id).select('name empCode role classLevel');
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // Build date match query
+    const dateMatch: any = {};
+    if (from && to) {
+      dateMatch.$gte = new Date(from as string);
+      dateMatch.$lte = new Date(to as string);
+    } else if (month && year) {
+      const startOfMonth = new Date(Number(year), Number(month) - 1, 1);
+      const endOfMonth = new Date(Number(year), Number(month), 0, 23, 59, 59);
+      dateMatch.$gte = startOfMonth;
+      dateMatch.$lte = endOfMonth;
+    }
+    
+    // Use aggregation to group multiple punches per day
+    // First punch = Clock IN, Last punch = Clock OUT
+    const aggregation: any[] = [
+      { 
+        $match: { 
+          studentId: new mongoose.Types.ObjectId(authUser.id),
+          ...(Object.keys(dateMatch).length > 0 ? { date: dateMatch } : {})
+        } 
+      },
+      // Sort by clockIn to get proper first/last
+      { $sort: { date: 1, clockIn: 1 } },
+      // Group by date to combine multiple punches per day
+      {
+        $group: {
+          _id: {
+            $dateToString: { format: "%Y-%m-%d", date: "$date" }
+          },
+          date: { $first: "$date" },
+          clockIn: { $first: "$clockIn" },  // First punch = Clock IN
+          lastPunchClockIn: { $last: "$clockIn" },  // Last punch's clockIn value
+          actualClockOut: { $last: "$clockOut" },  // Explicit clockOut if exists
+          status: { $first: "$status" },
+          lateIn: { $first: "$lateIn" },
+          punchCount: { $sum: 1 }
+        }
+      },
+      // Sort by date descending
+      { $sort: { date: -1 } },
+      // Limit results
+      { $limit: 100 },
+      // Project final shape with computed clockOut
+      {
+        $project: {
+          _id: 1,
+          date: 1,
+          clockIn: 1,
+          // Use actual clockOut if available, otherwise use last punch (if multiple punches)
+          clockOut: {
+            $cond: {
+              if: { $and: [
+                { $ne: ["$actualClockOut", null] },
+                { $ne: ["$actualClockOut", "--:--"] }
+              ]},
+              then: "$actualClockOut",
+              else: {
+                $cond: {
+                  if: { $gt: ["$punchCount", 1] },
+                  then: "$lastPunchClockIn",  // Second punch becomes clock out
+                  else: null
+                }
+              }
+            }
+          },
+          status: 1,
+          lateIn: 1,
+          punchCount: 1
+        }
+      }
+    ];
+    
+    const records = await Attendance.aggregate(aggregation);
+    
+    // Calculate summary stats
+    const present = records.filter((r: any) => 
+      r.status === 'present' || (r.clockIn && r.clockIn !== '--:--')
+    ).length;
+    
+    const absent = records.filter((r: any) => r.status === 'absent').length;
+    
+    const late = records.filter((r: any) => 
+      r.status === 'late' || (r.lateIn && parseInt(r.lateIn) > 0)
+    ).length;
+    
+    res.json({
+      user: {
+        name: user.name,
+        empCode: user.empCode || 'N/A',
+        role: user.role,
+      },
+      stats: {
+        present,
+        absent,
+        late,
+        total: records.length,
+      },
+      records: records.map((r: any) => ({
+        id: r._id,
+        date: r.date.toISOString().split('T')[0],
+        clockIn: r.clockIn && r.clockIn !== '--:--' ? r.clockIn : null,
+        clockOut: r.clockOut && r.clockOut !== '--:--' ? r.clockOut : null,
+        status: r.status,
+        lateMinutes: r.lateIn ? parseInt(r.lateIn) : 0,
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching my attendance:', error);
     res.status(500).json({ error: 'Failed to fetch attendance' });
   }
 });
@@ -169,5 +301,20 @@ router.post('/sync', authMiddleware, requireRole('admin'), async (req: Request, 
     res.status(500).json({ error: 'Failed to sync students' });
   }
 });
+
+// Real-time Offline Sync routes
+import AttendanceController from '../../controllers/AttendanceController';
+import ExternalAttendanceController from '../../controllers/ExternalAttendanceController';
+
+// Admin: Fetch External Sync (Admin only)
+router.post('/fetch-external', authMiddleware, requireRole('admin'), ExternalAttendanceController.fetchExternal);
+
+// Admin: Attendance APIs (Read-Only Views)
+// Full paths: /api/attendance/admin/today, /api/attendance/admin/by-date, etc.
+console.log('[AttendanceRoutes] Registering admin attendance routes...');
+router.get('/admin/today', authMiddleware, requireRole('admin'), AttendanceController.getAdminToday);
+router.get('/admin/by-date', authMiddleware, requireRole('admin'), AttendanceController.getAdminByDate);
+router.get('/admin/summary', authMiddleware, requireRole('admin'), AttendanceController.getAdminSummary);
+router.get('/admin/user/:userId', authMiddleware, requireRole('admin'), AttendanceController.getAdminUserAttendance);
 
 export default router;

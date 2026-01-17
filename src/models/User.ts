@@ -13,6 +13,7 @@ export interface IUser extends Document {
   role: UserRole;
   status: UserStatus;
   phone?: string;
+  empCode?: string; // For EtimeOffice mapping
   pushToken?: string; // Expo push token
   // Student-specific fields
   board?: Board;
@@ -48,6 +49,7 @@ const userSchema = new Schema<IUser>({
   role: { type: String, enum: ['admin', 'teacher', 'student'], default: 'student', index: true },
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'approved', index: true },
   phone: { type: String },
+  empCode: { type: String, unique: true, sparse: true, index: true },
   pushToken: { type: String },
   board: { type: String, enum: ['CBSE', 'ICSE', 'State Board', 'IB', 'IGCSE', 'Other'], index: true },
   targetExams: [{ type: String, enum: ['Boards', 'JEE', 'NEET', 'CUET', 'NDA', 'Olympiad', 'Other'] }],

@@ -116,7 +116,9 @@ export async function sendTeacherNotification(
 export async function sendStudentNotifications(
   studentIds: string[],
   title: string,
-  body: string
+  body: string,
+  data?: any,
+  type?: string
 ) {
   try {
     // Separate MongoDB ObjectIds from Firebase IDs
@@ -149,7 +151,7 @@ export async function sendStudentNotifications(
       sound: 'default' as const,
       title,
       body,
-      data: { type: 'schedule_update' },
+      data: data || { type: type || 'schedule_update' },
     }));
     
     const chunks = expo.chunkPushNotifications(messages);
@@ -164,4 +166,61 @@ export async function sendStudentNotifications(
   } catch (error) {
     console.error('Error sending student notifications:', error);
   }
+}
+
+/**
+ * Create and send a notification to a specific user (or users)
+ * This acts as a wrapper to unify notification logic if needed
+ */
+export async function createAndSendNotification(payload: {
+  userId: string;
+  title: string;
+  body: string;
+  type?: string;
+  data?: any;
+}) {
+  try {
+    const { userId, title, body, data, type } = payload;
+    
+    // Determine if userId is MongoDB or Firebase
+    if (isValidObjectId(userId)) {
+       const user = await User.findById(userId).select('pushToken');
+       if (user?.pushToken && Expo.isExpoPushToken(user.pushToken)) {
+         await expo.sendPushNotificationsAsync([{
+           to: user.pushToken,
+           sound: 'default',
+           title,
+           body,
+           data: data || { type: type || 'general' }
+         }]);
+       }
+    } else {
+       // Should implement Firebase ID logic here if needed, similar to other functions
+       // For now reuse sendTeacher/Student logic or simple find
+       const user = await User.findOne({ firebaseUid: userId }).select('pushToken');
+       if (user?.pushToken && Expo.isExpoPushToken(user.pushToken)) {
+         await expo.sendPushNotificationsAsync([{
+            to: user.pushToken,
+            sound: 'default',
+            title,
+            body,
+            data: data || { type: type || 'general' }
+         }]);
+       }
+    }
+  } catch (error) {
+    console.error('Error in createAndSendNotification:', error);
+  }
+}
+
+/**
+ * Broadcast notification to a list of user IDs
+ */
+export async function broadcastNotification(userIds: string[], payload: {
+  title: string;
+  body: string;
+  data?: any;
+  type?: string;
+}) {
+  await sendStudentNotifications(userIds, payload.title, payload.body, payload.data, payload.type);
 }

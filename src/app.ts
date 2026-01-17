@@ -113,6 +113,10 @@ app.use('/api/results', resultRoutes);
 app.use('/api/metrics', metricsRoutes);
 app.use('/api/offline-results', offlineResultsRoutes);
 
+// Webhook routes
+import webhookRoutes from './routes/api/webhookRoutes';
+app.use('/api/webhooks', webhookRoutes);
+
 // Error handler
 app.use(errorHandler);
 

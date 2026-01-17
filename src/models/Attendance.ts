@@ -9,6 +9,13 @@ export interface IAttendance extends Document {
   subject?: string;
   markedBy: mongoose.Types.ObjectId;
   notes?: string;
+  source: 'webhook' | 'manual' | 'sync';
+  idempotencyKey?: string;
+  metadata?: any;
+  clockIn?: string;
+  clockOut?: string;
+  lateIn?: string;
+  earlyOut?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -21,11 +28,19 @@ const attendanceSchema = new Schema<IAttendance>({
   batch: { type: String, index: true },
   subject: { type: String },
   markedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
-  notes: { type: String }
+  notes: { type: String },
+  source: { type: String, enum: ['webhook', 'manual', 'sync', 'external'], default: 'manual' },
+  idempotencyKey: { type: String, unique: true, sparse: true },
+  metadata: { type: Schema.Types.Mixed },
+  clockIn: { type: String },
+  clockOut: { type: String },
+  lateIn: { type: String },
+  earlyOut: { type: String }
 }, { timestamps: true });
 
 // Compound index for efficient queries
 attendanceSchema.index({ studentId: 1, date: -1 });
 attendanceSchema.index({ date: 1, classLevel: 1, batch: 1 });
+attendanceSchema.index({ idempotencyKey: 1 });
 
 export default mongoose.model<IAttendance>('Attendance', attendanceSchema);

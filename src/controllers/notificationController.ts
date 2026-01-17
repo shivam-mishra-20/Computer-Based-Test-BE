@@ -148,11 +148,9 @@ export const createNotification = async (req: Request, res: Response) => {
     const notification = await notificationService.createAndSendNotification({
       userId,
       type,
-      priority,
       title,
-      message,
-      data,
-      actionUrl,
+      body: message,
+      data: { ...data, priority, actionUrl },
     });
 
     res.status(201).json({ 
@@ -184,11 +182,9 @@ export const createBulkNotifications = async (req: Request, res: Response) => {
     // Note: optimization for valid tokens might be needed for large broadcasts
     await notificationService.broadcastNotification(userIds, {
       type,
-      priority,
       title,
-      message,
-      data,
-      actionUrl
+      body: message,
+      data: { ...data, priority, actionUrl }
     });
 
     res.status(201).json({ 

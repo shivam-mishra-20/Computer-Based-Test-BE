@@ -171,7 +171,7 @@ export const assignExam = async (id: string, users?: string[], groups?: string[]
       await notificationService.broadcastNotification(Array.from(userIds), {
         type: 'exam',
         title: 'New Exam Assigned',
-        message: `You have been assigned a new exam: ${exam.title}`,
+        body: `You have been assigned a new exam: ${exam.title}`,
         data: { examId: exam._id, type: 'exam' }
       });
     }
