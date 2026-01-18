@@ -50,6 +50,48 @@ export const publicRegister = async (req: Request, res: Response) => {
   }
 };
 
+// Public teacher registration endpoint (with admin approval)
+export const publicTeacherRegister = async (req: Request, res: Response) => {
+  const { name, email, password, phone } = req.body;
+  const lcEmail = typeof email === 'string' ? email.toLowerCase() : email;
+  
+  try {
+    // Validate required fields
+    if (!name || !email || !password || !phone) {
+      return res.status(400).json({ message: 'Name, email, password, and phone are required' });
+    }
+
+    // Check if user already exists
+    const existing = await User.findOne({ email: lcEmail });
+    if (existing) {
+      if (existing.status === 'pending') {
+        return res.status(400).json({ message: 'Registration pending admin approval' });
+      }
+      return res.status(400).json({ message: 'User already exists' });
+    }
+
+    // Create teacher with pending status
+    const user = new User({ 
+      name, 
+      email: lcEmail, 
+      password, 
+      phone,
+      role: 'teacher',
+      status: 'pending',
+      authProvider: 'local'
+    });
+    await user.save();
+
+    res.status(201).json({ 
+      message: 'Teacher registration successful! Your account is pending admin approval. You will be able to login once approved.',
+      userId: user._id 
+    });
+  } catch (err) {
+    console.error('Teacher registration error:', err);
+    res.status(500).json({ message: 'Server error during registration' });
+  }
+};
+
 export const register = async (req: Request, res: Response) => {
   // By default, public self-registration is disabled.
   if (process.env.ALLOW_PUBLIC_REGISTER !== 'true') {

@@ -47,7 +47,11 @@ const server = httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on http://0.0.0.0:${PORT}`);
 });
 
-connectDB().catch((err: any) => {
+connectDB().then(() => {
+  // Initialize attendance auto-sync cron after DB is ready
+  const { AttendanceCron } = require('./services/AttendanceCron');
+  AttendanceCron.init();
+}).catch((err: any) => {
   console.error('Database connection failed at startup:', err);
 });
 

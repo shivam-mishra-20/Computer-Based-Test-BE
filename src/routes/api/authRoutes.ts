@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { register, login, me, publicRegister, changePassword, updateProfile, uploadProfileImage } from '../../controllers/authController';
+import { register, login, me, publicRegister, publicTeacherRegister, changePassword, updateProfile, uploadProfileImage } from '../../controllers/authController';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import multer from 'multer';
 
@@ -23,6 +23,7 @@ const upload = multer({
 // POST endpoints used by clients
 router.post('/register', register);
 router.post('/public-register', publicRegister);
+router.post('/public-register-teacher', publicTeacherRegister);
 router.post('/login', login);
 router.get('/me', authMiddleware, me);
 router.post('/change-password', authMiddleware, changePassword);

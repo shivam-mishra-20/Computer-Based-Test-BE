@@ -15,14 +15,30 @@ export const adminGetPendingUsers = async (req: Request, res: Response) => {
 // Admin-only: Approve user registration
 export const adminApproveUser = async (req: Request, res: Response) => {
 	try {
+		const { empCode } = req.body;
+		
+		// Validate empCode is provided
+		if (!empCode || !empCode.trim()) {
+			return res.status(400).json({ message: 'Employee/Student code (empCode) is required for approval' });
+		}
+		
+		const sanitizedEmpCode = empCode.trim();
+		
+		// Check empCode uniqueness
+		const existingEmp = await User.findOne({ empCode: sanitizedEmpCode });
+		if (existingEmp) {
+			return res.status(400).json({ message: `Code "${sanitizedEmpCode}" is already assigned to ${existingEmp.name}` });
+		}
+		
 		const user = await User.findById(req.params.id);
 		if (!user) return res.status(404).json({ message: 'User not found' });
 		
 		user.status = 'approved';
+		user.empCode = sanitizedEmpCode;
 		await user.save();
 		
-		await logAudit((req as any).user?.id, 'admin.user.approve', String(user._id), { email: user.email, name: user.name });
-		res.json({ message: 'User approved successfully', user: { id: user._id, name: user.name, email: user.email, status: user.status } });
+		await logAudit((req as any).user?.id, 'admin.user.approve', String(user._id), { email: user.email, name: user.name, empCode: sanitizedEmpCode });
+		res.json({ message: 'User approved successfully', user: { id: user._id, name: user.name, email: user.email, status: user.status, empCode: user.empCode } });
 	} catch (err) {
 		res.status(500).json({ message: 'Server error' });
 	}

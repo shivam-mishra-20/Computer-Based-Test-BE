@@ -317,4 +317,32 @@ router.get('/admin/by-date', authMiddleware, requireRole('admin'), AttendanceCon
 router.get('/admin/summary', authMiddleware, requireRole('admin'), AttendanceController.getAdminSummary);
 router.get('/admin/user/:userId', authMiddleware, requireRole('admin'), AttendanceController.getAdminUserAttendance);
 
+// Auto-sync: Trigger immediate sync from start of month to today
+import AttendanceCron from '../../services/AttendanceCron';
+
+router.post('/auto-sync', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
+  try {
+    console.log('[AttendanceRoutes] Auto-sync triggered via API');
+    
+    // Get today's date in dd/mm/yyyy format
+    const today = new Date();
+    const toDate = `${String(today.getDate()).padStart(2, '0')}/${String(today.getMonth() + 1).padStart(2, '0')}/${today.getFullYear()}`;
+    const fromDate = `01/${String(today.getMonth() + 1).padStart(2, '0')}/${today.getFullYear()}`;
+
+    // Start sync in background and return immediately
+    AttendanceCron.triggerManualSync(fromDate, toDate)
+      .then((result) => console.log('[AttendanceRoutes] Sync result:', result))
+      .catch((err) => console.error('[AttendanceRoutes] Sync error:', err));
+
+    res.json({ 
+      success: true, 
+      message: 'Auto-sync started',
+      syncPeriod: { from: fromDate, to: toDate }
+    });
+  } catch (error: any) {
+    console.error('[AttendanceRoutes] Auto-sync error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 export default router;
