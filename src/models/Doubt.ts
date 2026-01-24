@@ -2,6 +2,25 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export type DoubtStatus = 'pending' | 'in-progress' | 'resolved';
 
+export interface IAttachment {
+  _id?: string;
+  fileId: mongoose.Types.ObjectId;
+  fileName: string;
+  fileType: string;
+  fileSize: number;
+  url: string;
+  storagePath: string;
+}
+
+export interface IMessage {
+  _id?: string;
+  sender: mongoose.Types.ObjectId;
+  senderRole: 'student' | 'teacher' | 'admin';
+  message: string;
+  attachments?: IAttachment[];
+  createdAt: Date;
+}
+
 export interface IDoubt extends Document {
   student: mongoose.Types.ObjectId;
   teacher?: mongoose.Types.ObjectId;
@@ -17,17 +36,35 @@ export interface IDoubt extends Document {
   batch?: string;
   classLevel?: string;
   priority: 'low' | 'normal' | 'high';
+  messages: IMessage[];
   createdAt: Date;
   updatedAt: Date;
 }
 
+const attachmentSchema = new Schema<IAttachment>({
+  fileId: { type: Schema.Types.ObjectId, ref: 'FileMetadata', required: true },
+  fileName: { type: String, required: true },
+  fileType: { type: String, required: true },
+  fileSize: { type: Number, required: true },
+  url: { type: String, required: true },
+  storagePath: { type: String, required: true }
+}, { _id: true });
+
+const messageSchema = new Schema<IMessage>({
+  sender: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  senderRole: { type: String, enum: ['student', 'teacher', 'admin'], required: true },
+  message: { type: String, required: true },
+  attachments: [attachmentSchema],
+  createdAt: { type: Date, default: Date.now }
+}, { _id: true });
+
 const doubtSchema = new Schema<IDoubt>({
   student: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  teacher: { type: Schema.Types.ObjectId, ref: 'User', index: true },
-  subject: { type: String, required: true, index: true },
+  teacher: { type: Schema.Types.ObjectId, ref: 'User', required: false, index: true },
+  subject: { type: String, default: 'General' },
   topic: { type: String },
   chapter: { type: String },
-  question: { type: String, required: true },
+  question: { type: String, default: '' },
   images: [{ type: String }],
   status: { 
     type: String, 
@@ -45,6 +82,7 @@ const doubtSchema = new Schema<IDoubt>({
     enum: ['low', 'normal', 'high'], 
     default: 'normal' 
   },
+  messages: [messageSchema],
 }, { timestamps: true });
 
 // Compound indexes for efficient queries

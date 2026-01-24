@@ -387,160 +387,72 @@ router.get('/firebase/teachers', authMiddleware, async (req: Request, res: Respo
   }
 });
 
-// Get unique batches from Firebase Users collection
+// Get unique batches from MongoDB only (Firebase removed due to auth issues)
 router.get('/firebase/batches', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { classLevel } = req.query;
-    const admin = getFirebaseAdmin();
     
-    // Start with default batches
+    // Ensure default batches exist
     await ensureDefaultBatches();
-    const defaultBatches = await Batch.find({}).lean();
     
-    if (!admin) {
-      // Just return default batches filtered by class level
-      const filtered = classLevel 
-        ? defaultBatches.filter(b => b.classLevels.includes(classLevel as string))
-        : defaultBatches;
-      return res.json(filtered);
+    // Fetch all batches from MongoDB
+    const query: any = {};
+    if (classLevel) {
+      query.classLevels = classLevel;
     }
     
-    // Fetch unique batches from Firebase
-    const db = admin.firestore();
-    const snapshot = await db.collection('Users').get();
+    const batches = await Batch.find(query).sort({ name: 1 }).lean();
     
-    const firebaseBatches = new Set<string>();
-    snapshot.forEach((doc: any) => {
-      const data = doc.data();
-      const batch = data.batch || data.attendance?.batch;
-      if (batch && typeof batch === 'string' && batch.trim()) {
-        firebaseBatches.add(batch.trim());
-      }
-    });
-    
-    // Combine with default batches
-    const allBatchNames = new Set<string>();
-    defaultBatches.forEach(b => allBatchNames.add(b.name));
-    firebaseBatches.forEach(b => allBatchNames.add(b));
-    
-    // Build response
-    const result: any[] = [];
-    allBatchNames.forEach(name => {
-      const dbBatch = defaultBatches.find(b => b.name === name);
-      if (dbBatch) {
-        if (!classLevel || dbBatch.classLevels.includes(classLevel as string)) {
-          result.push(dbBatch);
-        }
-      } else {
-        // Firebase-only batch - include for all class levels by default
-        result.push({
-          _id: name.toLowerCase().replace(/\s+/g, '-'),
-          name: name,
-          classLevels: ['7', '8', '9', '10', '11', '12'],
-          isDefault: false,
-          source: 'firebase'
-        });
-      }
-    });
-    
-    res.json(result);
+    res.json(batches);
   } catch (error: any) {
-    console.error('Error fetching Firebase batches:', error);
-    res.status(500).json({ error: error.message });
+    console.error('Error fetching batches:', error);
+    res.status(500).json({ error: error.message || 'Internal server error fetching batches' });
   }
 });
 
-// Get students from both MongoDB and Firebase (combined)
+// Get students from MongoDB only (Firebase removed due to auth issues)
 router.get('/students', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { classLevel, batch } = req.query;
-    const students: any[] = [];
-    const emailsAdded = new Set<string>();
     
-    // 1. Fetch from MongoDB first
-    const mongoQuery: any = { role: 'student' };
-    if (classLevel) mongoQuery.classLevel = classLevel;
-    if (batch) mongoQuery.batch = batch;
+    // Build query for MongoDB - handle both "9" and "Class 9" formats
+    const mongoQuery: any = { role: 'student', status: 'approved' };
     
-    const mongoStudents = await User.find(mongoQuery)
-      .select('_id name email classLevel batch phone firebaseUid')
-      .sort({ name: 1 });
-    
-    mongoStudents.forEach((s: any) => {
-      if (s.email) {
-        students.push({
-          id: s._id.toString(),
-          name: s.name,
-          email: s.email,
-          classLevel: s.classLevel,
-          batch: s.batch,
-          phone: s.phone,
-          source: 'mongodb'
-        });
-        emailsAdded.add(s.email.toLowerCase());
-      }
-    });
-    
-    // 2. Fetch from Firebase and add only new students
-    const admin = getFirebaseAdmin();
-    if (admin) {
-      try {
-        const db = admin.firestore();
-        const snapshot = await db.collection('Users').get();
-        
-        snapshot.forEach((doc: any) => {
-          const data = doc.data();
-          const att = data.attendance || {};
-          const res = data.results || {};
-          
-          const role = res.role || data.role || '';
-          if (role === 'teacher' || role === 'Teacher' || role === 'admin' || role === 'Admin') {
-            return;
-          }
-          
-          const rawClass = data.Class || data.classLevel || '';
-          const studentClass = String(rawClass).replace(/^Class\s*/i, '').trim();
-          const studentBatch = att.batch || data.batch || '';
-          const studentName = att.name || data.name || data.displayName || '';
-          const studentEmail = (att.email || data.email || '').toLowerCase();
-          
-          if (!studentClass) return;
-          
-          // Filter by class
-          if (classLevel) {
-            const queryClass = String(classLevel).replace(/^Class\s*/i, '').trim();
-            if (studentClass !== queryClass) return;
-          }
-          
-          // Filter by batch
-          if (batch && studentBatch && studentBatch !== batch) return;
-          
-          // Only add if email not already in MongoDB
-          if (studentEmail && !emailsAdded.has(studentEmail)) {
-            students.push({
-              id: doc.id,
-              name: studentName || 'Unknown',
-              email: studentEmail,
-              classLevel: studentClass,
-              batch: studentBatch,
-              phone: att.phone || data.phone,
-              source: 'firebase'
-            });
-            emailsAdded.add(studentEmail);
-          }
-        });
-      } catch (fbError) {
-        console.error('Error fetching from Firebase:', fbError);
-      }
+    if (classLevel) {
+      // Try to match both "9" and "Class 9" formats
+      mongoQuery.$or = [
+        { classLevel: classLevel },
+        { classLevel: `Class ${classLevel}` },
+        { classLevel: { $regex: new RegExp(`^Class\\s*${classLevel}$`, 'i') } }
+      ];
     }
     
-    // Sort by name
-    students.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    if (batch) {
+      mongoQuery.batch = batch;
+    }
     
-    console.log(`Combined students: Found ${students.length} students for class=${classLevel}, batch=${batch}`);
+    // Fetch students from MongoDB
+    const mongoStudents = await User.find(mongoQuery)
+      .select('_id name email classLevel batch phone')
+      .sort({ name: 1 })
+      .lean();
+    
+    // Format response
+    const students = mongoStudents.map((s: any) => ({
+      id: s._id.toString(),
+      name: s.name,
+      email: s.email,
+      classLevel: s.classLevel,
+      batch: s.batch,
+      phone: s.phone,
+      source: 'mongodb'
+    }));
+    
+    console.log(`Students: Found ${students.length} students for class=${classLevel}, batch=${batch}`);
+    console.log(`Query used:`, JSON.stringify(mongoQuery));
     res.json(students);
   } catch (error: any) {
-    console.error('Error fetching combined students:', error);
+    console.error('Error fetching students:', error);
     res.status(500).json({ error: error.message });
   }
 });

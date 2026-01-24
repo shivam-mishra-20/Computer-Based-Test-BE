@@ -62,6 +62,15 @@ class SocketService {
         socket.leave(`class:${classId}`);
       });
 
+      socket.on('join_doubt', (doubtId: string) => {
+        socket.join(`doubt_${doubtId}`);
+        console.log(`Socket ${socket.id} joined doubt_${doubtId}`);
+      });
+      
+      socket.on('leave_doubt', (doubtId: string) => {
+        socket.leave(`doubt_${doubtId}`);
+      });
+
       socket.on('disconnect', () => {
         console.log('User disconnected:', socket.id);
       });

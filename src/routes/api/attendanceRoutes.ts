@@ -9,6 +9,7 @@ import {
   syncStudentsToAttendance,
   getAttendanceFilters,
 } from '../../services/attendanceService';
+import absentService from '../../services/absentCalculationService';
 
 const router = Router();
 
@@ -153,13 +154,23 @@ router.get('/me', authMiddleware, async (req: Request, res: Response) => {
     
     const records = await Attendance.aggregate(aggregation);
     
-    // Calculate summary stats
-    const present = records.filter((r: any) => 
-      r.status === 'present' || (r.clockIn && r.clockIn !== '--:--')
-    ).length;
+    // Use new service to calculate accurate stats including absences
+    // Default to current month if date range not specified
+    let statsFrom = new Date();
+    statsFrom.setDate(1); // 1st of current month
+    let statsTo = new Date(); // Today
     
-    const absent = records.filter((r: any) => r.status === 'absent').length;
+    if (from && to) {
+      statsFrom = new Date(from as string);
+      statsTo = new Date(to as string);
+    } else if (month && year) {
+      statsFrom = new Date(Number(year), Number(month) - 1, 1);
+      statsTo = new Date(Number(year), Number(month), 0, 23, 59, 59);
+    }
     
+    const advancedStats = await absentService.calculateStats(authUser.id, statsFrom, statsTo);
+    
+    // Calculate late count from records (still useful)
     const late = records.filter((r: any) => 
       r.status === 'late' || (r.lateIn && parseInt(r.lateIn) > 0)
     ).length;
@@ -171,8 +182,10 @@ router.get('/me', authMiddleware, async (req: Request, res: Response) => {
         role: user.role,
       },
       stats: {
-        present,
-        absent,
+        present: advancedStats.presentDays,
+        absent: advancedStats.absentDays,
+        expected: advancedStats.expectedDays,
+        holidays: advancedStats.holidays,
         late,
         total: records.length,
       },
@@ -183,7 +196,12 @@ router.get('/me', authMiddleware, async (req: Request, res: Response) => {
         clockOut: r.clockOut && r.clockOut !== '--:--' ? r.clockOut : null,
         status: r.status,
         lateMinutes: r.lateIn ? parseInt(r.lateIn) : 0,
-      }))
+      })),
+      meta: {
+        workingDates: advancedStats.workingDates,
+        absentDates: advancedStats.absentDates,
+        holidayDates: advancedStats.holidayDates
+      }
     });
   } catch (error) {
     console.error('Error fetching my attendance:', error);

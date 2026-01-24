@@ -27,6 +27,7 @@ import lectureRoutes from './routes/api/lectureRoutes';
 import teacherRoutes from './routes/api/teacherRoutes';
 import notificationRoutes from './routes/api/notificationRoutes';
 import resultRoutes from './routes/api/resultRoutes';
+import holidayRoutes from './routes/api/holidayRoutes';
 import metricsRoutes from './routes/api/metricsRoutes';
 import offlineResultsRoutes from './routes/api/offlineResultsRoutes';
 import { errorHandler } from './middlewares/errorHandler';
@@ -105,6 +106,7 @@ app.use('/api/schedule', scheduleRoutes);
 app.use('/api/leaderboard', leaderboardRoutes);
 app.use('/api/bookmarks', bookmarkRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/holidays', holidayRoutes);
 // Teacher dashboard routes
 app.use('/api/doubts', doubtRoutes);
 app.use('/api/lectures', lectureRoutes);

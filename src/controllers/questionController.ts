@@ -75,13 +75,21 @@ export const getClassQuestionsCtrl = async (req: Request, res: Response) => {
   try {
     const { class: className } = req.params;
     const { 
-      subject, 
-      chapter, 
-      topic, 
-      section, 
+      // Pagination
+      limit = '20',
+      page = '1',
+      // Filters
+      query,
+      type,
+      subject,
+      topic,
+      chapter,
+      section,
       difficulty,
-      limit = '100',
-      skip = '0'
+      source,
+      hasCorrectAnswer,
+      hasImage,
+      hasExplanation
     } = req.query;
 
     if (!className) {
@@ -97,17 +105,88 @@ export const getClassQuestionsCtrl = async (req: Request, res: Response) => {
 
     // Build filter
     const filter: any = { isActive: true };
+
+    // Text Search
+    if (query) {
+      const q = (query as string).trim();
+      const regex = { $regex: q, $options: 'i' };
+      filter.$or = [
+        { text: regex },
+        { subject: regex },
+        { topic: regex },
+        { explanation: regex },
+        // Also search in nested tags as fallback
+        { 'tags.subject': regex },
+        { 'tags.topic': regex }
+      ];
+    }
+
+    // Exact Filters
     if (subject) filter.subject = subject;
     if (chapter) filter.chapter = { $regex: chapter, $options: 'i' };
     if (topic) filter.topic = { $regex: topic, $options: 'i' };
     if (section) filter.section = section;
     if (difficulty) filter.difficulty = difficulty;
+    
+    // Type Filter
+    if (type) filter.type = type;
+
+    // Source Filter
+    if (source) {
+       // Handle both "manual" and null/undefined as "Manual" if specifically requested, 
+       // but typically source is a direct match. The frontend might send "manual".
+       // Our model stores "Manual", "Smart Import", etc. or "manual", "imported". 
+       // We'll trust the frontend sends the correct value, or use regex if needed.
+       // For exact matching:
+       filter.source = source;
+    }
+
+    // Has Correct Answer Filter
+    if (hasCorrectAnswer === 'yes') {
+      filter.$or = [
+         { 'options.isCorrect': true },
+         { correctAnswerText: { $exists: true, $ne: '' } }
+      ];
+    } else if (hasCorrectAnswer === 'no') {
+      filter.$and = [
+         { 'options.isCorrect': { $ne: true } },
+         { $or: [{ correctAnswerText: { $exists: false } }, { correctAnswerText: '' }] }
+      ];
+    }
+
+    // Has Image Filter
+    if (hasImage === 'yes') {
+      filter.diagramUrl = { $exists: true, $ne: '' };
+    } else if (hasImage === 'no') {
+      filter.$or = [
+        { diagramUrl: { $exists: false } },
+        { diagramUrl: '' }
+      ];
+    }
+
+    // Has Explanation Filter
+    if (hasExplanation === 'yes') {
+       filter.$or = [
+          { explanation: { $exists: true, $ne: '' } },
+          { solutionText: { $exists: true, $ne: '' } }
+       ];
+    } else if (hasExplanation === 'no') {
+       filter.$and = [
+          { $or: [ { explanation: { $exists: false } }, { explanation: '' } ] },
+          { $or: [ { solutionText: { $exists: false } }, { solutionText: '' } ] }
+       ];
+    }
+
+    // Pagination Calculation
+    const pageNum = Math.max(1, parseInt(page as string, 10));
+    const limitNum = Math.max(1, parseInt(limit as string, 10));
+    const skip = (pageNum - 1) * limitNum;
 
     // Fetch questions
     const [questions, total] = await Promise.all([
       ClassQuestionModel.find(filter)
-        .limit(parseInt(limit as string, 10))
-        .skip(parseInt(skip as string, 10))
+        .limit(limitNum)
+        .skip(skip)
         .sort({ createdAt: -1 })
         .lean(),
       ClassQuestionModel.countDocuments(filter)
@@ -118,6 +197,8 @@ export const getClassQuestionsCtrl = async (req: Request, res: Response) => {
       data: {
         questions,
         total,
+        page: pageNum,
+        totalPages: Math.ceil(total / limitNum),
         class: className
       }
     });

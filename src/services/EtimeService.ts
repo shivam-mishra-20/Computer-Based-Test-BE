@@ -52,7 +52,7 @@ class EtimeService {
    * @param fromDate Format: dd/mm/yyyy (will be converted to dd/mm/yyyy_HH:mm)
    * @param toDate Format: dd/mm/yyyy (will be converted to dd/mm/yyyy_HH:mm)
    */
-  public async syncAttendance(fromDate: string, toDate: string): Promise<{ processed: number; failed: number }> {
+  public async syncAttendance(fromDate: string, toDate: string): Promise<{ processed: number; failed: number; updatedUserIds: string[] }> {
     console.log('=== EtimeService.syncAttendance START ===');
     console.log('Date range:', fromDate, 'to', toDate);
     
@@ -106,6 +106,7 @@ class EtimeService {
 
       let processed = 0;
       let failed = 0;
+      const updatedUserIds = new Set<string>();
 
       // Fetch all users with empCode
       const potentialUsers = await User.find({ empCode: { $exists: true, $ne: null } }).select('_id empCode name');
@@ -201,6 +202,8 @@ class EtimeService {
             }
           });
 
+          // Track this user for notification
+          updatedUserIds.add(userId.toString());
           processed++;
         } catch (err) {
           console.error(`[Etime] Error processing group ${key}:`, err);
@@ -215,7 +218,7 @@ class EtimeService {
         metadata: { fromDate, toDate, totalPunches: punches.length, groupsProcessed: punchGroups.size, processed, failed }
       });
 
-      return { processed, failed };
+      return { processed, failed, updatedUserIds: Array.from(updatedUserIds) };
 
     } catch (error: any) {
       console.error('Etime Sync Error:', error.message);
@@ -225,6 +228,7 @@ class EtimeService {
         entity: 'System',
         errorMessage: error.message
       });
+      // Re-throw but ensure we don't lose the error
       throw error;
     }
   }
