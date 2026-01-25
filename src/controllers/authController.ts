@@ -277,6 +277,8 @@ export const changePassword = async (req: Request, res: Response) => {
   }
 };
 
+import OfflineResult from '../models/OfflineResult';
+
 // Update user profile
 export const updateProfile = async (req: Request, res: Response) => {
   try {
@@ -288,6 +290,8 @@ export const updateProfile = async (req: Request, res: Response) => {
     const user = await User.findById(current.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
 
+    const oldName = user.name;
+
     // Update allowed fields
     if (name) user.name = name;
     if (phone !== undefined) (user as any).phone = phone;
@@ -296,6 +300,20 @@ export const updateProfile = async (req: Request, res: Response) => {
     if (profileImage !== undefined) (user as any).profileImage = profileImage;
 
     await user.save();
+
+    // Sync changes to offline results if name changed
+    if (name && oldName && name !== oldName) {
+      // We match by old Name AND Class to be safer, though collisions are still possible with generic names
+      try {
+        const result = await OfflineResult.updateMany(
+          { name: oldName, class: (user as any).classLevel },
+          { $set: { name: name } }
+        );
+        console.log(`[Profile Update] Synced name change '${oldName}' -> '${name}' for ${result.modifiedCount} offline results`);
+      } catch (syncErr) {
+        console.error('[Profile Update] Error syncing offline results:', syncErr);
+      }
+    }
 
     res.json({
       id: user._id,

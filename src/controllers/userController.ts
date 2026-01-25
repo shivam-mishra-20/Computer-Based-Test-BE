@@ -133,6 +133,8 @@ export const adminGetUser = async (req: Request, res: Response) => {
 	}
 };
 
+import OfflineResult from '../models/OfflineResult';
+
 // Admin-only: Update user (name, email, role, password, empCode)
 export const adminUpdateUser = async (req: Request, res: Response) => {
 	try {
@@ -140,6 +142,9 @@ export const adminUpdateUser = async (req: Request, res: Response) => {
 		const user = await User.findById(req.params.id);
 		if (!user) return res.status(404).json({ message: 'User not found' });
 		
+		const oldName = user.name;
+		const currentClass = (user as any).classLevel;
+
 		if (name) user.name = name;
 		if (email) user.email = email;
 		if (role) user.role = role;
@@ -156,6 +161,20 @@ export const adminUpdateUser = async (req: Request, res: Response) => {
 
 		await user.save();
 		await logAudit((req as any).user?.id, 'admin.user.update', String(user._id), { name, email, role, classLevel, batch, empCode: user.empCode });
+		
+        // Sync name changes to offline results
+		if (name && oldName && name !== oldName) {
+			try {
+				const result = await OfflineResult.updateMany(
+					{ name: oldName, class: currentClass },
+					{ $set: { name: name } }
+				);
+				console.log(`[Admin Update] Synced name change '${oldName}' -> '${name}' for ${result.modifiedCount} offline results`);
+			} catch (syncErr) {
+				console.error('[Admin Update] Error syncing offline results:', syncErr);
+			}
+		}
+
 		const { _id, name: n, email: e, role: r, empCode: ec } = user;
 		res.json({ id: _id, name: n, email: e, role: r, empCode: ec, classLevel: (user as any).classLevel, batch: (user as any).batch });
 	} catch (err) {

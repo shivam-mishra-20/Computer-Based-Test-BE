@@ -21,7 +21,8 @@ export interface IActivityLog {
 export type AttemptStatus = 'created' | 'in-progress' | 'submitted' | 'auto-submitted' | 'graded';
 
 export interface IAttempt extends Document {
-  examId: Types.ObjectId;
+  examId?: Types.ObjectId;  // For teacher-assigned exams
+  practiceTestId?: Types.ObjectId;  // For student-created practice tests
   userId: Types.ObjectId;
   mode?: 'practice' | 'live' | 'adaptive';
   startedAt?: Date;
@@ -62,7 +63,8 @@ const answerSchema = new Schema<IAnswerItem>(
 
 const attemptSchema = new Schema<IAttempt>(
   {
-    examId: { type: Schema.Types.ObjectId, ref: 'Exam', required: true, index: true },
+    examId: { type: Schema.Types.ObjectId, ref: 'Exam', index: true },
+    practiceTestId: { type: Schema.Types.ObjectId, ref: 'PracticeTest', index: true },
     userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     startedAt: { type: Date },
     submittedAt: { type: Date },
@@ -93,6 +95,15 @@ const attemptSchema = new Schema<IAttempt>(
   { timestamps: true }
 );
 
-attemptSchema.index({ examId: 1, userId: 1 }, { unique: true });
+// Unique index for regular exams (only when examId exists)
+attemptSchema.index(
+  { examId: 1, userId: 1 }, 
+  { unique: true, partialFilterExpression: { examId: { $exists: true, $ne: null } }, name: 'examId_1_userId_1_v2' }
+);
+// Unique index for practice tests (only when practiceTestId exists)
+attemptSchema.index(
+  { practiceTestId: 1, userId: 1 }, 
+  { unique: true, partialFilterExpression: { practiceTestId: { $exists: true, $ne: null } }, name: 'practiceTestId_1_userId_1_v2' }
+);
 
 export default mongoose.model<IAttempt>('Attempt', attemptSchema);

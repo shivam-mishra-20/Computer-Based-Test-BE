@@ -7,6 +7,13 @@ export function initFirebaseAdmin() {
     // Lazy require to avoid hard dependency if package is not installed
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     admin = require('firebase-admin');
+    
+    // Check if already initialized
+    if (admin.apps && admin.apps.length > 0) {
+      initialized = true;
+      return;
+    }
+    
     const projectId = process.env.FIREBASE_PROJECT_ID;
     const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
     const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
@@ -37,6 +44,10 @@ export function initFirebaseAdmin() {
     console.log('Firebase Admin SDK initialized successfully');
   } catch (err) {
     console.error('Firebase Admin SDK initialization error:', err);
+    // If app already exists error, mark as initialized
+    if (err && (err as any).code === 'app/duplicate-app') {
+      initialized = true;
+    }
   }
 }
 

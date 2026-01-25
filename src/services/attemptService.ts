@@ -112,6 +112,73 @@ export async function getAttemptView(attemptId: string, userId: string) {
   const attempt = await Attempt.findById(attemptId);
   if (!attempt) throw new Error('Attempt not found');
   if (attempt.userId.toString() !== userId) throw new Error('Forbidden');
+  
+  // Check if this is a practice test attempt
+  if (attempt.practiceTestId) {
+    // Import dynamically to avoid circular deps
+    const PracticeTest = (await import('../models/PracticeTest')).default;
+    
+    const practiceTest = await PracticeTest.findById(attempt.practiceTestId);
+    if (!practiceTest) throw new Error('Practice test not found');
+    
+    // Get questions from the class-specific collection
+    const mongoose = await import('mongoose');
+    const classLevel = practiceTest.classLevel || 'class_11';
+    const normalized = classLevel.toLowerCase().replace(/\s+/g, '_');
+    const collection = mongoose.default.connection.collection(normalized);
+    
+    const qids = practiceTest.questionIds.map((id: any) => new mongoose.Types.ObjectId(id));
+    const questionDocs = await collection.find({ _id: { $in: qids } }).toArray();
+    
+    // Build sections (practice tests have a single "main" section)
+    const sections = [{
+      _id: 'main',
+      title: 'Questions',
+      questionIds: practiceTest.questionIds,
+    }];
+    
+    // Sanitize questions (remove correct answers)
+    const questionDict: Record<string, any> = {};
+    for (const q of questionDocs) {
+      const sanitized: any = {
+        _id: q._id,
+        text: q.text,
+        type: q.type,
+        diagramUrl: q.diagramUrl,
+        assertionText: q.assertion,
+        reasonText: q.reason,
+      };
+      if (q.options) {
+        sanitized.options = q.options.map((o: any) => ({
+          _id: o._id,
+          text: o.text,
+          // Don't include isCorrect for in-progress attempts
+        }));
+      }
+      questionDict[q._id.toString()] = sanitized;
+    }
+    
+    // Calculate total duration
+    let totalDurationMins: number | undefined;
+    if (practiceTest.duration.type === 'total') {
+      totalDurationMins = practiceTest.duration.totalMins;
+    } else if (practiceTest.duration.type === 'per-question') {
+      totalDurationMins = Math.ceil((practiceTest.questionIds.length * (practiceTest.duration.perQuestionSecs || 60)) / 60);
+    }
+    
+    return {
+      attempt,
+      exam: {
+        _id: practiceTest._id,
+        title: practiceTest.title,
+        totalDurationMins,
+      },
+      sections,
+      questions: questionDict,
+    };
+  }
+  
+  // Regular exam attempt handling
   const exam = await Exam.findById(attempt.examId);
   if (!exam) throw new Error('Exam not found');
   const qids = exam.sections.flatMap((s) => s.questionIds);
@@ -218,16 +285,30 @@ export async function saveAnswer(attemptId: string, userId: string, answer: IAns
   if (!attempt) throw new Error('Attempt not found');
   if (attempt.userId.toString() !== userId) throw new Error('Forbidden');
   if (!['in-progress'].includes(attempt.status)) throw new Error('Attempt not editable');
-  // Live mode: enforce totalDurationMins
-  const exam = await Exam.findById(attempt.examId);
-  if (!exam) throw new Error('Exam not found');
-  if ((attempt.mode || exam.mode) === 'live' && exam.totalDurationMins && attempt.startedAt) {
-    const deadline = new Date(attempt.startedAt.getTime() + exam.totalDurationMins * 60 * 1000);
-    if (new Date() > deadline) {
-      // autosubmit and return
-      return submitAttempt(attemptId, userId, true);
+  
+  // Check for time expiry - handle both regular exams and practice tests
+  if (attempt.practiceTestId) {
+    // Practice test - check duration from practice test
+    const PracticeTest = (await import('../models/PracticeTest')).default;
+    const practiceTest = await PracticeTest.findById(attempt.practiceTestId);
+    if (practiceTest && practiceTest.duration.type === 'total' && practiceTest.duration.totalMins && attempt.startedAt) {
+      const deadline = new Date(attempt.startedAt.getTime() + practiceTest.duration.totalMins * 60 * 1000);
+      if (new Date() > deadline) {
+        return submitAttempt(attemptId, userId, true);
+      }
+    }
+  } else if (attempt.examId) {
+    // Regular exam - check duration from exam
+    const exam = await Exam.findById(attempt.examId);
+    if (!exam) throw new Error('Exam not found');
+    if ((attempt.mode || exam.mode) === 'live' && exam.totalDurationMins && attempt.startedAt) {
+      const deadline = new Date(attempt.startedAt.getTime() + exam.totalDurationMins * 60 * 1000);
+      if (new Date() > deadline) {
+        return submitAttempt(attemptId, userId, true);
+      }
     }
   }
+  
   const idx = attempt.answers.findIndex((a) => a.questionId.toString() === answer.questionId.toString());
   if (idx >= 0) {
     attempt.answers[idx] = { ...attempt.answers[idx], ...answer };
@@ -299,34 +380,74 @@ export async function submitAttempt(attemptId: string, userId: string, auto = fa
   if (attempt.userId.toString() !== userId) throw new Error('Forbidden');
   if (!['in-progress', 'created'].includes(attempt.status)) throw new Error('Attempt already submitted');
 
-  const exam = await Exam.findById(attempt.examId);
-  if (!exam) throw new Error('Exam not found');
-  // Live mode: if time is over, force auto submit path (still grade)
-  if ((attempt.mode || exam.mode) === 'live' && exam.totalDurationMins && attempt.startedAt) {
-    const deadline = new Date(attempt.startedAt.getTime() + exam.totalDurationMins * 60 * 1000);
-    if (new Date() > deadline) {
-      auto = true;
+  let qmap: Map<string, any>;
+  let markingScheme = { correct: 1, incorrect: 0, unattempted: 0 };
+  
+  if (attempt.practiceTestId) {
+    // Practice test - load from class-specific collection
+    const PracticeTest = (await import('../models/PracticeTest')).default;
+    const mongoose = await import('mongoose');
+    
+    const practiceTest = await PracticeTest.findById(attempt.practiceTestId);
+    if (!practiceTest) throw new Error('Practice test not found');
+    
+    // Check for time expiry
+    if (practiceTest.duration.type === 'total' && practiceTest.duration.totalMins && attempt.startedAt) {
+      const deadline = new Date(attempt.startedAt.getTime() + practiceTest.duration.totalMins * 60 * 1000);
+      if (new Date() > deadline) {
+        auto = true;
+      }
     }
-  }
-  const qids = exam.sections.flatMap((s) => s.questionIds);
-  let questions: IQuestion[];
-  if (exam.classLevel) {
-    const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
-    questions = await ClassQuestionModel.find({ _id: { $in: qids } });
+    
+    // Use practice test marking scheme
+    markingScheme = practiceTest.markingScheme;
+    
+    // Load questions from class-specific collection
+    const classLevel = practiceTest.classLevel || 'class_11';
+    const normalized = classLevel.toLowerCase().replace(/\s+/g, '_');
+    const collection = mongoose.default.connection.collection(normalized);
+    
+    const qids = practiceTest.questionIds.map((id: any) => new mongoose.Types.ObjectId(id));
+    const questionDocs = await collection.find({ _id: { $in: qids } }).toArray();
+    qmap = new Map(questionDocs.map((q: any) => [q._id.toString(), q]));
   } else {
-    questions = await Question.find({ _id: { $in: qids } });
+    // Regular exam
+    const exam = await Exam.findById(attempt.examId);
+    if (!exam) throw new Error('Exam not found');
+    
+    // Live mode: if time is over, force auto submit path
+    if ((attempt.mode || exam.mode) === 'live' && exam.totalDurationMins && attempt.startedAt) {
+      const deadline = new Date(attempt.startedAt.getTime() + exam.totalDurationMins * 60 * 1000);
+      if (new Date() > deadline) {
+        auto = true;
+      }
+    }
+    
+    const qids = exam.sections.flatMap((s) => s.questionIds);
+    let questions: IQuestion[];
+    if (exam.classLevel) {
+      const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
+      questions = await ClassQuestionModel.find({ _id: { $in: qids } });
+    } else {
+      questions = await Question.find({ _id: { $in: qids } });
+    }
+    qmap = new Map<string, IQuestion>(questions.map((q) => [(q as any)._id.toString(), q]));
   }
-  const qmap = new Map<string, IQuestion>(questions.map((q) => [(q as any)._id.toString(), q]));
 
   let total = 0;
   for (const ans of attempt.answers) {
     const q = qmap.get(ans.questionId.toString());
     if (!q) continue;
-    const graded = gradeObjective(q, ans);
+    const graded = gradeObjective(q as IQuestion, ans);
     if (graded) {
       ans.isCorrect = graded.isCorrect;
-      ans.scoreAwarded = graded.score;
-      total += graded.score;
+      // Apply marking scheme
+      if (graded.isCorrect) {
+        ans.scoreAwarded = markingScheme.correct;
+      } else {
+        ans.scoreAwarded = markingScheme.incorrect;
+      }
+      total += ans.scoreAwarded;
     } else if (q.type === 'short' || q.type === 'long') {
       // subjective: use AI grading (Groq)
       try {
@@ -337,10 +458,10 @@ export async function submitAttempt(attemptId: string, userId: string, auto = fa
         });
         ans.rubricScore = r.rubricScore;
         ans.aiFeedback = r.feedback;
-        // Map rubricScore (0..1) to 1 point scale for now
-        const score = typeof r.rubricScore === 'number' ? Number(r.rubricScore.toFixed(2)) : 0;
-        ans.scoreAwarded = score;
-        total += score;
+        // Map rubricScore (0..1) to marking scheme
+        const score = typeof r.rubricScore === 'number' ? r.rubricScore * markingScheme.correct : 0;
+        ans.scoreAwarded = Number(score.toFixed(2));
+        total += ans.scoreAwarded;
       } catch (e) {
         // If AI grading fails, record zero but continue
         ans.rubricScore = 0;
@@ -352,6 +473,13 @@ export async function submitAttempt(attemptId: string, userId: string, auto = fa
   attempt.totalScore = total;
   attempt.submittedAt = new Date();
   attempt.status = auto ? 'auto-submitted' : 'submitted';
+  
+  // Practice tests: auto-publish results immediately so students can see scores
+  if (attempt.practiceTestId) {
+    attempt.resultPublished = true;
+    attempt.status = 'graded';
+  }
+  
   await attempt.save();
   return attempt;
 }
@@ -405,20 +533,43 @@ export async function adjustAnswerScore(attemptId: string, answerId: string, sco
 export async function listAttemptsForUser(userId: string, opts: { published?: boolean } = {}) {
   const criteria: any = { userId: new Types.ObjectId(userId) };
   if (opts.published) criteria.resultPublished = true;
-  return Attempt.find(criteria)
+  const attempts = await Attempt.find(criteria)
     .sort({ submittedAt: -1, createdAt: -1 })
     .populate('examId', 'title')
-    .lean()
-    .then(list => list.map(a => ({
+    .populate('practiceTestId', 'title')
+    .lean();
+  
+  return attempts.map(a => {
+    // Determine if this is a practice test or regular exam
+    const isPracticeTest = !!a.practiceTestId;
+    let title = 'Exam Not Found';
+    let id: string | null = null;
+    
+    if (isPracticeTest && a.practiceTestId) {
+      // Practice test attempt
+      const pt = a.practiceTestId as any;
+      title = pt.title || 'Practice Test';
+      id = pt._id?.toString() || a.practiceTestId.toString();
+    } else if (a.examId) {
+      // Regular exam attempt
+      const exam = a.examId as any;
+      title = exam.title || 'Exam Not Found';
+      id = exam._id?.toString() || (a.examId instanceof Types.ObjectId ? a.examId.toString() : null);
+    }
+    
+    return {
       _id: a._id,
-      examId: a.examId ? (a.examId instanceof Types.ObjectId ? a.examId.toString() : (a.examId as any)._id?.toString()) : null,
-      examTitle: (a as any).examId?.title || 'Exam Not Found',
+      examId: !isPracticeTest ? id : null,
+      practiceTestId: isPracticeTest ? id : null,
+      examTitle: title,
+      isPracticeTest,
       submittedAt: a.submittedAt,
       totalScore: a.totalScore,
       maxScore: a.maxScore,
       status: a.status,
       resultPublished: a.resultPublished,
-    })));
+    };
+  });
 }
 
 export async function logActivity(attemptId: string, userId: string, type: 'focus-lost' | 'fullscreen-exit' | 'suspicious' | 'navigation', meta?: any) {

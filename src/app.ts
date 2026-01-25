@@ -30,6 +30,10 @@ import resultRoutes from './routes/api/resultRoutes';
 import holidayRoutes from './routes/api/holidayRoutes';
 import metricsRoutes from './routes/api/metricsRoutes';
 import offlineResultsRoutes from './routes/api/offlineResultsRoutes';
+import homeworkRoutes from './routes/api/homeworkRoutes';
+import studentProgressRoutes from './routes/api/studentProgressRoutes';
+import commentRoutes from './routes/api/commentRoutes';
+import practiceTestRoutes from './routes/api/practiceTestRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import path from 'path';
 // Use require to avoid transient module resolution issues in some TS setups
@@ -114,6 +118,12 @@ app.use('/api/teacher', teacherRoutes);
 app.use('/api/results', resultRoutes);
 app.use('/api/metrics', metricsRoutes);
 app.use('/api/offline-results', offlineResultsRoutes);
+// Homework & Study Materials routes
+app.use('/api/homework', homeworkRoutes);
+app.use('/api/progress', studentProgressRoutes);
+app.use('/api/comments', commentRoutes);
+// Student custom practice tests
+app.use('/api/practice-tests', practiceTestRoutes);
 
 // Webhook routes
 import webhookRoutes from './routes/api/webhookRoutes';
