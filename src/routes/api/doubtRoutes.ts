@@ -345,12 +345,10 @@ router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
   }
 });
 
-// POST - Create doubt (student)
+// POST - Create doubt (student) - Start or continue conversation
 router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     console.log('[CreateDoubt] Request body:', JSON.stringify(req.body, null, 2));
-    console.log('[CreateDoubt] User:', req.user);
-    
     const { teacherId, message } = req.body;
     const studentId = req.user?._id || req.user?.id;
 
@@ -361,56 +359,82 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
     // Validate and convert teacher ID
     let validTeacherId = null;
     if (teacherId && teacherId !== 'unassigned' && mongoose.Types.ObjectId.isValid(teacherId)) {
-      // Verify teacher exists in database
       const User = require('../../models/User').default;
       const teacherExists = await User.findById(teacherId).lean();
-      if (teacherExists) {
-        if (teacherExists.role === 'teacher' || teacherExists.role === 'admin') {
-          validTeacherId = new mongoose.Types.ObjectId(teacherId);
-          console.log('[CreateDoubt] Assigned to teacher:', teacherExists.name);
-        } else {
-          console.log('[CreateDoubt] User found but role is not teacher:', teacherExists.role);
-        }
-      } else {
-        console.log('[CreateDoubt] Teacher not found for ID:', teacherId);
+      if (teacherExists && (teacherExists.role === 'teacher' || teacherExists.role === 'admin')) {
+        validTeacherId = new mongoose.Types.ObjectId(teacherId);
       }
     }
 
-    // Create initial message
-    const initialMessage = {
-      sender: studentId,
+    // New Message Object
+    const newMessage = {
+      sender: new mongoose.Types.ObjectId(studentId),
       senderRole: 'student' as const,
       message: message.trim(),
       attachments: [],
       createdAt: new Date()
     };
 
-    const doubt = new Doubt({
+    // Check for existing conversation (Doubt) with this teacher
+    let doubt = await Doubt.findOne({
       student: studentId,
-      teacher: validTeacherId,
-      subject: 'General',
-      question: message.trim(),
-      batch: req.user?.batch,
-      classLevel: req.user?.classLevel,
-      status: 'pending',
-      priority: 'normal',
-      messages: [initialMessage]
+      teacher: validTeacherId
     });
 
-    await doubt.save();
+    if (doubt) {
+      console.log('[CreateDoubt] Found existing conversation:', doubt._id);
+      // Append message to existing thread
+      doubt.messages.push(newMessage);
+      doubt.status = 'pending'; // Re-open or keep pending
+      doubt.updatedAt = new Date(); // Bump timestamp
+      
+      // If unassigned doubt is now being assigned (unlikely in this flow, but good practice)
+      if (!doubt.teacher && validTeacherId) {
+        doubt.teacher = validTeacherId;
+      }
+      
+      await doubt.save();
+    } else {
+      console.log('[CreateDoubt] Creating new conversation');
+      // Create new doubt thread
+      doubt = new Doubt({
+        student: studentId,
+        teacher: validTeacherId,
+        subject: 'General', // Could be dynamic if needed
+        question: message.trim(), // Keep initial question for reference
+        batch: req.user?.batch,
+        classLevel: req.user?.classLevel,
+        status: 'pending',
+        priority: 'normal',
+        messages: [newMessage]
+      });
+      await doubt.save();
+    }
     
+    // Populate for response
     const populated = await Doubt.findById(doubt._id)
       .populate('student', 'name email classLevel batch profileImage')
       .populate('teacher', 'name email profileImage')
       .populate('messages.sender', 'name email role profileImage')
       .lean();
     
-    console.log('[CreateDoubt] Created doubt:', doubt._id);
+    // Notify Teacher if assigned
+    if (validTeacherId) {
+      const senderName = req.user?.name || 'Student';
+      createAndSendNotification({
+        userId: validTeacherId.toString(),
+        title: `Message from ${senderName}`,
+        body: message.substring(0, 100),
+        data: { doubtId: (doubt as any)._id.toString(), type: 'doubt_message' }
+      }).catch(err => console.error('Notification error:', err));
+    } else {
+       // logic for unassigned notification could go here
+    }
+
     return res.status(201).json(populated);
   } catch (error) {
-    console.error('[CreateDoubt] Error creating doubt:', error);
-    console.error('[CreateDoubt] Error stack:', (error as Error).stack);
-    return res.status(500).json({ error: 'Failed to create doubt', details: (error as Error).message });
+    console.error('[CreateDoubt] Error creating/updating doubt:', error);
+    return res.status(500).json({ error: 'Failed to process doubt', details: (error as Error).message });
   }
 });
 

@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
-import { adminCreateUser, adminListUsers, adminGetUser, adminUpdateUser, adminDeleteUser, adminDashboard, adminGetPendingUsers, adminApproveUser, adminRejectUser, getUserSettings, updateUserSettings, changePassword } from '../../controllers/userController';
+import { adminCreateUser, adminListUsers, adminGetUser, adminUpdateUser, adminDeleteUser, adminDashboard, adminGetPendingUsers, adminApproveUser, adminRejectUser, getUserSettings, updateUserSettings, changePassword, updateProfile } from '../../controllers/userController';
 
 const router = Router();
 
@@ -25,5 +25,8 @@ router.put('/me/settings', authMiddleware, updateUserSettings);
 
 // Change password (for all authenticated users)
 router.post('/me/change-password', authMiddleware, changePassword);
+
+// Update Profile (Self)
+router.put('/me/profile', authMiddleware, updateProfile);
 
 export default router;

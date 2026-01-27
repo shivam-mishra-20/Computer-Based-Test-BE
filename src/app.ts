@@ -34,6 +34,8 @@ import homeworkRoutes from './routes/api/homeworkRoutes';
 import studentProgressRoutes from './routes/api/studentProgressRoutes';
 import commentRoutes from './routes/api/commentRoutes';
 import practiceTestRoutes from './routes/api/practiceTestRoutes';
+import leaveRoutes from './routes/api/leaveRoutes';
+import syllabusRoutes from './routes/api/syllabusRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import path from 'path';
 // Use require to avoid transient module resolution issues in some TS setups
@@ -124,6 +126,10 @@ app.use('/api/progress', studentProgressRoutes);
 app.use('/api/comments', commentRoutes);
 // Student custom practice tests
 app.use('/api/practice-tests', practiceTestRoutes);
+// Leave management routes
+app.use('/api/leaves', leaveRoutes);
+// Syllabus management routes
+app.use('/api/syllabus', syllabusRoutes);
 
 // Webhook routes
 import webhookRoutes from './routes/api/webhookRoutes';

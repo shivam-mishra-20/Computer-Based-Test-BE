@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import Schedule from '../../models/Schedule';
 import Batch from '../../models/Batch';
 import User from '../../models/User';
+import Leave from '../../models/Leave';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import { sendScheduleNotification, sendTeacherNotification } from '../../services/notificationService';
 import { initFirebaseAdmin } from '../../services/firebaseService';
@@ -465,7 +466,7 @@ router.get('/students', authMiddleware, async (req: Request, res: Response) => {
 router.get('/teachers', authMiddleware, async (req: Request, res: Response) => {
   try {
     const teachers = await User.find({ role: 'teacher' })
-      .select('_id name email')
+      .select('_id name email firebaseUid')
       .sort({ name: 1 });
     res.json(teachers);
   } catch (error: any) {
@@ -1119,6 +1120,28 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
     
     if (teacherConflict) {
       return res.status(400).json({ error: 'Teacher is already assigned to another class at this time' });
+    }
+    
+    // Check if teacher is on leave for the scheduled date
+    if (teacherId && scheduleData.scheduleType === 'custom' && scheduleData.date) {
+      const scheduleDate = new Date(scheduleData.date);
+      const teacherLeave = await Leave.findOne({
+        teacherId,
+        status: 'approved',
+        startDate: { $lte: scheduleDate },
+        endDate: { $gte: scheduleDate }
+      });
+      
+      if (teacherLeave) {
+        return res.status(400).json({ 
+          error: `${teacherName} is on approved leave on ${scheduleDate.toLocaleDateString()}`,
+          leaveDetails: {
+            startDate: teacherLeave.startDate,
+            endDate: teacherLeave.endDate,
+            leaveType: teacherLeave.leaveType
+          }
+        });
+      }
     }
     
     const schedule = new Schedule({
