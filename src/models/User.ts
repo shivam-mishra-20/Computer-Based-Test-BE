@@ -4,7 +4,7 @@ import bcrypt from 'bcrypt';
 export type UserRole = 'admin' | 'teacher' | 'student';
 export type UserStatus = 'pending' | 'approved' | 'rejected';
 export type Board = 'CBSE' | 'ICSE' | 'State Board' | 'IB' | 'IGCSE' | 'Other';
-export type TargetExam = 'Boards' | 'JEE' | 'NEET' | 'CUET' | 'NDA' | 'Olympiad' | 'Other';
+export type TargetExam = 'JEE Main' | 'JEE Advanced' | 'NEET' | 'CET' | 'Board Exams' | 'CUET' | 'Olympiad' | 'Foundation' | 'Other';
 
 export interface IUser extends Document {
   name: string;
@@ -14,6 +14,7 @@ export interface IUser extends Document {
   status: UserStatus;
   phone?: string;
   empCode?: string; // For EtimeOffice mapping
+  bio?: string; // Teacher/student bio
   pushToken?: string; // Expo push token
   // Student-specific fields
   board?: Board;
@@ -36,6 +37,9 @@ export interface IUser extends Document {
     emailNotifications?: boolean;
     examReminders?: boolean;
     doubtAlerts?: boolean;
+    scheduleUpdates?: boolean;
+    materialUpdates?: boolean;
+    notesUpdates?: boolean;
     autoSave?: boolean;
     language?: string;
   };
@@ -50,9 +54,10 @@ const userSchema = new Schema<IUser>({
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'approved', index: true },
   phone: { type: String },
   empCode: { type: String, unique: true, sparse: true, index: true },
+  bio: { type: String },
   pushToken: { type: String },
   board: { type: String, enum: ['CBSE', 'ICSE', 'State Board', 'IB', 'IGCSE', 'Other'], index: true },
-  targetExams: [{ type: String, enum: ['Boards', 'JEE', 'NEET', 'CUET', 'NDA', 'Olympiad', 'Other'] }],
+  targetExams: [{ type: String, enum: ['JEE Main', 'JEE Advanced', 'NEET', 'CET', 'Board Exams', 'CUET', 'Olympiad', 'Foundation', 'Other'] }],
   studyGoals: [{ type: String }],
   profileImage: { type: String },
   firebaseUid: { type: String, index: true },
@@ -68,6 +73,9 @@ const userSchema = new Schema<IUser>({
       emailNotifications: { type: Boolean, default: true },
       examReminders: { type: Boolean, default: true },
       doubtAlerts: { type: Boolean, default: true },
+      scheduleUpdates: { type: Boolean, default: true },
+      materialUpdates: { type: Boolean, default: true },
+      notesUpdates: { type: Boolean, default: true },
       autoSave: { type: Boolean, default: true },
       language: { type: String, default: 'English' },
     },
@@ -76,6 +84,9 @@ const userSchema = new Schema<IUser>({
       emailNotifications: true,
       examReminders: true,
       doubtAlerts: true,
+      scheduleUpdates: true,
+      materialUpdates: true,
+      notesUpdates: true,
       autoSave: true,
       language: 'English',
     }),

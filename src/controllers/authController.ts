@@ -233,9 +233,9 @@ export const me = async (req: Request, res: Response) => {
   try {
     const current = (req as any).user as { id: string; role?: string } | undefined;
     if (!current) return res.status(401).json({ message: 'Unauthorized' });
-    const user = await User.findById(current.id).select('name email role classLevel batch firebaseUid profileImage');
+    const user = await User.findById(current.id).select('name email role classLevel batch firebaseUid profileImage phone empCode bio');
     if (!user) return res.status(404).json({ message: 'User not found' });
-    res.json({ id: user._id, name: user.name, email: user.email, role: user.role, classLevel: (user as any).classLevel, batch: (user as any).batch, firebaseUid: (user as any).firebaseUid, profileImage: (user as any).profileImage });
+    res.json({ id: user._id, name: user.name, email: user.email, role: user.role, classLevel: (user as any).classLevel, batch: (user as any).batch, firebaseUid: (user as any).firebaseUid, profileImage: (user as any).profileImage, phone: (user as any).phone, empCode: (user as any).empCode, bio: (user as any).bio });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
@@ -285,7 +285,7 @@ export const updateProfile = async (req: Request, res: Response) => {
     const current = (req as any).user as { id: string; role?: string } | undefined;
     if (!current) return res.status(401).json({ message: 'Unauthorized' });
 
-    const { name, phone, targetExams, studyGoals, profileImage } = req.body;
+    const { name, phone, bio, targetExams, studyGoals, profileImage, settings } = req.body;
     
     const user = await User.findById(current.id);
     if (!user) return res.status(404).json({ message: 'User not found' });
@@ -295,9 +295,17 @@ export const updateProfile = async (req: Request, res: Response) => {
     // Update allowed fields
     if (name) user.name = name;
     if (phone !== undefined) (user as any).phone = phone;
+    if (bio !== undefined) (user as any).bio = bio;
     if (targetExams !== undefined) (user as any).targetExams = targetExams;
     if (studyGoals !== undefined) (user as any).studyGoals = studyGoals;
     if (profileImage !== undefined) (user as any).profileImage = profileImage;
+    if (settings !== undefined) {
+      // Merge settings with existing settings
+      (user as any).settings = {
+        ...(user as any).settings,
+        ...settings
+      };
+    }
 
     await user.save();
 
@@ -321,12 +329,15 @@ export const updateProfile = async (req: Request, res: Response) => {
       email: user.email,
       role: user.role,
       phone: (user as any).phone,
+      bio: (user as any).bio,
+      empCode: (user as any).empCode,
       classLevel: (user as any).classLevel,
       batch: (user as any).batch,
       targetExams: (user as any).targetExams,
       studyGoals: (user as any).studyGoals,
       profileImage: (user as any).profileImage,
       firebaseUid: (user as any).firebaseUid,
+      settings: (user as any).settings,
     });
   } catch (err) {
     console.error('Update profile error:', err);

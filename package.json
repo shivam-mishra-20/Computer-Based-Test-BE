@@ -22,9 +22,13 @@
     "@heroicons/react": "^2.2.0",
     "@hungknguyen/docx-math-converter": "^1.1.4",
     "@sparticuz/chromium": "^140.0.0",
+    "@types/adm-zip": "^0.5.7",
     "@types/socket.io": "^3.0.1",
+    "@types/xml2js": "^0.4.14",
+    "adm-zip": "^0.5.16",
     "axios": "^1.7.9",
     "bcrypt": "^6.0.0",
+    "cheerio": "^1.2.0",
     "cors": "^2.8.5",
     "docx": "^9.5.1",
     "dotenv": "^17.2.2",
@@ -34,6 +38,7 @@
     "groq-sdk": "^0.34.0",
     "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
+    "jszip": "^3.10.1",
     "katex": "^0.16.11",
     "mathjax-full": "^3.2.2",
     "mathjs": "^14.0.1",
@@ -46,7 +51,8 @@
     "puppeteer-core": "^24.22.3",
     "sharp": "^0.34.4",
     "socket.io": "^4.8.3",
-    "tesseract.js": "^6.0.1"
+    "tesseract.js": "^6.0.1",
+    "xml2js": "^0.6.2"
   },
   "devDependencies": {
     "@types/bcrypt": "^6.0.0",

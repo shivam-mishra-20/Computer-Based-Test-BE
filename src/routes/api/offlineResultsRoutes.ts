@@ -2,8 +2,30 @@ import { Router, Request, Response } from 'express';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import OfflineResult from '../../models/OfflineResult';
 import User from '../../models/User';
+import {
+  createTest,
+  getAllTests,
+  getTestById,
+  updateTestResults,
+  deleteTest,
+  getStudentResults,
+  getLeaderboard,
+} from '../../controllers/offlineResultsController';
 
 const router = Router();
+
+// New structured test routes
+router.post('/tests', authMiddleware, createTest);
+router.get('/tests', authMiddleware, getAllTests);
+router.get('/tests/:id', authMiddleware, getTestById);
+router.put('/tests/:id/results', authMiddleware, updateTestResults);
+router.delete('/tests/:id', authMiddleware, deleteTest);
+
+// Student results routes
+router.get('/students/:studentId/results', authMiddleware, getStudentResults);
+
+// Leaderboard route
+router.get('/leaderboard/:classLevel', authMiddleware, getLeaderboard);
 
 // Get offline results for the logged-in student
 router.get('/student', authMiddleware, async (req: Request, res: Response) => {

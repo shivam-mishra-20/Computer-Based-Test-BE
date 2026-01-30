@@ -47,10 +47,19 @@ const server = httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on http://0.0.0.0:${PORT}`);
 });
 
-connectDB().then(() => {
+connectDB().then(async () => {
   // Initialize attendance auto-sync cron after DB is ready
   const { AttendanceCron } = require('./services/AttendanceCron');
   AttendanceCron.init();
+  
+  // Initialize automation scheduler
+  try {
+    const { automationScheduler } = await import('./services/automationScheduler');
+    await automationScheduler.initialize();
+    console.log('✓ Automation scheduler initialized');
+  } catch (error) {
+    console.error('Failed to initialize automation scheduler:', error);
+  }
 }).catch((err: any) => {
   console.error('Database connection failed at startup:', err);
 });

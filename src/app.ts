@@ -36,6 +36,8 @@ import commentRoutes from './routes/api/commentRoutes';
 import practiceTestRoutes from './routes/api/practiceTestRoutes';
 import leaveRoutes from './routes/api/leaveRoutes';
 import syllabusRoutes from './routes/api/syllabusRoutes';
+import automationRoutes from './routes/api/automation';
+import resourceRoutes from './routes/api/resourceRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import path from 'path';
 // Use require to avoid transient module resolution issues in some TS setups
@@ -46,7 +48,8 @@ dotenv.config();
 
 const app = express();
 
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 app.use(cors());
 // Helmet with CSP disabled to avoid devtools CSP console noise on API root
 app.use(helmet({ contentSecurityPolicy: false }));
@@ -103,6 +106,7 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/uploads', uploadRoutes);
 app.use('/api/papers', paperRoutes);
 app.use('/api', importRoutes);
+app.use('/api/automation', automationRoutes); // EPUB extraction automation
 // New routes for enhanced student app
 app.use('/api/courses', courseRoutes);
 app.use('/api/attendance', attendanceRoutes);
@@ -130,6 +134,8 @@ app.use('/api/practice-tests', practiceTestRoutes);
 app.use('/api/leaves', leaveRoutes);
 // Syllabus management routes
 app.use('/api/syllabus', syllabusRoutes);
+// Study resources (videos/PDFs) routes
+app.use('/api/resources', resourceRoutes);
 
 // Webhook routes
 import webhookRoutes from './routes/api/webhookRoutes';
