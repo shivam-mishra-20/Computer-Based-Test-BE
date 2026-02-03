@@ -1,11 +1,12 @@
+# Nixpacks configuration
+# We install runtime libraries for canvas just in case they aren't fully covered by the Puppeteer provider.
 [phases.setup]
 aptPkgs = [
-    "build-essential",
-    "libcairo2-dev",
-    "libpango1.0-dev",
-    "libjpeg-dev",
-    "libgif-dev",
-    "librsvg2-dev",
-    "libpixman-1-dev",
-    "pkg-config"
+    "libcairo2",
+    "libpango-1.0-0",
+    "libpangocairo-1.0-0",
+    "libjpeg62-turbo",
+    "libgif7",
+    "librsvg2-2",
+    "libpixman-1-0"
 ]
