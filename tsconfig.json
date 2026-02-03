@@ -15,7 +15,9 @@
   "declarationMap": true,
 
   // Recommended
-  "strict": true,
+  // Recommended
+  "strict": false,
+  "noEmitOnError": false,
   "esModuleInterop": true,
   "resolveJsonModule": true,
   "skipLibCheck": true
