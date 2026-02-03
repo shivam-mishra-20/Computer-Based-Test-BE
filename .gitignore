@@ -24,3 +24,5 @@ package-lock.json
 #keys
 vision-key.json
 firebase-admin.json
+
+google-services.json

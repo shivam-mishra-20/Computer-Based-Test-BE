@@ -5,22 +5,33 @@ const fs = require('fs').promises;
 const xml2js = require('xml2js');
 const cheerio = require('cheerio');
 const path = require('path');
+const DiagramExtractorEPUB = require('../src/services/diagramExtractorEPUB');
 
 class EPUBParser {
+  constructor() {
+    this.zip = null; // Store zip for image extraction
+    this.diagramExtractor = null; // Will be initialized after metadata is available
+  }
+
   async parse(epubPath) {
     console.log('[EPUB Parser] Reading:', epubPath);
     const data = await fs.readFile(epubPath);
     const zip = await JSZip.loadAsync(data);
+    this.zip = zip; // Store for later image access
     
     // Step 1: Get metadata
     const metadata = await this.extractMetadata(zip, epubPath);
     console.log('[EPUB Parser] Metadata:', metadata);
     
-    // Step 2: Get chapter structure
+    // Step 2: Initialize diagram extractor with metadata
+    this.diagramExtractor = new DiagramExtractorEPUB(zip, metadata);
+    console.log('[EPUB Parser] Diagram extractor initialized');
+    
+    // Step 3: Get chapter structure
     const chapters = await this.extractChapters(zip);
     console.log(`[EPUB Parser] Found ${chapters.length} chapters`);
     
-    // Step 3: Extract questions from each chapter
+    // Step 4: Extract questions from each chapter
     const questions = [];
     for (const chapter of chapters) {
       const chapterQuestions = await this.extractQuestionsFromChapter(
@@ -31,7 +42,7 @@ class EPUBParser {
       questions.push(...chapterQuestions);
     }
     
-    // Step 4: Analyze statistics
+    // Step 5: Analyze statistics
     const stats = this.analyzeQuestions(questions);
     
     console.log(`[EPUB Parser] Total questions: ${questions.length}`);
@@ -58,7 +69,7 @@ class EPUBParser {
     };
   }
   
-  async extractMetadata(zip) {
+  async extractMetadata(zip, epubPath) {
     try {
       // Read container.xml to find content.opf location
       const containerXML = await zip.file('META-INF/container.xml').async('text');
@@ -71,21 +82,78 @@ class EPUBParser {
       
       const metadata = content.package.metadata[0];
       
+      const title = metadata['dc:title']?.[0] || path.basename(epubPath, '.epub');
+      const metadataSubject = metadata['dc:subject']?.[0];
+      
       return {
-        title: metadata['dc:title']?.[0] || 'Unknown',
+        title: title,
         author: metadata['dc:creator']?.[0] || 'Unknown',
-        subject: metadata['dc:subject']?.[0] || 'Unknown',
+        subject: this.identifySubjectFromTitle(title, metadataSubject),
         language: metadata['dc:language']?.[0] || 'en'
       };
     } catch (error) {
       console.warn('[EPUB Parser] Failed to extract metadata:', error.message);
+      const filename = path.basename(epubPath, '.epub');
       return {
-        title: 'Unknown',
+        title: filename,
         author: 'Unknown',
-        subject: 'Unknown',
+        subject: this.identifySubjectFromTitle(filename, 'Unknown'),
         language: 'en'
       };
     }
+  }
+
+  /**
+   * Intelligently identify subject from book title or metadata
+   * @param {string} title - Book title
+   * @param {string} metadataSubject - Subject from metadata
+   * @returns {string} Identified subject
+   */
+  identifySubjectFromTitle(title, metadataSubject) {
+    // If metadata has subject and it's not 'Unknown', use it
+    if (metadataSubject && metadataSubject !== 'Unknown' && metadataSubject.length > 2) {
+      return metadataSubject;
+    }
+
+    const titleLower = title.toLowerCase();
+
+    // Physics patterns
+    if (/(physics|mechanics|thermodynamics|electromagnetism|optics|waves)/i.test(titleLower)) {
+      return 'Physics';
+    }
+
+    // Chemistry patterns
+    if (/(chemistry|organic|inorganic|physical chemistry|chemical)/i.test(titleLower)) {
+      return 'Chemistry';
+    }
+
+    // Mathematics patterns
+    if (/(mathematics|math|algebra|geometry|calculus|trigonometry|statistics)/i.test(titleLower)) {
+      return 'Mathematics';
+    }
+
+    // Biology patterns
+    if (/(biology|bio|botany|zoology|life science|ecology|genetics)/i.test(titleLower)) {
+      return 'Biology';
+    }
+
+    // English patterns
+    if (/(english|literature|grammar|composition)/i.test(titleLower)) {
+      return 'English';
+    }
+
+    // Computer Science patterns
+    if (/(computer|programming|informatics|coding)/i.test(titleLower)) {
+      return 'Computer Science';
+    }
+
+    // Social Science patterns
+    if (/(history|geography|civics|economics|social)/i.test(titleLower)) {
+      return 'Social Science';
+    }
+
+    console.warn(`[EPUB Parser] Could not identify subject from title: "${title}"`);
+    return 'Unknown';
   }
   
   async extractChapters(zip) {
@@ -171,7 +239,7 @@ class EPUBParser {
     if (exercises.length > 0) {
       console.log(`[EPUB Parser] Found ${exercises.length} exercise sections in "${chapter.title}"`);
       for (const exercise of exercises) {
-        const exerciseQuestions = this.extractQuestionsFromExercise($, exercise, chapter, metadata);
+        const exerciseQuestions = await this.extractQuestionsFromExercise($, exercise, chapter, metadata);
         questions.push(...exerciseQuestions);
       }
     }
@@ -179,14 +247,14 @@ class EPUBParser {
     // Strategy 2: If no exercises found, look for numbered paragraphs/questions
     if (questions.length === 0) {
       console.log(`[EPUB Parser] No exercise sections found, trying direct question extraction`);
-      const directQuestions = this.extractDirectQuestions($, chapter, metadata);
+      const directQuestions = await this.extractDirectQuestions($, chapter, metadata);
       questions.push(...directQuestions);
     }
     
     // Strategy 3: If still no questions, extract all paragraphs as potential questions
     if (questions.length === 0) {
       console.log(`[EPUB Parser] Trying paragraph extraction for "${chapter.title}"`);
-      const paragraphQuestions = this.extractFromParagraphs($, chapter, metadata);
+      const paragraphQuestions = await this.extractFromParagraphs($, chapter, metadata);
       questions.push(...paragraphQuestions);
     }
     
@@ -238,7 +306,7 @@ class EPUBParser {
     return 'mixed';
   }
   
-  extractQuestionsFromExercise($, exercise, chapter, metadata) {
+  async extractQuestionsFromExercise($, exercise, chapter, metadata) {
     const questions = [];
     
     // Get all content after exercise header until next exercise or end
@@ -261,10 +329,14 @@ class EPUBParser {
         const { options, nextElement } = this.extractOptions($, currentElement);
         currentElement = nextElement;
         
-        // Check for images/diagrams
-        const diagramUrl = this.extractDiagram($, currentElement);
+        // Check for images/diagrams with question context for Firebase Storage
+        const questionContext = {
+          chapter: chapter.title || 'general',
+          questionNumber: questionNumber.toString()
+        };
+        const diagramMetadata = await this.extractDiagram($, currentElement, questionContext);
         
-        // Create question object with FLAT structure
+        // Create question object with diagram metadata (NOT base64)
         const question = {
           // Core fields
           text: questionText,
@@ -283,7 +355,7 @@ class EPUBParser {
           
           // Additional fields
           correctAnswerText: this.extractCorrectAnswer(options),
-          diagramUrl: diagramUrl || undefined,
+          diagram: diagramMetadata || undefined,  // Firebase metadata, NOT base64
           source: 'Smart Import',                           // REQUIRED
           isActive: true,                                   // REQUIRED
           
@@ -338,13 +410,27 @@ class EPUBParser {
     return correctOption ? correctOption.text : undefined;
   }
   
-  extractDiagram($, element) {
-    // Look for images in current element or nearby
-    const img = $(element).find('img').first();
-    if (img.length) {
-      return img.attr('src') || img.attr('data-src');
+  /**
+   * Extract diagram using Firebase Storage (NOT base64)
+   * Delegates to DiagramExtractorEPUB service
+   * @param {CheerioStatic} $ - Cheerio instance
+   * @param {CheerioElement} element - Current element
+   * @param {Object} questionContext - Question context (chapter, number)
+   * @returns {Promise<Object|null>} Diagram metadata or null
+   */
+  async extractDiagram($, element, questionContext) {
+    if (!this.diagramExtractor) {
+      console.warn('[EPUB Parser] Diagram extractor not initialized');
+      return null;
     }
-    return null;
+
+    try {
+      const diagramMetadata = await this.diagramExtractor.extractDiagram($, element, questionContext);
+      return diagramMetadata;
+    } catch (error) {
+      console.warn('[EPUB Parser] Diagram extraction failed:', error.message);
+      return null;
+    }
   }
   
   isExerciseHeader($, element) {
@@ -383,20 +469,29 @@ class EPUBParser {
   }
   
   // New extraction strategies
-  extractDirectQuestions($, chapter, metadata) {
+  async extractDirectQuestions($, chapter, metadata) {
     const questions = [];
     let questionNumber = 1;
     
     // Look for any paragraph or div that starts with a number followed by dot or period
-    $('p, div, li').each((i, elem) => {
-      const text = $(elem).text().trim();
+    const elements = $('p, div, li').get();
+    for (const elem of elements) {
+      const $elem = $(elem);
+      const text = $elem.text().trim();
       const questionMatch = text.match(/^(?:Q\.?\s*)?(\d+)[\.\)]\s+(.+)/);
       
       if (questionMatch && questionMatch[2] && questionMatch[2].length > 10) {
         const questionText = questionMatch[2].trim();
         
         // Look for options
-        const { options } = this.extractOptions($, $(elem));
+        const { options } = this.extractOptions($, $elem);
+        
+        // Extract diagram with question context
+        const questionContext = {
+          chapter: chapter.title || 'general',
+          questionNumber: questionNumber.toString()
+        };
+        const diagramMetadata = await this.extractDiagram($, $elem, questionContext);
         
         const question = {
           text: questionText,
@@ -410,6 +505,7 @@ class EPUBParser {
           difficulty: 'medium',
           marks: options.length > 0 ? 1 : 2,
           correctAnswerText: this.extractCorrectAnswer(options),
+          diagram: diagramMetadata || undefined,  // Firebase metadata
           source: 'Smart Import',
           isActive: true,
           questionNumber: questionNumber.toString()
@@ -418,21 +514,23 @@ class EPUBParser {
         questions.push(question);
         questionNumber++;
       }
-    });
+    }
     
     return questions;
   }
   
-  extractFromParagraphs($, chapter, metadata) {
+  async extractFromParagraphs($, chapter, metadata) {
     const questions = [];
     let questionNumber = 1;
     
     // Extract all paragraphs that look like questions
-    $('p').each((i, elem) => {
-      const text = $(elem).text().trim();
+    const elements = $('p').get();
+    for (const elem of elements) {
+      const $elem = $(elem);
+      const text = $elem.text().trim();
       
       // Skip very short paragraphs
-      if (text.length < 20) return;
+      if (text.length < 20) continue;
       
       // Check if it looks like a question (ends with ?, has certain keywords, etc.)
       const looksLikeQuestion = 
@@ -442,7 +540,14 @@ class EPUBParser {
       
       if (looksLikeQuestion) {
         // Look for options in next elements
-        const { options } = this.extractOptions($, $(elem));
+        const { options } = this.extractOptions($, $elem);
+        
+        // Extract diagram with question context
+        const questionContext = {
+          chapter: chapter.title || 'general',
+          questionNumber: questionNumber.toString()
+        };
+        const diagramMetadata = await this.extractDiagram($, $elem, questionContext);
         
         const question = {
           text: text.replace(/^\d+[\.\)]\s+/, ''), // Remove leading number if any
@@ -456,6 +561,7 @@ class EPUBParser {
           difficulty: 'medium',
           marks: options.length > 0 ? 1 : 2,
           correctAnswerText: this.extractCorrectAnswer(options),
+          diagram: diagramMetadata || undefined,  // Firebase metadata
           source: 'Smart Import',
           isActive: true,
           questionNumber: questionNumber.toString()
@@ -464,7 +570,7 @@ class EPUBParser {
         questions.push(question);
         questionNumber++;
       }
-    });
+    }
     
     return questions;
   }

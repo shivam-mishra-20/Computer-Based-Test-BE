@@ -28,33 +28,60 @@ function getVertexAI() {
 class AIEnhancer {
   constructor() {
     this.model = 'gemini-2.5-pro';
+    this.concurrentBatches = 6; // Process 6 batches in parallel (4-8x speedup)
   }
 
   /**
-   * Process questions in batches with AI enhancement
+   * Process questions in batches with AI enhancement (PARALLEL PROCESSING)
    * @param {Array} rawQuestions - Questions extracted from EPUB (may be multi-question blobs)
    * @param {Object} bookMetadata - Book metadata from EPUB
    * @returns {Promise<Array>} Enhanced, properly split questions
    */
   async enhanceQuestions(rawQuestions, bookMetadata) {
-    console.log(`\n🤖 AI Enhancement Started`);
+    console.log(`\n🤖 AI Enhancement Started (Parallel Processing)`);
     console.log(`   Model: ${this.model}`);
     console.log(`   Input: ${rawQuestions.length} extracted items`);
+    console.log(`   Concurrency: ${this.concurrentBatches} parallel batches`);
 
     const enhancedQuestions = [];
     const batchSize = 5; // Process 5 questions at a time to avoid token limits
+    const totalBatches = Math.ceil(rawQuestions.length / batchSize);
 
+    // Create all batches
+    const batches = [];
     for (let i = 0; i < rawQuestions.length; i += batchSize) {
-      const batch = rawQuestions.slice(i, i + batchSize);
-      console.log(`   Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(rawQuestions.length / batchSize)}`);
+      batches.push({
+        index: Math.floor(i / batchSize),
+        questions: rawQuestions.slice(i, i + batchSize)
+      });
+    }
 
-      try {
-        const structured = await this.structureQuestionBatch(batch, bookMetadata);
-        enhancedQuestions.push(...structured);
-      } catch (error) {
-        console.error(`   ❌ Batch ${Math.floor(i / batchSize) + 1} failed:`, error.message);
-        // Continue with next batch
-      }
+    // Process batches in parallel with concurrency limit
+    let completed = 0;
+    for (let i = 0; i < batches.length; i += this.concurrentBatches) {
+      const chunk = batches.slice(i, i + this.concurrentBatches);
+      
+      // Process this chunk in parallel
+      const promises = chunk.map(async ({ index, questions }) => {
+        try {
+          const structured = await this.structureQuestionBatch(questions, bookMetadata);
+          return { success: true, index, questions: structured };
+        } catch (error) {
+          console.error(`   ❌ Batch ${index + 1} failed:`, error.message);
+          return { success: false, index, questions: [] };
+        }
+      });
+
+      const results = await Promise.all(promises);
+      
+      // Add results in order and update progress
+      results.forEach(result => {
+        if (result.success) {
+          enhancedQuestions.push(...result.questions);
+        }
+        completed++;
+        console.log(`   Progress: ${completed}/${totalBatches} batches (${Math.round(completed/totalBatches*100)}%)`);
+      });
     }
 
     console.log(`   ✅ Enhanced: ${enhancedQuestions.length} questions`);
@@ -185,8 +212,8 @@ Now extract and structure ALL questions found above:`;
     const result = await generativeModel.generateContent(prompt);
     const responseText = result.response.candidates[0].content.parts[0].text;
 
-    // Parse the structured response
-    const structuredQuestions = this.parseGeminiResponse(responseText, bookMetadata);
+    // Parse the structured response, passing original batch for diagram preservation
+    const structuredQuestions = this.parseGeminiResponse(responseText, bookMetadata, batch);
 
     console.log(`      → Extracted ${structuredQuestions.length} questions from ${batch.length} inputs`);
 
@@ -195,14 +222,22 @@ Now extract and structure ALL questions found above:`;
 
   /**
    * Parse Gemini's structured response into question objects
+   * PRESERVES diagram metadata from original questions (Firebase Storage)
    */
-  parseGeminiResponse(responseText, bookMetadata) {
+  parseGeminiResponse(responseText, bookMetadata, originalBatch) {
     const questions = [];
     const blocks = responseText.split('------------------------------------').filter(b => b.trim());
 
-    for (const block of blocks) {
+    for (let i = 0; i < blocks.length; i++) {
       try {
-        const question = this.parseQuestionBlock(block, bookMetadata);
+        // Preserve diagram metadata from original question (NOT base64, Firebase metadata)
+        const originalQuestion = originalBatch[i] || {};
+        const metadataWithDiagram = {
+          ...bookMetadata,
+          diagram: originalQuestion.diagram || null  // Firebase metadata object
+        };
+        
+        const question = this.parseQuestionBlock(blocks[i], metadataWithDiagram);
         if (question) {
           questions.push(question);
         }
@@ -277,6 +312,11 @@ Now extract and structure ALL questions found above:`;
 
     if (fields.QUESTION_TYPE === 'integer' && fields.INTEGER_ANSWER) {
       question.integerAnswer = parseInt(fields.INTEGER_ANSWER);
+    }
+
+    // CRITICAL: Preserve diagram metadata from Firebase Storage (NOT base64 URL)
+    if (bookMetadata.diagram) {
+      question.diagram = bookMetadata.diagram;  // Contains { storage, path, url, width, height, hash }
     }
 
     return question;
