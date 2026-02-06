@@ -41,6 +41,6 @@ const attendanceSchema = new Schema<IAttendance>({
 // Compound index for efficient queries
 attendanceSchema.index({ studentId: 1, date: -1 });
 attendanceSchema.index({ date: 1, classLevel: 1, batch: 1 });
-attendanceSchema.index({ idempotencyKey: 1 });
+// idempotencyKey index is already created via unique: true in schema definition
 
 export default mongoose.model<IAttendance>('Attendance', attendanceSchema);
