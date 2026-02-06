@@ -46,6 +46,8 @@ export async function sendScheduleNotification(
         title: title,
         body: body,
         data: { type: 'schedule_update' },
+        priority: 'high',
+        channelId: 'default',
       });
     }
     
@@ -78,20 +80,41 @@ export async function sendTeacherNotification(
   body: string
 ) {
   try {
+    console.log('[sendTeacherNotification] Looking for teacher:', teacherId);
     let teacher = null;
     
     // Try to find by MongoDB ObjectId first
     if (isValidObjectId(teacherId)) {
-      teacher = await User.findById(teacherId).select('pushToken');
+      console.log('[sendTeacherNotification] Searching by MongoDB ObjectId');
+      teacher = await User.findById(teacherId).select('pushToken name email');
     }
     
     // If not found, try to find by firebaseUid field
     if (!teacher) {
-      teacher = await User.findOne({ firebaseUid: teacherId }).select('pushToken');
+      console.log('[sendTeacherNotification] Searching by firebaseUid');
+      teacher = await User.findOne({ firebaseUid: teacherId }).select('pushToken name email');
     }
     
-    if (!teacher?.pushToken || !Expo.isExpoPushToken(teacher.pushToken)) {
-      console.log(`Teacher ${teacherId} has no valid push token`);
+    if (!teacher) {
+      console.error(`[sendTeacherNotification] Teacher ${teacherId} not found in database`);
+      return;
+    }
+
+    console.log('[sendTeacherNotification] Teacher found:', {
+      id: teacher._id,
+      name: teacher.name,
+      email: teacher.email,
+      hasPushToken: !!teacher.pushToken,
+      pushToken: teacher.pushToken ? `${teacher.pushToken.substring(0, 20)}...` : 'none'
+    });
+    
+    if (!teacher?.pushToken) {
+      console.error(`[sendTeacherNotification] Teacher ${teacherId} (${teacher.name}) has no push token`);
+      return;
+    }
+
+    if (!Expo.isExpoPushToken(teacher.pushToken)) {
+      console.error(`[sendTeacherNotification] Invalid push token format for teacher ${teacherId}: ${teacher.pushToken}`);
       return;
     }
     
@@ -100,12 +123,22 @@ export async function sendTeacherNotification(
       sound: 'default',
       title,
       body,
-      data: { type: 'schedule_update' },
+      data: { type: 'leave_update', screen: 'Leaves' },
+      priority: 'high',
+      channelId: 'default',
     };
     
-    await expo.sendPushNotificationsAsync([message]);
+    console.log('[sendTeacherNotification] Sending push notification:', {
+      to: `${teacher.pushToken.substring(0, 20)}...`,
+      title,
+      body: body.substring(0, 50)
+    });
+    
+    const tickets = await expo.sendPushNotificationsAsync([message]);
+    console.log('[sendTeacherNotification] Notification sent, tickets:', tickets);
   } catch (error) {
-    console.error('Error sending teacher notification:', error);
+    console.error('[sendTeacherNotification] Error sending teacher notification:', error);
+    throw error; // Re-throw to see the full error
   }
 }
 
@@ -150,6 +183,8 @@ export async function sendStudentNotifications(
       to: token,
       sound: 'default' as const,
       title,
+      priority: 'high',
+      channelId: 'default',
       body,
       data: data || { type: type || 'schedule_update' },
     }));
@@ -191,7 +226,9 @@ export async function createAndSendNotification(payload: {
            sound: 'default',
            title,
            body,
-           data: data || { type: type || 'general' }
+           data: data || { type: type || 'general' },
+           priority: 'high',
+           channelId: 'default',
          }]);
        }
     } else {
@@ -204,7 +241,9 @@ export async function createAndSendNotification(payload: {
             sound: 'default',
             title,
             body,
-            data: data || { type: type || 'general' }
+            data: data || { type: type || 'general' },
+            priority: 'high',
+            channelId: 'default',
          }]);
        }
     }

@@ -154,6 +154,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
 
     // Validate required fields
     if (!subject || !classLevel || !academicYear) {
+      console.error('[Syllabus] Validation failed - Missing required fields:', { subject, classLevel, academicYear });
       return res.status(400).json({ error: 'Subject, class level, and academic year are required' });
     }
 
@@ -168,6 +169,13 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
     });
 
     if (existing) {
+      console.error('[Syllabus] Duplicate syllabus detected:', { 
+        teacherId: teacher.firebaseUid || teacher._id?.toString(),
+        subject,
+        classLevel,
+        batch: batch || null,
+        academicYear
+      });
       return res.status(400).json({ 
         error: 'A syllabus for this subject, class, and academic year already exists',
         existingId: existing._id

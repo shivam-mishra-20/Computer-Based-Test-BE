@@ -199,6 +199,7 @@ router.patch('/:leaveId/status', authMiddleware, async (req: Request, res: Respo
     await leave.save();
 
     // Find teacher and send notification
+    console.log('[LeaveApproval] Finding teacher with ID:', leave.teacherId);
     const teacher = await User.findOne({
       $or: [
         { _id: leave.teacherId },
@@ -207,6 +208,14 @@ router.patch('/:leaveId/status', authMiddleware, async (req: Request, res: Respo
     });
 
     if (teacher) {
+      console.log('[LeaveApproval] Teacher found:', {
+        id: teacher._id,
+        name: teacher.name,
+        email: teacher.email,
+        hasPushToken: !!teacher.pushToken,
+        pushToken: teacher.pushToken ? `${teacher.pushToken.substring(0, 20)}...` : 'none'
+      });
+
       const notification = new Notification({
         userId: teacher._id,
         type: 'general',
@@ -219,13 +228,21 @@ router.patch('/:leaveId/status', authMiddleware, async (req: Request, res: Respo
         actionUrl: '/teacher/leaves'
       });
       await notification.save();
+      console.log('[LeaveApproval] In-app notification saved:', notification._id);
 
       // Send push notification
+      console.log('[LeaveApproval] Sending push notification to teacher...');
       sendTeacherNotification(
         leave.teacherId,
         notification.title,
         notification.message
-      ).catch(err => console.error('Push notification failed:', err));
+      ).then(() => {
+        console.log('[LeaveApproval] Push notification sent successfully');
+      }).catch(err => {
+        console.error('[LeaveApproval] Push notification failed:', err);
+      });
+    } else {
+      console.error('[LeaveApproval] Teacher not found with ID:', leave.teacherId);
     }
 
     res.json(leave);

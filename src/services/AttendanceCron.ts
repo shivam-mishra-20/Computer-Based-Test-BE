@@ -68,7 +68,6 @@ export class AttendanceCron {
       // Log audit before sync
       await AuditLog.create({
         action: 'AUTO_SYNC_ATTENDANCE_START',
-        status: 'info',
         entity: 'Attendance',
         metadata: { fromDate, toDate, triggeredBy: 'cron' }
       });
@@ -144,7 +143,6 @@ export class AttendanceCron {
     try {
       await AuditLog.create({
         action: 'MANUAL_SYNC_ATTENDANCE_START',
-        status: 'info',
         entity: 'Attendance',
         metadata: { fromDate, toDate, triggeredBy: 'manual' }
       });
