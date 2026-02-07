@@ -38,6 +38,7 @@ import leaveRoutes from './routes/api/leaveRoutes';
 import syllabusRoutes from './routes/api/syllabusRoutes';
 import automationRoutes from './routes/api/automation';
 import resourceRoutes from './routes/api/resourceRoutes';
+import eodRoutes from './routes/api/eodRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import path from 'path';
 // Use require to avoid transient module resolution issues in some TS setups
@@ -136,6 +137,8 @@ app.use('/api/leaves', leaveRoutes);
 app.use('/api/syllabus', syllabusRoutes);
 // Study resources (videos/PDFs) routes
 app.use('/api/resources', resourceRoutes);
+// EOD (End of Day) reports
+app.use('/api/eod', eodRoutes);
 
 // Webhook routes
 import webhookRoutes from './routes/api/webhookRoutes';

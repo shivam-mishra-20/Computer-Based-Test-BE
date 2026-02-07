@@ -144,6 +144,7 @@ export const login = async (req: Request, res: Response) => {
       return res.json({ 
         token, 
         user: { 
+          _id: user._id,
           id: user._id, 
           name: user.name, 
           email: user.email, 
@@ -152,7 +153,9 @@ export const login = async (req: Request, res: Response) => {
           classLevel: (user as any).classLevel, 
           batch: (user as any).batch, 
           firebaseUid: (user as any).firebaseUid,
-          profileImage: (user as any).profileImage
+          profileImage: (user as any).profileImage,
+          phone: (user as any).phone,
+          empCode: (user as any).empCode
         } 
       });
     }
@@ -233,10 +236,25 @@ export const me = async (req: Request, res: Response) => {
   try {
     const current = (req as any).user as { id: string; role?: string } | undefined;
     if (!current) return res.status(401).json({ message: 'Unauthorized' });
-    const user = await User.findById(current.id).select('name email role classLevel batch firebaseUid profileImage phone empCode bio');
+    const user = await User.findById(current.id).select('name email role classLevel batch firebaseUid profileImage phone empCode bio status');
     if (!user) return res.status(404).json({ message: 'User not found' });
-    res.json({ id: user._id, name: user.name, email: user.email, role: user.role, classLevel: (user as any).classLevel, batch: (user as any).batch, firebaseUid: (user as any).firebaseUid, profileImage: (user as any).profileImage, phone: (user as any).phone, empCode: (user as any).empCode, bio: (user as any).bio });
+    res.json({ 
+      _id: user._id, 
+      id: user._id, 
+      name: user.name, 
+      email: user.email, 
+      role: user.role, 
+      status: (user as any).status,
+      classLevel: (user as any).classLevel, 
+      batch: (user as any).batch, 
+      firebaseUid: (user as any).firebaseUid, 
+      profileImage: (user as any).profileImage, 
+      phone: (user as any).phone, 
+      empCode: (user as any).empCode, 
+      bio: (user as any).bio 
+    });
   } catch (err) {
+    console.error('Get user error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };
