@@ -137,7 +137,7 @@ export async function getAttemptView(attemptId: string, userId: string) {
       questionIds: practiceTest.questionIds,
     }];
     
-    // Sanitize questions (remove correct answers)
+    // Sanitize questions (remove correct answers for in-progress, show for submitted)
     const questionDict: Record<string, any> = {};
     for (const q of questionDocs) {
       const sanitized: any = {
@@ -149,11 +149,23 @@ export async function getAttemptView(attemptId: string, userId: string) {
         reasonText: q.reason,
       };
       if (q.options) {
-        sanitized.options = q.options.map((o: any) => ({
-          _id: o._id,
-          text: o.text,
-          // Don't include isCorrect for in-progress attempts
-        }));
+        if (attempt.resultPublished) {
+          // Show correct answers when results are published
+          sanitized.options = q.options.map((o: any) => ({
+            _id: o._id,
+            text: o.text,
+            isCorrect: o.isCorrect,
+          }));
+        } else {
+          sanitized.options = q.options.map((o: any) => ({
+            _id: o._id,
+            text: o.text,
+          }));
+        }
+      }
+      // Include explanation when results are published
+      if (attempt.resultPublished && q.explanation) {
+        sanitized.explanation = q.explanation;
       }
       questionDict[q._id.toString()] = sanitized;
     }

@@ -418,6 +418,15 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
       .populate('messages.sender', 'name email role profileImage')
       .lean();
     
+    // Emit socket event for new/updated conversation to user rooms
+    SocketService.emitDoubtUpdate(
+      (doubt as any)._id.toString(),
+      studentId as string,
+      validTeacherId ? validTeacherId.toString() : null,
+      'new_message',
+      populated
+    );
+
     // Notify Teacher if assigned
     if (validTeacherId) {
       const senderName = req.user?.name || 'Student';
@@ -511,10 +520,18 @@ router.post('/:id/messages', authMiddleware, async (req: AuthRequest, res: Respo
       }
     }
 
-    // Emit socket event with fresh URLs
-    SocketService.getIO().to(`doubt_${doubt._id}`).emit('new_message', populated);
+    // Emit socket event to doubt room AND user rooms for real-time chat list updates
+    const studentId = doubt.student.toString();
+    const teacherIdStr = doubt.teacher ? doubt.teacher.toString() : null;
+    SocketService.emitDoubtUpdate(
+      doubt._id.toString(), 
+      studentId, 
+      teacherIdStr, 
+      'new_message', 
+      populated
+    );
 
-    // Send Notification
+    // Send Notification with actual user name
     const senderName = req.user?.name || 'User';
     if (req.user?.role === 'student') {
       // Notify Teacher
@@ -589,10 +606,16 @@ router.put('/:id/reply', authMiddleware, async (req: AuthRequest, res: Response)
       .populate('teacher', 'name email profileImage')
       .populate('messages.sender', 'name email role profileImage');
 
-    // Emit socket event
-    SocketService.getIO().to(`doubt_${doubt._id}`).emit('new_message', populated);
+    // Emit socket event to doubt room AND user rooms for real-time chat list updates
+    SocketService.emitDoubtUpdate(
+      doubt._id.toString(),
+      doubt.student.toString(),
+      teacherId as string,
+      'new_message',
+      populated
+    );
 
-    // Notify Student
+    // Notify Student with actual teacher name
     const senderName = req.user?.name || 'Teacher';
     await createAndSendNotification({
       userId: doubt.student.toString(),

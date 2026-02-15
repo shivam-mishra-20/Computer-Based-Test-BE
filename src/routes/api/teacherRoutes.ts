@@ -166,8 +166,8 @@ router.get('/dashboard-stats', authMiddleware, async (req: AuthRequest, res: Res
       Attempt.find({ /* we'd need exam filter */ })
         .sort({ createdAt: -1 })
         .limit(5)
-        .populate('user', 'name')
-        .populate('exam', 'title')
+        .populate('userId', 'name')
+        .populate('examId', 'title')
         .lean()
     ]);
 
@@ -311,46 +311,64 @@ router.get('/student-report/:studentId', authMiddleware, async (req: AuthRequest
     const teacherExamIds = await Exam.find({ createdBy: req.user._id }).distinct('_id');
 
     const attempts = await Attempt.find({
-      user: studentId,
-      exam: { $in: teacherExamIds },
-      status: 'submitted'
+      userId: studentId,
+      examId: { $in: teacherExamIds },
+      status: { $in: ['submitted', 'auto-submitted', 'graded'] }
     })
-      .populate('exam', 'title subject chapters')
+      .populate('examId', 'title subject chapters')
       .sort({ submittedAt: -1 })
       .lean();
 
     // Calculate overall stats
     const totalAttempts = attempts.length;
-    const scores = attempts.map((a: any) => a.score || 0);
+    const scores = attempts.map((a: any) => {
+      return a.maxScore ? Math.round(((a.totalScore || 0) / a.maxScore) * 100) : 0;
+    });
     const avgScore = totalAttempts > 0 ? scores.reduce((a: number, b: number) => a + b, 0) / totalAttempts : 0;
     const bestScore = totalAttempts > 0 ? Math.max(...scores) : 0;
-    const totalTimeSpent = attempts.reduce((acc: number, a: any) => acc + (a.timeTaken || 0), 0);
-    const totalCorrect = attempts.reduce((acc: number, a: any) => acc + (a.correctAnswers || 0), 0);
-    const totalQuestions = attempts.reduce((acc: number, a: any) => acc + (a.totalQuestions || 0), 0);
+    const totalTimeSpent = attempts.reduce((acc: number, a: any) => {
+      if (a.submittedAt && a.startedAt) {
+        return acc + Math.round((new Date(a.submittedAt).getTime() - new Date(a.startedAt).getTime()) / 1000);
+      }
+      return acc;
+    }, 0);
+    const totalCorrect = attempts.reduce((acc: number, a: any) => {
+      return acc + (a.answers?.filter((ans: any) => ans.isCorrect).length || 0);
+    }, 0);
+    const totalQuestions = attempts.reduce((acc: number, a: any) => acc + (a.answers?.length || 0), 0);
     const overallAccuracy = totalQuestions > 0 ? (totalCorrect / totalQuestions) * 100 : 0;
 
     // Format recent attempts
-    const recentAttempts = attempts.slice(0, 10).map((a: any) => ({
-      _id: a._id,
-      examTitle: a.exam?.title || 'Unknown',
-      examSubject: a.exam?.subject || 'Unknown',
-      score: a.score || 0,
-      totalQuestions: a.totalQuestions || 0,
-      correctAnswers: a.correctAnswers || 0,
-      wrongAnswers: a.wrongAnswers || 0,
-      skipped: a.skippedAnswers || 0,
-      timeTaken: a.timeTaken || 0,
-      submittedAt: a.submittedAt || a.createdAt
-    }));
+    const recentAttempts = attempts.slice(0, 10).map((a: any) => {
+      const correct = a.answers?.filter((ans: any) => ans.isCorrect).length || 0;
+      const total = a.answers?.length || 0;
+      const wrong = total - correct;
+      const timeTaken = a.submittedAt && a.startedAt
+        ? Math.round((new Date(a.submittedAt).getTime() - new Date(a.startedAt).getTime()) / 1000)
+        : 0;
+      return {
+        _id: a._id,
+        examTitle: a.examId?.title || 'Unknown',
+        examSubject: a.examId?.subject || 'Unknown',
+        score: a.maxScore ? Math.round(((a.totalScore || 0) / a.maxScore) * 100) : 0,
+        totalQuestions: total,
+        correctAnswers: correct,
+        wrongAnswers: wrong,
+        skipped: 0,
+        timeTaken,
+        submittedAt: a.submittedAt || a.createdAt
+      };
+    });
 
     // Calculate subject-wise stats
     const subjectMap = new Map<string, { total: number; sum: number }>();
     attempts.forEach((a: any) => {
-      const subject = a.exam?.subject || 'Unknown';
+      const subject = a.examId?.subject || 'Unknown';
+      const score = a.maxScore ? Math.round(((a.totalScore || 0) / a.maxScore) * 100) : 0;
       const current = subjectMap.get(subject) || { total: 0, sum: 0 };
       subjectMap.set(subject, {
         total: current.total + 1,
-        sum: current.sum + (a.score || 0)
+        sum: current.sum + score
       });
     });
 
@@ -369,7 +387,7 @@ router.get('/student-report/:studentId', authMiddleware, async (req: AuthRequest
 
     for (const attempt of attempts) {
       const attemptAny = attempt as any;
-      const exam = attemptAny.exam;
+      const exam = attemptAny.examId;
       if (!exam?.chapters) continue;
 
       // Group questions by chapter if available

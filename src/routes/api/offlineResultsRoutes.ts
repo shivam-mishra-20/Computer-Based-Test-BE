@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import OfflineResult from '../../models/OfflineResult';
+import TestResult from '../../models/TestResult';
 import User from '../../models/User';
 import {
   createTest,
@@ -38,63 +39,56 @@ router.get('/student', authMiddleware, async (req: Request, res: Response) => {
     }
 
     const userName = user.name;
-    // Normalize class level - handle both "11" and "Class 11" formats
     const rawClass = String(user.classLevel || '').trim();
     const userClassNormalized = rawClass.replace(/^Class\s*/i, '').trim();
     const userBatch = user.batch || '';
 
-    console.log(`[OfflineResults] Fetching for user: name="${userName}", class="${userClassNormalized}", batch="${userBatch}", rawClass="${rawClass}"`);
+    console.log(`[OfflineResults] Fetching for user: name="${userName}", id="${authUser.id}", class="${userClassNormalized}", batch="${userBatch}"`);
 
-    // Build query - the offlineresults collection seems to store by class/batch, not by student name
-    // So we match by class level and batch
-    const query: any = {};
-    
-    // Match class in various formats (e.g., "11", "Class 11")
-    query.$or = [
-      { class: userClassNormalized },
-      { class: `Class ${userClassNormalized}` },
-      { class: rawClass }
-    ];
-    
-    // If user has a batch, try to match it (but also include results without batch)
-    if (userBatch) {
-      query.batch = { $in: [userBatch, '', null] };
-    }
+    // Query TestResult model (where teachers actually write results)
+    const classQuery = {
+      $or: [
+        { class: userClassNormalized },
+        { class: `Class ${userClassNormalized}` },
+        { class: rawClass }
+      ]
+    };
 
-    console.log(`[OfflineResults] Query:`, JSON.stringify(query));
-
-    let results = await OfflineResult.find(query)
+    const tests = await TestResult.find(classQuery)
       .sort({ testDate: -1, createdAt: -1 })
       .lean();
 
-    // If no results found with batch filter, try without batch
-    if (results.length === 0 && userBatch) {
-      console.log('[OfflineResults] No results with batch filter, trying class-only match...');
-      const classOnlyQuery = {
-        $or: [
-          { class: userClassNormalized },
-          { class: `Class ${userClassNormalized}` },
-          { class: rawClass }
-        ]
-      };
-      results = await OfflineResult.find(classOnlyQuery)
-        .sort({ testDate: -1, createdAt: -1 })
-        .lean();
-    }
+    console.log(`[OfflineResults] Found ${tests.length} tests for class ${userClassNormalized}`);
 
-    // Also try to match by user's batch specifically
-    if (results.length === 0 && userBatch) {
-      console.log('[OfflineResults] Trying batch-only match...');
-      const batchResults = await OfflineResult.find({ batch: userBatch })
-        .sort({ testDate: -1, createdAt: -1 })
-        .lean();
-      if (batchResults.length > 0) {
-        results = batchResults;
-      }
-    }
+    // Extract this student's results from each test's studentResults array
+    const studentResults = tests
+      .map((test: any) => {
+        const studentResult = test.studentResults?.find(
+          (r: any) => r.studentId === authUser.id || r.studentName === userName
+        );
+        if (!studentResult) return null;
 
-    console.log(`[OfflineResults] Found ${results.length} results`);
-    res.json(results);
+        return {
+          _id: test._id,
+          class: test.class,
+          name: test.testName,
+          batch: test.batch || '',
+          subject: test.subject,
+          marks: studentResult.marksObtained ?? studentResult.marks ?? 0,
+          outOf: test.maxMarks ?? 0,
+          remarks: studentResult.remarks || '',
+          testDate: test.testDate,
+          createdAt: test.createdAt,
+          percentage: test.maxMarks > 0
+            ? Math.round(((studentResult.marksObtained ?? studentResult.marks ?? 0) / test.maxMarks) * 100)
+            : 0,
+          grade: studentResult.grade || '',
+        };
+      })
+      .filter(Boolean);
+
+    console.log(`[OfflineResults] Found ${studentResults.length} results for student "${userName}"`);
+    res.json(studentResults);
   } catch (error: any) {
     console.error('Error fetching offline results:', error);
     res.status(500).json({ error: error.message || 'Failed to fetch offline results' });

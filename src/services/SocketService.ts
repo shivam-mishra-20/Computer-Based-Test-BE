@@ -93,6 +93,23 @@ class SocketService {
   public emitToClass(classId: string, event: string, data: any): void {
     this.io?.to(`class:${classId}`).emit(event, data);
   }
+
+  /**
+   * Emit a message to the doubt room AND to both participant user rooms.
+   * This ensures users get updates whether they're in the chat or on the list screen.
+   */
+  public emitDoubtUpdate(doubtId: string, studentId: string, teacherId: string | null, event: string, data: any): void {
+    // Emit to the doubt-specific room (for users currently in the chat)
+    this.io?.to(`doubt_${doubtId}`).emit(event, data);
+    
+    // Also emit to user-level rooms so chat list updates in real-time
+    if (studentId) {
+      this.io?.to(`user:${studentId}`).emit('doubt_updated', data);
+    }
+    if (teacherId) {
+      this.io?.to(`user:${teacherId}`).emit('doubt_updated', data);
+    }
+  }
 }
 
 export default SocketService.getInstance();
