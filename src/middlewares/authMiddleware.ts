@@ -14,6 +14,16 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
   
   // Check if token is missing, empty, or the literal string "null" or "undefined"
   if (!token || token === 'null' || token === 'undefined' || token.length < 20) {
+    // Log the rejection reason for debugging (only in development or when DEBUG_AUTH is set)
+    if (process.env.NODE_ENV !== 'production' || process.env.DEBUG_AUTH) {
+      console.warn(`[Auth] 401 on ${req.method} ${req.path} — reason: ${
+        !authHeader ? 'no Authorization header' :
+        !token ? 'empty token after parsing' :
+        token === 'null' ? 'token is literal "null"' :
+        token === 'undefined' ? 'token is literal "undefined"' :
+        token.length < 20 ? `token too short (${token.length} chars)` : 'unknown'
+      }`);
+    }
     return res.status(401).json({ message: 'No token, authorization denied' });
   }
 
