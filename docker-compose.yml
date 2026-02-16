@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  # Redis for Socket.IO adapter and caching
+  redis:
+    image: redis:7-alpine
+    container_name: cbt-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # MongoDB (if not using Atlas)
+  # mongodb:
+  #   image: mongo:7
+  #   container_name: cbt-mongodb
+  #   ports:
+  #     - "27017:27017"
+  #   volumes:
+  #     - mongo_data:/data/db
+  #   environment:
+  #     MONGO_INITDB_ROOT_USERNAME: admin
+  #     MONGO_INITDB_ROOT_PASSWORD: password
+  #   restart: unless-stopped
+
+  # Backend server (multiple instances for load balancing)
+  backend:
+    build: .
+    container_name: cbt-backend
+    ports:
+      - "5000:5000"
+    environment:
+      - NODE_ENV=production
+      - PORT=5000
+      - REDIS_URL=redis://redis:6379
+      - MONGO_URI=${MONGO_URI}
+      - JWT_SECRET=${JWT_SECRET}
+    depends_on:
+      - redis
+    restart: unless-stopped
+    deploy:
+      replicas: 2 # Run 2 instances
+      resources:
+        limits:
+          cpus: '1'
+          memory: 1G
+
+  # Nginx load balancer (optional - for multiple backend instances)
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: cbt-nginx
+  #   ports:
+  #     - "80:80"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/nginx.conf:ro
+  #   depends_on:
+  #     - backend
+  #   restart: unless-stopped
+
+volumes:
+  redis_data:
+  # mongo_data:

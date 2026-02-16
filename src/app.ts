@@ -40,6 +40,7 @@ import automationRoutes from './routes/api/automation';
 import resourceRoutes from './routes/api/resourceRoutes';
 import eodRoutes from './routes/api/eodRoutes';
 import { errorHandler } from './middlewares/errorHandler';
+import { globalLimiter } from './middlewares/rateLimiter';
 import path from 'path';
 // Use require to avoid transient module resolution issues in some TS setups
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -48,6 +49,12 @@ const uploadRoutes = require('./routes/api/uploadRoutes').default as import('exp
 dotenv.config();
 
 const app = express();
+
+// Trust proxy for proper IP detection behind load balancers
+app.set('trust proxy', 1);
+
+// Apply global rate limiter (must be early in middleware chain)
+app.use(globalLimiter);
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));

@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import Doubt, { IDoubt } from '../../models/Doubt';
 import { authMiddleware } from '../../middlewares/authMiddleware';
+import { messageLimiter } from '../../middlewares/rateLimiter';
 import { IUser } from '../../models/User';
 import { upload } from '../../middlewares/upload';
 import { 
@@ -346,7 +347,7 @@ router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
 });
 
 // POST - Create doubt (student) - Start or continue conversation
-router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
+router.post('/', authMiddleware, messageLimiter, async (req: AuthRequest, res: Response) => {
   try {
     console.log('[CreateDoubt] Request body:', JSON.stringify(req.body, null, 2));
     const { teacherId, message } = req.body;
@@ -448,7 +449,7 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
 });
 
 // POST - Add message to doubt thread
-router.post('/:id/messages', authMiddleware, async (req: AuthRequest, res: Response) => {
+router.post('/:id/messages', authMiddleware, messageLimiter, async (req: AuthRequest, res: Response) => {
   try {
     const { message, attachments } = req.body;
     const userId = req.user?._id;

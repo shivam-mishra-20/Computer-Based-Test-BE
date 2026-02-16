@@ -31,21 +31,26 @@ import { existsSync, writeFileSync, readFileSync } from 'fs';
 
 import http from 'http';
 import SocketService from './services/SocketService';
+import { closeRedis } from './config/redis';
 
 // Import application after credentials are configured
 const app = require('./app').default || require('./app');
 const { connectDB } = require('./config/db');
 
 const PORT = parseInt(process.env.PORT || '5000', 10);
+const WORKER_ID = process.env.WORKER_ID || process.pid;
 
 const httpServer = http.createServer(app);
 
-// Initialize Socket.IO
+// Initialize Socket.IO with Redis adapter
 SocketService.init(httpServer);
 
 const server = httpServer.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on http://0.0.0.0:${PORT}`);
+  console.log(`✅ [Worker ${WORKER_ID}] Server running on http://0.0.0.0:${PORT}`);
 });
+
+// Increase max connections for high traffic
+server.maxConnections = 10000;
 
 connectDB().then(async () => {
   // Initialize attendance auto-sync cron after DB is ready
@@ -64,7 +69,26 @@ connectDB().then(async () => {
   console.error('Database connection failed at startup:', err);
 });
 
-process.on('SIGINT', () => {
-  server.close(() => process.exit(0));
-});
+// Graceful shutdown
+const shutdown = async (signal: string) => {
+  console.log(`\n🛑 ${signal} received. Shutting down gracefully...`);
+  
+  // Stop accepting new connections
+  server.close(() => {
+    console.log('✅ HTTP server closed');
+  });
+
+  // Close Redis connections
+  await closeRedis();
+
+  // Close MongoDB connection
+  const mongoose = require('mongoose');
+  await mongoose.connection.close();
+  console.log('✅ MongoDB connection closed');
+
+  process.exit(0);
+};
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 

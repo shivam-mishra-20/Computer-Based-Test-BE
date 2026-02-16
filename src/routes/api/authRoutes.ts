@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { register, login, me, publicRegister, publicTeacherRegister, changePassword, updateProfile, uploadProfileImage } from '../../controllers/authController';
 import { authMiddleware } from '../../middlewares/authMiddleware';
+import { authLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
 import multer from 'multer';
 
 const router = Router();
@@ -20,15 +21,15 @@ const upload = multer({
   }
 });
 
-// POST endpoints used by clients
-router.post('/register', register);
-router.post('/public-register', publicRegister);
-router.post('/public-register-teacher', publicTeacherRegister);
-router.post('/login', login);
+// POST endpoints used by clients (with rate limiting)
+router.post('/register', authLimiter, register);
+router.post('/public-register', authLimiter, publicRegister);
+router.post('/public-register-teacher', authLimiter, publicTeacherRegister);
+router.post('/login', authLimiter, login);
 router.get('/me', authMiddleware, me);
 router.post('/change-password', authMiddleware, changePassword);
 router.patch('/profile', authMiddleware, updateProfile);
-router.post('/profile/image', authMiddleware, upload.single('image'), uploadProfileImage);
+router.post('/profile/image', authMiddleware, uploadLimiter, upload.single('image'), uploadProfileImage);
 
 // Provide helpful responses for accidental browser GETs (avoid 404 spam)
 router.get('/register', (_req, res) => {
