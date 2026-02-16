@@ -58,7 +58,58 @@ app.use(globalLimiter);
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
-app.use(cors());
+
+// CORS configuration - allow credentials and Authorization header
+// When credentials is true, origin cannot be '*', so we use a function to dynamically allow origins
+const allowedOrigins = process.env.CORS_ORIGIN 
+	? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
+	: [
+		'http://localhost:3000', 
+		'http://localhost:3001', 
+		'http://127.0.0.1:3000', 
+		'http://localhost:5173',
+		'https://computer-based-test.vercel.app',
+		'https://computer-based-test-be-production.up.railway.app'
+	];
+
+app.use(cors({
+	origin: (origin, callback) => {
+		// Allow requests with no origin (like mobile apps, Postman, curl, native apps)
+		if (!origin) return callback(null, true);
+		
+		// Allow all origins if CORS_ORIGIN is explicitly set to '*'
+		if (process.env.CORS_ORIGIN === '*') return callback(null, true);
+		
+		// Check if origin is in allowed list
+		if (allowedOrigins.includes(origin)) {
+			return callback(null, true);
+		}
+		
+		// For development, allow localhost with any port
+		if (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:')) {
+			return callback(null, true);
+		}
+		
+		// Allow Railway preview deployments
+		if (origin.includes('.railway.app') || origin.includes('.up.railway.app')) {
+			return callback(null, true);
+		}
+		
+		// Allow Vercel deployments
+		if (origin.includes('.vercel.app')) {
+			return callback(null, true);
+		}
+		
+		// Log rejected origins for debugging
+		console.warn('[CORS] Rejected origin:', origin);
+		callback(new Error('Not allowed by CORS'));
+	},
+	credentials: true,
+	allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+	exposedHeaders: ['Content-Range', 'X-Content-Range'],
+	methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
+}));
+
 // Helmet with CSP disabled to avoid devtools CSP console noise on API root
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(morgan('dev'));
