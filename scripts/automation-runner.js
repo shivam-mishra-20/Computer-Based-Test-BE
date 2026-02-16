@@ -2,6 +2,7 @@ const axios = require('axios');
 const fs = require('fs').promises;
 const path = require('path');
 const EPUBParser = require('./epub-parser');
+const PDFParser = require('./pdf-parser');
 const AIEnhancer = require('./ai-enhancer');
 
 const CONFIG = {
@@ -15,7 +16,8 @@ const CONFIG = {
 
 class AutomationRunner {
   constructor() {
-    this.parser = new EPUBParser();
+    this.epubParser = new EPUBParser();
+    this.pdfParser = new PDFParser();
     this.aiEnhancer = new AIEnhancer();
     this.stats = {
       booksProcessed: 0,
@@ -41,18 +43,18 @@ class AutomationRunner {
         return;
       }
 
-      // Step 2: Scan for EPUB files
-      const epubFiles = await this.scanEPUBFiles();
-      console.log(`📚 Found ${epubFiles.length} EPUB file(s)\n`);
+      // Step 2: Scan for EPUB and PDF files
+      const files = await this.scanFiles();
+      console.log(`📚 Found ${files.length} file(s) to process\n`);
 
-      if (epubFiles.length === 0) {
+      if (files.length === 0) {
         console.log('✅ No new books to process. Exiting...');
         return;
       }
 
       // Step 3: Process each book
-      for (const epubFile of epubFiles) {
-        await this.processBook(epubFile);
+      for (const file of files) {
+        await this.processBook(file);
       }
 
       // Step 4: Report summary
@@ -109,19 +111,20 @@ class AutomationRunner {
     }
   }
 
-  async scanEPUBFiles() {
+  async scanFiles() {
     const folderPath = path.join(CONFIG.baseFolder, CONFIG.targetFolder);
     
     try {
       const files = await fs.readdir(folderPath);
-      const epubFiles = files
-        .filter(file => file.endsWith('.epub'))
+      const bookFiles = files
+        .filter(file => file.endsWith('.epub') || file.endsWith('.pdf'))
         .map(file => ({
           fileName: file,
-          filePath: path.join(folderPath, file)
+          filePath: path.join(folderPath, file),
+          fileType: file.endsWith('.epub') ? 'epub' : 'pdf'
         }));
 
-      return epubFiles;
+      return bookFiles;
 
     } catch (error) {
       console.error(`❌ Failed to scan folder ${folderPath}:`, error.message);
@@ -129,16 +132,17 @@ class AutomationRunner {
     }
   }
 
-  async processBook(epubFile) {
-    console.log(`\n📖 Processing: ${epubFile.fileName}`);
+  async processBook(bookFile) {
+    console.log(`\n📖 Processing: ${bookFile.fileName} (${bookFile.fileType.toUpperCase()})`);
     console.log('─'.repeat(60));
 
     let recordId = null;
 
     try {
-      // Step 1: Parse EPUB
-      console.log('1️⃣  Parsing EPUB...');
-      const parsed = await this.parser.parse(epubFile.filePath);
+      // Step 1: Parse file based on type
+      console.log(`1️⃣  Parsing ${bookFile.fileType.toUpperCase()}...`);
+      const parser = bookFile.fileType === 'epub' ? this.epubParser : this.pdfParser;
+      const parsed = await parser.parse(bookFile.filePath);
 
       if (!parsed.questions || parsed.questions.length === 0) {
         console.log('⚠️  No questions found in this book. Skipping...');
@@ -153,7 +157,7 @@ class AutomationRunner {
           title: parsed.metadata.title,
           subject: parsed.metadata.subject,
           board: this.extractBoard(parsed.metadata.title),
-          class: this.extractClass(epubFile.fileName),
+          class: this.extractClass(bookFile.fileName),
           chapter: 'General', // Will be inferred by AI
           topic: 'General'
         }
@@ -168,7 +172,7 @@ class AutomationRunner {
 
       // Step 3: Create processing record
       console.log('3️⃣  Creating processing record...');
-      recordId = await this.createProcessingRecord(epubFile, parsed);
+      recordId = await this.createProcessingRecord(bookFile, parsed);
 
       // Step 4: Import enhanced questions in batches
       console.log(`4️⃣  Importing ${enhancedQuestions.length} questions...`);
@@ -191,11 +195,11 @@ class AutomationRunner {
       this.stats.totalQuestions += enhancedQuestions.length;
       this.stats.totalImported += imported.count;
 
-      console.log(`✅ Successfully processed: ${epubFile.fileName}`);
+      console.log(`✅ Successfully processed: ${bookFile.fileName}`);
       console.log(`   Questions: ${imported.count}/${enhancedQuestions.length} imported`);
 
     } catch (error) {
-      console.error(`❌ Failed to process ${epubFile.fileName}:`, error.message);
+      console.error(`❌ Failed to process ${bookFile.fileName}:`, error.message);
 
       // Update processing record with failure
       if (recordId) {
@@ -210,18 +214,18 @@ class AutomationRunner {
     }
   }
 
-  async createProcessingRecord(epubFile, parsed) {
+  async createProcessingRecord(bookFile, parsed) {
     try {
       const response = await axios.post(
         `${CONFIG.backendUrl}/api/automation/record`,
         {
-          fileName: epubFile.fileName,
-          filePath: epubFile.filePath,
+          fileName: bookFile.fileName,
+          filePath: bookFile.filePath,
           bookMetadata: {
             title: parsed.metadata.title,
             author: parsed.metadata.author,
             subject: parsed.metadata.subject,
-            class: this.extractClass(epubFile.fileName),
+            class: this.extractClass(bookFile.fileName),
             board: this.extractBoard(parsed.metadata.title)
           }
         },

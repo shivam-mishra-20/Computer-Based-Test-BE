@@ -1,4 +1,4 @@
-import mongoose, { Document, Schema } from 'mongoose';
+import mongoose, { Document, Schema, Model } from 'mongoose';
 
 export interface IAutomationStatus extends Document {
   isEnabled: boolean;
@@ -37,8 +37,9 @@ const AutomationStatusSchema = new Schema<IAutomationStatus>(
   }
 );
 
-// Prevent model overwrite error
-export const AutomationStatus = mongoose.models.AutomationStatus || 
+// Prevent model overwrite error with proper typing
+const AutomationStatus: Model<IAutomationStatus> = (mongoose.models.AutomationStatus as Model<IAutomationStatus>) || 
   mongoose.model<IAutomationStatus>('AutomationStatus', AutomationStatusSchema);
 
+export { IAutomationStatus };
 export default AutomationStatus;

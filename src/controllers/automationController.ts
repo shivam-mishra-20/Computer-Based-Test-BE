@@ -1,8 +1,8 @@
 import { Request, Response } from 'express';
 import { saveBatchValidatedQuestions, EnhancedQuestionData } from '../services/questionValidationService';
-import { Types } from 'mongoose';
+import { Types, Model } from 'mongoose';
 import mongoose from 'mongoose';
-import AutomationStatus from '../models/AutomationStatus';
+import AutomationStatusModel, { IAutomationStatus } from '../models/AutomationStatus';
 import { ChildProcess } from 'child_process';
 
 // Track the current running process
@@ -52,8 +52,12 @@ const processingStatsSchema = new mongoose.Schema<IProcessingStats>({
   }
 }, { timestamps: true });
 
-const ProcessingStats = mongoose.models.ProcessingStats || 
+// Properly type the model to avoid union type issues
+const ProcessingStats: Model<IProcessingStats> = (mongoose.models.ProcessingStats as Model<IProcessingStats>) || 
   mongoose.model<IProcessingStats>('ProcessingStats', processingStatsSchema);
+
+// Use the imported AutomationStatus model with proper typing
+const AutomationStatus: Model<IAutomationStatus> = AutomationStatusModel;
 
 /**
  * Bulk Import Questions (called by n8n or manual trigger)
@@ -573,14 +577,14 @@ export const getAvailableFolders = async (req: Request, res: Response) => {
         const stats = fs.statSync(folderPath);
         
         if (stats.isDirectory()) {
-          // Count EPUB files
+          // Count EPUB and PDF files
           const files = fs.readdirSync(folderPath);
-          const epubFiles = files.filter((f: string) => f.endsWith('.epub'));
+          const bookFiles = files.filter((f: string) => f.endsWith('.epub') || f.endsWith('.pdf'));
           
           folders.push({
             name: item,
             path: folderPath,
-            fileCount: epubFiles.length
+            fileCount: bookFiles.length
           });
         }
       }
