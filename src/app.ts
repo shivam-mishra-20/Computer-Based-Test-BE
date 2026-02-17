@@ -69,6 +69,7 @@ const allowedOrigins = process.env.CORS_ORIGIN
 		'http://127.0.0.1:3000', 
 		'http://localhost:5173',
 		'https://computer-based-test.vercel.app',
+		'https://examease-pi.vercel.app',
 		'https://computer-based-test-be-production.up.railway.app'
 	];
 
