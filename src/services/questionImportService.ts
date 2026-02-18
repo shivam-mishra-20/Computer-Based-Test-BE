@@ -85,19 +85,19 @@ export class QuestionImportService {
       chapter?: string;
       section?: string;
       marks?: number;
-      model?: 'gemini-2.5-flash' | 'gemini-2.5-pro';
+      model?: 'gemini-2.5-flash' | 'gemini-2.5-pro' | 'gemini-2.0-flash-thinking-exp-01-21';
     } = {}
   ): Promise<ImportResult> {
     const startTime = Date.now();
-    // Default to Gemini 2.5 Pro for best performance
-    let selectedModel = options.model || 'gemini-2.5-pro';
+    // Default to Gemini 2.0 Flash Thinking for best math accuracy
+    let selectedModel = options.model || 'gemini-2.0-flash-thinking-exp-01-21';
     
     console.log(`[Import] DEBUG: Received model = "${selectedModel}"`);
     
     // Strip "publishers/google/models/" prefix if present (frontend may send full path)
     if (selectedModel.includes('/')) {
       const originalModel = selectedModel;
-      selectedModel = (selectedModel.split('/').pop() || 'gemini-2.5-pro') as typeof selectedModel;
+      selectedModel = (selectedModel.split('/').pop() || 'gemini-2.0-flash-thinking-exp-01-21') as typeof selectedModel;
       console.log(`[Import] DEBUG: Stripped "${originalModel}" → "${selectedModel}"`);
     }
     
@@ -458,11 +458,11 @@ export class QuestionImportService {
       subject?: string;
       topic?: string;
       batchId: Types.ObjectId;
-      model?: 'gemini-2.5-flash' | 'gemini-2.5-pro' | 'gemini-2.0-flash' | 'gemini-3.0' | 'gemini-3.0-pro';
+      model?: 'gemini-2.5-flash' | 'gemini-2.5-pro' | 'gemini-2.0-flash' | 'gemini-2.0-flash-thinking-exp-01-21' | 'gemini-3.0' | 'gemini-3.0-pro';
     }
   ): Promise<ExtractedQuestion[]> {
     try {
-      const modelName = options.model || 'gemini-2.5-pro';
+      const modelName = options.model || 'gemini-2.0-flash-thinking-exp-01-21';
       console.log(`[Vertex AI] Using model: ${modelName}`);
       
       const vertexAI = getVertexAI();

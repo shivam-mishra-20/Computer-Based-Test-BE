@@ -17,7 +17,8 @@ const router = express.Router();
 // Configure multer for file uploads
 const storage = multer.diskStorage({
   destination: (req: Request, file: Express.Multer.File, cb: (error: Error | null, destination: string) => void) => {
-    const uploadDir = path.join(__dirname, '../../../uploads/imports');
+    // Use process.cwd() instead of __dirname for correct path resolution in bundled code
+    const uploadDir = path.join(process.cwd(), 'uploads', 'imports');
     if (!fs.existsSync(uploadDir)) {
       fs.mkdirSync(uploadDir, { recursive: true });
     }
