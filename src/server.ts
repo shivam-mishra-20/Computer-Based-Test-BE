@@ -14,13 +14,31 @@ import { existsSync, writeFileSync, readFileSync } from 'fs';
   if (renderBase64) {
     try {
       const outPath = '/tmp/vision-key.json';
-      const decoded = Buffer.from(renderBase64, 'base64').toString('utf8');
+      let decoded = Buffer.from(renderBase64, 'base64').toString('utf8');
+      
+      // Normalize line endings: CRLF (\r\n) -> LF (\n)
+      // This prevents OpenSSL "DECODER routines::unsupported" errors
+      decoded = decoded.replace(/\r\n/g, '\n');
+      
+      // Validate JSON structure before writing
+      try {
+        const parsed = JSON.parse(decoded);
+        if (!parsed.private_key || !parsed.project_id) {
+          throw new Error('Invalid Google credentials: missing required fields');
+        }
+        console.log(`Google credentials validated: project=${parsed.project_id}`);
+      } catch (parseErr) {
+        console.error('Failed to parse Google credentials JSON:', parseErr);
+        throw parseErr;
+      }
+      
       writeFileSync(outPath, decoded, { encoding: 'utf8' });
       process.env.GOOGLE_APPLICATION_CREDENTIALS = outPath;
-      console.log('Using Render Google credentials: /tmp/vision-key.json');
+      console.log('Using Render/Railway Google credentials: /tmp/vision-key.json');
       return;
     } catch (err) {
-      console.error('Failed to write Render Google credentials:', err);
+      console.error('Failed to load production Google credentials:', err);
+      console.error('Make sure GOOGLE_APPLICATION_CREDENTIALS_BASE64 is properly base64-encoded');
       process.exit(1);
     }
   }

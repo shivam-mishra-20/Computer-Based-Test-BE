@@ -7,11 +7,121 @@ const DiagramExtractorPDF = require('../src/services/diagramExtractorPDF');
 
 /**
  * PDF Question Parser with Diagram Extraction
- * Handles both text-based and scanned PDFs
+ * Handles both text-based and scanned PDFs with OCR support
  */
 class PDFParser {
   constructor() {
     this.diagramExtractor = null;
+    this.minCharactersPerPage = 50; // Threshold to detect scanned PDFs
+  }
+
+  /**
+   * Extract text using OCR for scanned PDFs
+   * Uses Google Cloud Vision API (same as Smart Import)
+   * Processes in batches of 5 pages (Vision API limit)
+   * @param {Buffer} pdfBuffer - PDF buffer
+   * @param {number} totalPages - Total number of pages
+   * @returns {Promise<string>} - Extracted text from all pages
+   */
+  async extractTextWithOCR(pdfBuffer, totalPages) {
+    console.log('[PDF Parser] Using Google Cloud Vision API for scanned PDF...');
+    
+    try {
+      const { ImageAnnotatorClient } = require('@google-cloud/vision');
+      const client = new ImageAnnotatorClient();
+      
+      const maxPagesPerBatch = 5; // Vision API limit
+      const pagesToProcess = Math.min(totalPages, 50); // Overall limit
+      const pageTexts = [];
+      
+      console.log(`[PDF Parser] Processing ${pagesToProcess} pages in batches of ${maxPagesPerBatch}...`);
+      
+      // Process pages in batches of 5
+      for (let startPage = 1; startPage <= pagesToProcess; startPage += maxPagesPerBatch) {
+        const endPage = Math.min(startPage + maxPagesPerBatch - 1, pagesToProcess);
+        const batchPages = Array.from(
+          { length: endPage - startPage + 1 },
+          (_, i) => startPage + i
+        );
+        
+        console.log(`[PDF Parser] Processing pages ${startPage}-${endPage}...`);
+        
+        // Use batchAnnotateFiles for this batch
+        const request = {
+          requests: [
+            {
+              inputConfig: {
+                content: pdfBuffer,
+                mimeType: 'application/pdf',
+              },
+              features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
+              pages: batchPages,
+            },
+          ],
+        };
+        
+        try {
+          const [response] = await client.batchAnnotateFiles(request);
+          
+          if (!response.responses || response.responses.length === 0) {
+            console.warn(`[PDF Parser] No responses for batch ${startPage}-${endPage}`);
+            continue;
+          }
+          
+          // Extract text from each page in this batch
+          for (const fileResponse of response.responses) {
+            if (fileResponse.responses) {
+              for (const pageResponse of fileResponse.responses) {
+                const fullText = pageResponse.fullTextAnnotation;
+                if (fullText && fullText.text) {
+                  pageTexts.push(fullText.text);
+                  console.log(`[PDF Parser] Page ${pageTexts.length}: Extracted ${fullText.text.length} characters`);
+                } else {
+                  pageTexts.push('');
+                  console.log(`[PDF Parser] Page ${pageTexts.length + 1}: No text detected`);
+                }
+              }
+            }
+          }
+        } catch (batchError) {
+          console.error(`[PDF Parser] Error processing batch ${startPage}-${endPage}:`, batchError.message);
+          // Add empty strings for failed pages
+          for (let i = 0; i < batchPages.length; i++) {
+            pageTexts.push('');
+          }
+        }
+      }
+      
+      const combinedText = pageTexts
+        .map((text, idx) => `\n\n=== PAGE ${idx + 1} ===\n${text}`)
+        .join('\n');
+      
+      console.log(`[PDF Parser] ✅ Total extracted: ${combinedText.length} characters from ${pageTexts.length} pages`);
+      
+      if (combinedText.length < 100) {
+        throw new Error('Insufficient text extracted from PDF via Vision API');
+      }
+      
+      return combinedText;
+      
+    } catch (error) {
+      console.error('[PDF Parser] Vision API OCR failed:', error.message);
+      
+      // Provide helpful error message
+      const errorMsg = `Failed to extract text from scanned PDF using Google Cloud Vision API.
+
+Error: ${error.message}
+
+Troubleshooting:
+1. Ensure GOOGLE_APPLICATION_CREDENTIALS is set in your .env file
+2. Verify the credentials file exists: ${process.env.GOOGLE_APPLICATION_CREDENTIALS || './vision-key.json'}
+3. Check that Vision API is enabled in your Google Cloud project: https://console.cloud.google.com/apis/library/vision.googleapis.com
+4. Ensure the service account has Vision API permissions
+
+Current credentials path: ${process.env.GOOGLE_APPLICATION_CREDENTIALS || 'NOT SET'}`;
+      
+      throw new Error(errorMsg);
+    }
   }
 
   /**
@@ -116,10 +226,21 @@ class PDFParser {
     try {
       console.log('[PDF Parser] Extracting text from PDF...');
       const pdfData = await pdfParse(pdfBuffer);
-      const fullText = pdfData.text;
+      let fullText = pdfData.text;
       const totalPages = pdfData.numpages;
       
       console.log(`[PDF Parser] PDF has ${totalPages} pages, ${fullText.length} characters`);
+      
+      // Detect if this is a scanned/image-based PDF (very few characters extracted)
+      const avgCharsPerPage = fullText.length / totalPages;
+      const isScannedPDF = avgCharsPerPage < this.minCharactersPerPage;
+      
+      if (isScannedPDF) {
+        console.log(`[PDF Parser] ⚠️  Detected scanned PDF (avg ${Math.round(avgCharsPerPage)} chars/page)`);
+        console.log('[PDF Parser] Switching to OCR extraction...');
+        fullText = await this.extractTextWithOCR(pdfBuffer, totalPages);
+        console.log(`[PDF Parser] OCR extracted ${fullText.length} characters`);
+      }
       
       // Split text by pages (approximate - pdf-parse doesn't provide page breaks reliably)
       // We'll use line breaks and common patterns

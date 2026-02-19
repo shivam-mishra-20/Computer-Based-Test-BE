@@ -376,7 +376,8 @@ export class QuestionImportService {
 
   /**
    * Strict, order-preserving question parser (no paraphrasing)
-   * - Detects questions by numbering patterns (Q1., 1., 1), etc.)
+   * - Detects questions by numbering patterns (Q1., 1., 1), 3a, 3b, etc.)
+   * - Handles sub-questions (a, b, c, d, i, ii, iii, iv)
    * - Captures options (a)/(b)/(c)/(d) formats when present
    * - Uses exact substrings from the OCR text to ensure 1:1 fidelity
    */
@@ -385,31 +386,40 @@ export class QuestionImportService {
     opts: { subject?: string; topic?: string }
   ): ExtractedQuestion[] {
     const text = extractedText.replace(/\r\n/g, '\n');
-    // Common question header patterns: Q1., Q1), Q 1., 1., 1), 1 -, 1:
-    const qHeader = /(^|\n)\s*(?:Q\s*)?(\d{1,3})\s*(?:[\.:\)]|\s*-\s*|\s+)/g;
+    
+    // Enhanced question header patterns to capture sub-questions
+    // Matches: Q1., 1., 1), 3a., 3b), 4(a), 4(b), 5i., 5ii), etc.
+    const qHeader = /(^|\n)\s*(?:Q\s*)?(\d{1,3}(?:[a-z]|[ivxl]{1,4}|\([a-z]\)|\s[a-z])?)\s*(?:[\.:\)]|\s*-\s*|\s+)/gi;
     const indices: Array<{ num: string; start: number; end?: number }> = [];
     let m: RegExpExecArray | null;
     while ((m = qHeader.exec(text)) !== null) {
       const idxStart = m.index + (m[1] ? m[1].length : 0);
-      indices.push({ num: m[2], start: idxStart });
+      const questionNum = m[2].trim();
+      indices.push({ num: questionNum, start: idxStart });
     }
     if (!indices.length) return [];
+    
     // Determine segment ranges
     for (let i = 0; i < indices.length; i++) {
       indices[i].end = i < indices.length - 1 ? indices[i + 1].start : text.length;
     }
+    
     const questions: ExtractedQuestion[] = [];
     const optionLine = /^(?:\s*[\(\[]?[a-dA-D][\)\].]|\s*[a-dA-D][\.)]\s)/; // (a), a), a.
     const normalize = (s: string) => s.replace(/[\t\f\v\r]+/g, ' ').replace(/\s+$/g, '').replace(/^\s+/g, '');
+    
     for (const seg of indices) {
       const raw = text.slice(seg.start!, seg.end!);
+      
       // Split into lines but keep exact content overall
       const lines = raw.split(/\n/);
+      
       // First line likely contains question number already consumed; use entire segment as text baseline
       // Extract options as consecutive lines starting from where option pattern begins
       const optsStart = lines.findIndex(l => optionLine.test(l));
       let qText = raw;
       let options: ExtractedQuestion['options'] | undefined = undefined;
+      
       if (optsStart >= 0) {
         const before = lines.slice(0, optsStart).join('\n');
         const optsLines: string[] = [];
@@ -491,6 +501,34 @@ that can be safely stored, displayed, and reused for exams, PDFs, and question b
 - ONLY add LaTeX markup around mathematical expressions using $...$
 - COMPLETE THE ENTIRE OUTPUT - do not stop until all questions are extracted
 
+📌 SUB-QUESTIONS / SUB-PARTS HANDLING (CRITICAL):
+When you encounter questions with sub-parts (e.g., question 3 with parts a, b, c), treat EACH sub-part as a SEPARATE question:
+
+Example Input:
+3. Find the perimeter of each of the following triangles whose sides are given by:
+   a. 2x + 3y + 3z, 4x − 4y + 2z, 6x + y − 2z
+   b. 7x² + 6x + 3, 8x² − 4x + 7, 6x² − 4x + 9
+
+CORRECT Output (2 separate question blocks):
+------------------------------------
+QUESTION_NUMBER: 3a
+QUESTION_TEXT: Find the perimeter of each of the following triangles whose sides are given by: $2x + 3y + 3z$, $4x - 4y + 2z$, $6x + y - 2z$
+QUESTION_TYPE: short
+...
+------------------------------------
+QUESTION_NUMBER: 3b
+QUESTION_TEXT: Find the perimeter of each of the following triangles whose sides are given by: $7x^2 + 6x + 3$, $8x^2 - 4x + 7$, $6x^2 - 4x + 9$
+QUESTION_TYPE: short
+...
+------------------------------------
+
+SUB-QUESTION RULES:
+1. Each sub-part (a, b, c, d, etc.) becomes a SEPARATE question block
+2. Combine the parent question text + specific sub-part into QUESTION_TEXT
+3. Use question numbers like "3a", "3b", "4a", "4b", "5i", "5ii" etc.
+4. Do NOT repeat just the parent question - include the SPECIFIC sub-part data
+5. If a question has 4 sub-parts (a, b, c, d), you MUST create 4 separate blocks
+
 Return output in the EXACT format below.
 Repeat the block for EACH AND EVERY question.
 
@@ -526,6 +564,9 @@ RULES (STRICT):
 - If an option doesn't exist, write EMPTY
 - EXTRACT ALL QUESTIONS - Count them in the source and match that count exactly
 - Do NOT stop generating until you've processed every question
+- For questions with sub-parts (3a, 3b, 4a, 4b), create SEPARATE blocks for EACH sub-part
+- ALWAYS combine parent question + sub-part text into complete QUESTION_TEXT
+- Question numbers can be: "1", "2a", "2b", "3i", "3ii", "4(a)", "4(b)" etc.
 
 LATEX FORMATTING:
 - Use $...$ for inline math (e.g., $x^2 + 5x + 6 = 0$)
@@ -680,6 +721,25 @@ TOPIC: Calculus
 DIFFICULTY: easy
 
 CONFIDENCE: 0.95
+NEEDS_REVIEW: false
+------------------------------------
+QUESTION_NUMBER: 5a
+QUESTION_TEXT: Simplify the following: $(-x^2) + (-x^2) + (-6x^2)$
+QUESTION_TYPE: short
+
+OPTION_A: EMPTY
+OPTION_B: EMPTY
+OPTION_C: EMPTY
+OPTION_D: EMPTY
+
+CORRECT_OPTION: UNKNOWN
+CORRECT_ANSWER_TEXT: $-8x^2$
+
+SUBJECT: Mathematics
+TOPIC: Algebra
+DIFFICULTY: easy
+
+CONFIDENCE: 0.9
 NEEDS_REVIEW: false
 ------------------------------------
 
