@@ -9,6 +9,8 @@ import { Types } from 'mongoose';
 import { ImportBatch, ImportedQuestion, IImportedQuestion } from '../models/ImportedQuestion';
 import { saveBatchValidatedQuestions, EnhancedQuestionData, saveValidatedQuestion } from './questionValidationService';
 import { normalizeMathematicalExpressions } from './mathService';
+import { EnhancedPdfQuestionExtractor } from './enhancedPdfQuestionExtractor';
+import { EnhancedDiagramExtractor } from './enhancedDiagramExtractor';
 
 dotenv.config();
 
@@ -69,8 +71,8 @@ export interface ImportResult {
 export class QuestionImportService {
   
   /**
-   * Main entry point for importing question papers
-   * Enhanced with Gemini AI for accurate text extraction and LaTeX formatting
+   * Main entry point for importing question papers - ENHANCED VERSION
+   * Uses new robust extractor with deduplication and proper chapter detection
    */
   static async importQuestionPaper(
     filePath: string,
@@ -86,9 +88,22 @@ export class QuestionImportService {
       section?: string;
       marks?: number;
       model?: 'gemini-2.5-flash' | 'gemini-2.5-pro' | 'gemini-2.0-flash-thinking-exp-01-21';
+      useEnhancedExtractor?: boolean; // New option to use enhanced extractor
     } = {}
   ): Promise<ImportResult> {
     const startTime = Date.now();
+    
+    // Use enhanced extractor by default for PDFs
+    const useEnhanced = options.useEnhancedExtractor !== false && fileType === 'pdf';
+    
+    if (useEnhanced) {
+      console.log('[Import] Using ENHANCED PDF extractor (with deduplication & chunking)');
+      return await this.importWithEnhancedExtractor(filePath, fileName, uploadedBy, options);
+    }
+    
+    // Original implementation (fallback)
+    console.log('[Import] Using LEGACY extractor');
+    
     // Default to Gemini 2.0 Flash Thinking for best math accuracy
     let selectedModel = options.model || 'gemini-2.0-flash-thinking-exp-01-21';
     
@@ -246,6 +261,187 @@ export class QuestionImportService {
         }
       } catch (updateError) {
         console.error('Failed to update batch status:', updateError);
+      }
+
+      throw error;
+    }
+  }
+
+  /**
+   * Import questions using ENHANCED extractor (new robust implementation)
+   * Handles ALL questions, deduplication, proper chapter/topic naming, and figures
+   */
+  private static async importWithEnhancedExtractor(
+    filePath: string,
+    fileName: string,
+    uploadedBy: Types.ObjectId,
+    options: {
+      subject?: string;
+      topic?: string;
+      class?: string;
+      board?: string;
+      chapter?: string;
+      section?: string;
+      marks?: number;
+      model?: 'gemini-2.5-flash' | 'gemini-2.5-pro' | 'gemini-2.0-flash-thinking-exp-01-21';
+    }
+  ): Promise<ImportResult> {
+    const startTime = Date.now();
+    
+    try {
+      console.log(`[Enhanced Import] Starting import for file: ${fileName}`);
+      
+      // Create import batch
+      const fileStats = fs.statSync(filePath);
+      const batch = new ImportBatch({
+        fileName: path.basename(filePath),
+        originalFileName: fileName,
+        fileType: 'pdf',
+        fileSize: fileStats.size,
+        status: 'processing',
+        processingStarted: new Date(),
+        ocrProvider: 'google-vision',
+        processingModel: `vertex-ai-enhanced-${options.model || 'gemini-2.0-flash-thinking-exp-01-21'}`,
+        uploadedBy
+      });
+      
+      await batch.save();
+      console.log(`[Enhanced Import] Batch created with ID: ${batch._id}`);
+
+      // Read PDF buffer
+      const pdfBuffer = await fs.promises.readFile(filePath);
+
+      // Initialize enhanced extractor
+      const extractor = new EnhancedPdfQuestionExtractor(
+        pdfBuffer,
+        fileName,
+        uploadedBy,
+        {
+          subject: options.subject,
+          topic: options.topic,
+          class: options.class,
+          board: options.board,
+          chapter: options.chapter,
+          model: options.model
+        }
+      );
+
+      // Extract questions (this handles everything including deduplication)
+      console.log('[Enhanced Import] Extracting questions with enhanced extractor...');
+      const { questions, structure, stats } = await extractor.extract();
+      
+      console.log(`[Enhanced Import] ✓ Extraction complete:`);
+      console.log(`  - Total questions: ${stats.total}`);
+      console.log(`  - Duplicates removed: ${stats.duplicatesRemoved}`);
+      console.log(`  - Chapters detected: ${structure.chapters.length}`);
+      console.log(`  - Questions with diagrams: ${stats.withDiagrams}`);
+      console.log(`  - By type:`, stats.byType);
+      console.log(`  - By chapter:`, stats.byChapter);
+
+      // Update batch with metadata
+      batch.totalPages = structure.totalPages;
+      await batch.save();
+
+      // Normalize mathematical expressions
+      console.log('[Enhanced Import] Normalizing mathematical expressions...');
+      const normalizedQuestions = await this.normalizeQuestionsWithLaTeX(questions);
+
+      // Save questions to database
+      console.log('[Enhanced Import] Saving questions to database...');
+      const savedQuestions = await this.saveQuestions(
+        normalizedQuestions,
+        batch._id as Types.ObjectId,
+        uploadedBy,
+        {
+          class: options.class || structure.className,
+          board: options.board || structure.board,
+          chapter: options.chapter,
+          section: options.section,
+          marks: options.marks
+        }
+      );
+
+      console.log(`[Enhanced Import] Saved ${savedQuestions.length} questions`);
+
+      // Update imports collection (aggregate)
+      try {
+        const { ImportModel } = await import('../models/Import');
+        const byKey = new Map<string, Types.ObjectId[]>();
+        for (const q of savedQuestions) {
+          const key = `${q.subject || 'Unknown'}::${q.topic || 'General'}`;
+          const arr = byKey.get(key) || [];
+          arr.push(q._id as Types.ObjectId);
+          byKey.set(key, arr);
+        }
+        for (const [key, ids] of byKey) {
+          const [subject, topic] = key.split('::');
+          await ImportModel.findOneAndUpdate(
+            { uploadedBy, subject, topic },
+            {
+              $setOnInsert: { uploadedBy, subject, topic },
+              $inc: { questionCount: ids.length },
+              $addToSet: { questionIds: { $each: ids } }
+            },
+            { upsert: true, new: true }
+          );
+        }
+      } catch (e) {
+        console.warn('[Enhanced Import] Failed to upsert Imports aggregate:', e);
+      }
+
+      // Update batch status with enhanced stats
+      const processingTime = Date.now() - startTime;
+      batch.status = 'completed';
+      batch.processingCompleted = new Date();
+      batch.totalQuestions = questions.length;
+      batch.processedQuestions = savedQuestions.length;
+      batch.totalProcessingTime = processingTime;
+      
+      // Add extraction stats to batch
+      (batch as any).extractionStats = {
+        duplicatesRemoved: stats.duplicatesRemoved,
+        chaptersDetected: structure.chapters.length,
+        withDiagrams: stats.withDiagrams,
+        byType: stats.byType,
+        byChapter: stats.byChapter
+      };
+      
+      await batch.save();
+
+      console.log(`[Enhanced Import] ✓ Import completed in ${processingTime}ms`);
+      console.log(`[Enhanced Import] Success rate: ${Math.round((savedQuestions.length / questions.length) * 100)}%`);
+
+      return {
+        success: true,
+        batchId: batch._id as Types.ObjectId,
+        totalQuestions: questions.length,
+        processedQuestions: savedQuestions.length,
+        errors: [],
+        processingTime
+      };
+
+    } catch (error) {
+      const processingTime = Date.now() - startTime;
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      
+      console.error('[Enhanced Import] Import failed:', errorMessage);
+      
+      // Try to update batch if it exists
+      try {
+        const batch = await ImportBatch.findOne({ 
+          fileName: path.basename(filePath), 
+          uploadedBy 
+        }).sort({ createdAt: -1 });
+        
+        if (batch) {
+          batch.status = 'failed';
+          batch.processingErrors = batch.processingErrors || [];
+          batch.processingErrors.push({ error: errorMessage, timestamp: new Date() });
+          batch.totalProcessingTime = processingTime;
+          await batch.save();
+        }
+      } catch (updateError) {
+        console.error('[Enhanced Import] Failed to update batch status:', updateError);
       }
 
       throw error;
