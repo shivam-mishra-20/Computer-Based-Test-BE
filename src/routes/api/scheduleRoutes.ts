@@ -6,6 +6,7 @@ import Leave from '../../models/Leave';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import { sendScheduleNotification, sendTeacherNotification } from '../../services/notificationService';
 import { initFirebaseAdmin } from '../../services/firebaseService';
+import { cacheMiddleware, invalidateCacheOn } from '../../utils/cacheHelpers';
 
 // Initialize Firebase Admin on module load
 let firebaseAdmin: any = null;
@@ -605,8 +606,8 @@ router.get('/institute-view', authMiddleware, async (req: Request, res: Response
   }
 });
 
-// Get current and next class for a user
-router.get('/live', authMiddleware, async (req: Request, res: Response) => {
+// Get current and next class for a user - Cached per user for 1 hour
+router.get('/live', authMiddleware, cacheMiddleware({ ttl: 3600, customKey: (req) => `schedule-live:user:${(req as any).user.id}` }), async (req: Request, res: Response) => {
   try {
     const authUser = (req as any).user;
     // Fetch full user details from DB to get classLevel and batch
@@ -1072,8 +1073,8 @@ router.get('/institute-view', authMiddleware, async (req: Request, res: Response
   }
 });
 
-// Create schedule
-router.post('/', authMiddleware, async (req: Request, res: Response) => {
+// Create schedule - Invalidates schedule caches
+router.post('/', authMiddleware, invalidateCacheOn({ patterns: ['schedule'] }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     if (!['admin', 'teacher'].includes(user.role)) {
@@ -1185,8 +1186,8 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
-// Update schedule
-router.put('/:scheduleId', authMiddleware, async (req: Request, res: Response) => {
+// Update schedule - Invalidates schedule caches
+router.put('/:scheduleId', authMiddleware, invalidateCacheOn({ patterns: ['schedule'] }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     if (!['admin', 'teacher'].includes(user.role)) {
@@ -1303,8 +1304,8 @@ router.get('/students', authMiddleware, async (req: Request, res: Response) => {
     res.status(500).json({ error: error.message });
   }
 });
-
-router.delete('/:scheduleId', authMiddleware, async (req: Request, res: Response) => {
+// Delete schedule - Invalidates schedule caches
+router.delete('/:scheduleId', authMiddleware, invalidateCacheOn({ patterns: ['schedule'] }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     if (!['admin', 'teacher'].includes(user.role)) {

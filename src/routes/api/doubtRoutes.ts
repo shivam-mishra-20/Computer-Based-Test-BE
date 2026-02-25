@@ -156,21 +156,15 @@ router.get('/student/my-doubts', authMiddleware, async (req: AuthRequest, res: R
       };
     });
 
-    // Regenerate signed URLs for attachments
+    // Convert to public URLs (no regeneration needed)
     for (const doubt of doubtsWithTeacher as any[]) {
       if (doubt.messages && doubt.messages.length > 0) {
         for (const message of doubt.messages) {
           if (message.attachments && message.attachments.length > 0) {
             for (const attachment of message.attachments) {
-              try {
-                const blob = bucket.file(attachment.storagePath);
-                const [signedUrl] = await blob.getSignedUrl({
-                  action: 'read',
-                  expires: Date.now() + 15 * 60 * 1000
-                });
-                attachment.url = signedUrl;
-              } catch (err) {
-                console.error(`Error generating URL for attachment:`, err);
+              // Ensure URL is public URL format
+              if (!attachment.url || !attachment.url.startsWith('https://storage.googleapis.com')) {
+                attachment.url = `https://storage.googleapis.com/${bucket.name}/${attachment.storagePath}`;
               }
             }
           }
@@ -266,21 +260,15 @@ router.get('/teacher', authMiddleware, async (req: AuthRequest, res: Response) =
       }, null, 2));
     }
 
-    // Regenerate signed URLs for attachments
+    // Convert to public URLs (no regeneration needed)
     for (const doubt of doubts as any[]) {
       if (doubt.messages && doubt.messages.length > 0) {
         for (const message of doubt.messages) {
           if (message.attachments && message.attachments.length > 0) {
             for (const attachment of message.attachments) {
-              try {
-                const blob = bucket.file(attachment.storagePath);
-                const [signedUrl] = await blob.getSignedUrl({
-                  action: 'read',
-                  expires: Date.now() + 15 * 60 * 1000
-                });
-                attachment.url = signedUrl;
-              } catch (err) {
-                console.error(`Error generating URL for attachment:`, err);
+              // Ensure URL is public URL format
+              if (!attachment.url || !attachment.url.startsWith('https://storage.googleapis.com')) {
+                attachment.url = `https://storage.googleapis.com/${bucket.name}/${attachment.storagePath}`;
               }
             }
           }
@@ -319,20 +307,14 @@ router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'Doubt not found' });
     }
 
-    // Regenerate signed URLs for all attachments in messages
+    // Convert to public URLs (no regeneration needed)
     if (doubt.messages && doubt.messages.length > 0) {
       for (const message of doubt.messages) {
         if (message.attachments && message.attachments.length > 0) {
           for (const attachment of message.attachments) {
-            try {
-              const blob = bucket.file(attachment.storagePath);
-              const [signedUrl] = await blob.getSignedUrl({
-                action: 'read',
-                expires: Date.now() + 15 * 60 * 1000
-              });
-              attachment.url = signedUrl;
-            } catch (err) {
-              console.error(`Error generating URL for attachment ${attachment._id}:`, err);
+            // Ensure URL is public URL format
+            if (!attachment.url || !attachment.url.startsWith('https://storage.googleapis.com')) {
+              attachment.url = `https://storage.googleapis.com/${bucket.name}/${attachment.storagePath}`;
             }
           }
         }
@@ -499,22 +481,13 @@ router.post('/:id/messages', authMiddleware, messageLimiter, async (req: AuthReq
     
     console.log('[AddMessage] After save - Doubt teacher:', doubt.teacher, 'Messages count:', doubt.messages.length);
 
-    // Regenerate signed URLs for all attachments before sending via socket
+    // Convert to public URLs for all attachments before sending via socket
     if (populated && (populated as any).messages) {
       for (const msg of (populated as any).messages) {
         if (msg.attachments && msg.attachments.length > 0) {
           for (const attachment of msg.attachments) {
-            if (attachment.storagePath) {
-              try {
-                const blob = bucket.file(attachment.storagePath);
-                const [signedUrl] = await blob.getSignedUrl({
-                  action: 'read',
-                  expires: Date.now() + 60 * 60 * 1000 // 1 hour
-                });
-                attachment.url = signedUrl;
-              } catch (err) {
-                console.error('[AddMessage] Error generating signed URL:', err);
-              }
+            if (attachment.storagePath && (!attachment.url || !attachment.url.startsWith('https://storage.googleapis.com'))) {
+              attachment.url = `https://storage.googleapis.com/${bucket.name}/${attachment.storagePath}`;
             }
           }
         }

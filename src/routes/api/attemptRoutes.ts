@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
+import { cacheMiddleware, invalidateCacheOn } from '../../utils/cacheHelpers';
 import {
   getAttemptCtrl,
   listAssignedCtrl,
@@ -18,15 +19,18 @@ import {
 
 const router = Router();
 
-// Student: assigned exams
-router.get('/assigned', authMiddleware, requireRole('student'), listAssignedCtrl);
-router.post('/:examId/start', authMiddleware, requireRole('student'), startAttemptCtrl);
-// list current user's attempts (must come before /:attemptId)
-router.get('/mine', authMiddleware, requireRole('student'), listMyAttemptsCtrl);
+// Student: assigned exams - Cached per user for 3 minutes (180s)
+router.get('/assigned', authMiddleware, requireRole('student'), cacheMiddleware({ ttl: 180, customKey: (req) => `assigned-exams:user:${(req as any).user.id}` }), listAssignedCtrl);
+// Start exam - Invalidates assigned exams cache
+router.post('/:examId/start', authMiddleware, requireRole('student'), invalidateCacheOn({ patterns: ['assigned-exams', 'attempts'] }), startAttemptCtrl);
+// list current user's attempts (must come before /:attemptId) - Cached per user for 5 minutes
+router.get('/mine', authMiddleware, requireRole('student'), cacheMiddleware({ ttl: 300, customKey: (req) => `my-attempts:user:${(req as any).user.id}` }), listMyAttemptsCtrl);
 router.get('/:attemptId', authMiddleware, requireRole('student'), getAttemptCtrl);
-router.post('/:attemptId/answer', authMiddleware, requireRole('student'), saveAnswerCtrl);
+// Submit answer - Invalidates attempt cache
+router.post('/:attemptId/answer', authMiddleware, requireRole('student'), invalidateCacheOn({ patterns: ['attempts'] }), saveAnswerCtrl);
 router.post('/:attemptId/mark', authMiddleware, requireRole('student'), markForReviewCtrl);
-router.post('/:attemptId/submit', authMiddleware, requireRole('student'), submitAttemptCtrl);
+// Submit exam - Invalidates exam and attempt caches
+router.post('/:attemptId/submit', authMiddleware, requireRole('student'), invalidateCacheOn({ patterns: ['assigned-exams', 'attempts'] }), submitAttemptCtrl);
 router.post('/:attemptId/log', authMiddleware, requireRole('student'), logActivityCtrl);
 router.post('/:attemptId/next', authMiddleware, requireRole('student'), nextAdaptiveQuestionCtrl);
 router.get('/:attemptId/questions/:questionId/explanation', authMiddleware, requireRole('student'), (req, res, next) => {

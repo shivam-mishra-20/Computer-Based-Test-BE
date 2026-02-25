@@ -109,7 +109,7 @@ export const register = async (req: Request, res: Response) => {
   const user = new User({ name, email: lcEmail, password, role: 'student', status: 'approved' });
     await user.save();
 
-  const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET as string, { expiresIn: '365d' });
+  const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET as string, { expiresIn: '3650d' });
   res.status(201).json({ token, user: { id: user._id, name: user.name, email: user.email, role: user.role } });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
@@ -138,8 +138,8 @@ export const login = async (req: Request, res: Response) => {
         });
       }
       
-      // User is approved, generate token
-      const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET as string, { expiresIn: '365d' });
+      // User is approved, generate token (10 years - effectively permanent until manual logout)
+      const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET as string, { expiresIn: '3650d' });
       console.log(`Login debug: local auth succeeded for ${lcEmail}`);
       return res.json({ 
         token, 
@@ -187,7 +187,7 @@ export const login = async (req: Request, res: Response) => {
             if (fsUser.name && !local.name) local.name = fsUser.name;
           }
           await local.save();
-          const token = jwt.sign({ id: local._id, role: local.role }, process.env.JWT_SECRET as string, { expiresIn: '365d' });
+          const token = jwt.sign({ id: local._id, role: local.role }, process.env.JWT_SECRET as string, { expiresIn: '3650d' });
           // Login debug: firestore bcrypt authentication succeeded
           console.log(`Login debug: firestore-bcrypt auth succeeded for ${lcEmail} (uid=${local.firebaseUid || local._id})`);
           return res.json({ token, user: { id: local._id, name: local.name, email: local.email, role: local.role, classLevel: local.classLevel, batch: local.batch, firebaseUid: local.firebaseUid } });
@@ -220,7 +220,7 @@ export const login = async (req: Request, res: Response) => {
         if (profile.batch) local.batch = profile.batch;
       }
   await local.save();
-  const token = jwt.sign({ id: local._id, role: local.role }, process.env.JWT_SECRET as string, { expiresIn: '365d' });
+  const token = jwt.sign({ id: local._id, role: local.role }, process.env.JWT_SECRET as string, { expiresIn: '3650d' });
   // Login debug: firebase REST sign-in succeeded
   console.log(`Login debug: firebase-rest auth succeeded for ${lcEmail} (uid=${local.firebaseUid || local._id})`);
   return res.json({ token, user: { id: local._id, name: local.name, email: local.email, role: local.role, classLevel: local.classLevel, batch: local.batch, firebaseUid: local.firebaseUid } });

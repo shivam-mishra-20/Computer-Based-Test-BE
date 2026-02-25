@@ -108,15 +108,13 @@ export const uploadDoubtFile = async (req: AuthRequest, res: Response) => {
       blobStream.end(file.buffer);
     });
 
-    // Generate signed URL (expires in 7 days)
-    const [signedUrl] = await blob.getSignedUrl({
-      action: 'read',
-      expires: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
-    });
+    // Make file public and get permanent public URL
+    await blob.makePublic();
+    const publicUrl = `https://storage.googleapis.com/${bucket.name}/${storagePath}`;
 
     // Save metadata to MongoDB
     const fileMetadata = new FileMetadata({
-      url: signedUrl,
+      url: publicUrl,
       storagePath,
       fileName: file.originalname,
       fileType: file.mimetype,
@@ -138,7 +136,7 @@ export const uploadDoubtFile = async (req: AuthRequest, res: Response) => {
       success: true,
       file: {
         id: fileMetadata._id,
-        url: signedUrl,
+        url: publicUrl,
         fileName: file.originalname,
         fileType: file.mimetype,
         fileSize: file.size,
@@ -169,21 +167,19 @@ export const getFileSignedUrl = async (req: AuthRequest, res: Response) => {
       return res.status(404).json({ error: 'File not found' });
     }
 
-    // Generate new signed URL (expires in 15 minutes)
-    const blob = bucket.file(fileMetadata.storagePath);
-    const [signedUrl] = await blob.getSignedUrl({
-      action: 'read',
-      expires: Date.now() + 15 * 60 * 1000, // 15 minutes
-    });
+    // Return permanent public URL (no expiration)
+    const publicUrl = `https://storage.googleapis.com/${bucket.name}/${fileMetadata.storagePath}`;
 
-    // Update URL in database
-    fileMetadata.url = signedUrl;
-    await fileMetadata.save();
+    // Update URL in database if different
+    if (fileMetadata.url !== publicUrl) {
+      fileMetadata.url = publicUrl;
+      await fileMetadata.save();
+    }
 
     return res.json({
       success: true,
-      url: signedUrl,
-      expiresIn: '15 minutes',
+      url: publicUrl,
+      expiresIn: 'never',
     });
   } catch (error) {
     console.error('Error generating signed URL:', error);
@@ -254,25 +250,17 @@ export const getDoubtFiles = async (req: AuthRequest, res: Response) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    // Regenerate signed URLs for all files
-    const filesWithUrls = await Promise.all(
-      files.map(async (file: any) => {
-        try {
-          const blob = bucket.file(file.storagePath);
-          const [signedUrl] = await blob.getSignedUrl({
-            action: 'read',
-            expires: Date.now() + 15 * 60 * 1000, // 15 minutes
-          });
-          return {
-            ...file,
-            url: signedUrl,
-          };
-        } catch (err) {
-          console.error(`Error generating URL for file ${file._id}:`, err);
-          return file;
-        }
-      }),
-    );
+    // Use public URLs (no regeneration needed)
+    const filesWithUrls = files.map((file: any) => {
+      // Ensure URL is public URL format
+      const publicUrl = file.url.startsWith('http') 
+        ? file.url 
+        : `https://storage.googleapis.com/${bucket.name}/${file.storagePath}`;
+      return {
+        ...file,
+        url: publicUrl,
+      };
+    });
 
     return res.json({
       success: true,

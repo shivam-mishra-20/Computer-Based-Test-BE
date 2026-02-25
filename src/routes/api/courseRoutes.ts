@@ -2,11 +2,12 @@ import { Router, Request, Response } from 'express';
 import Course from '../../models/Course';
 import CourseProgress from '../../models/CourseProgress';
 import { authMiddleware } from '../../middlewares/authMiddleware';
+import { cacheMiddleware, invalidateCacheOn } from '../../utils/cacheHelpers';
 
 const router = Router();
 
-// Get all published courses (for students)
-router.get('/', authMiddleware, async (req: Request, res: Response) => {
+// Get all published courses (for students) - Cached for 5 minutes
+router.get('/', authMiddleware, cacheMiddleware({ ttl: 300 }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const { classLevel, subject, batch } = req.query;
@@ -54,8 +55,8 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
-// Get course details
-router.get('/:courseId', authMiddleware, async (req: Request, res: Response) => {
+// Get course details - Cached per user for 5 minutes
+router.get('/:courseId', authMiddleware, cacheMiddleware({ ttl: 300, customKey: (req) => `course:${req.params.courseId}:user:${(req as any).user.id}` }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const course = await Course.findById(req.params.courseId)
@@ -101,8 +102,8 @@ router.get('/:courseId', authMiddleware, async (req: Request, res: Response) => 
   }
 });
 
-// Enroll in a course
-router.post('/:courseId/enroll', authMiddleware, async (req: Request, res: Response) => {
+// Enroll in a course - Invalidates course cache and enrolled list
+router.post('/:courseId/enroll', authMiddleware, invalidateCacheOn({ patterns: ['courses', 'course:', 'enrolled'] }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const course = await Course.findById(req.params.courseId);
@@ -137,8 +138,8 @@ router.post('/:courseId/enroll', authMiddleware, async (req: Request, res: Respo
   }
 });
 
-// Update lecture progress
-router.post('/:courseId/progress', authMiddleware, async (req: Request, res: Response) => {
+// Update lecture progress - Invalidates enrolled courses cache
+router.post('/:courseId/progress', authMiddleware, invalidateCacheOn({ patterns: ['enrolled', 'course:'] }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const { lectureId, timeSpent } = req.body;
@@ -211,8 +212,8 @@ router.post('/:courseId/lectures/:lectureId/position', authMiddleware, async (re
   }
 });
 
-// Get video position for a lecture
-router.get('/:courseId/lectures/:lectureId/position', authMiddleware, async (req: Request, res: Response) => {
+// Get video position for a lecture - Cached per user and lecture for 1 hour
+router.get('/:courseId/lectures/:lectureId/position', authMiddleware, cacheMiddleware({ ttl: 3600, customKey: (req) => `lecture-position:${req.params.courseId}:${req.params.lectureId}:user:${(req as any).user.id}` }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const { courseId, lectureId } = req.params;
@@ -231,8 +232,8 @@ router.get('/:courseId/lectures/:lectureId/position', authMiddleware, async (req
   }
 });
 
-// Get enrolled courses with progress
-router.get('/my/enrolled', authMiddleware, async (req: Request, res: Response) => {
+// Get enrolled courses with progress - Cached per user for 5 minutes
+router.get('/my/enrolled', authMiddleware, cacheMiddleware({ ttl: 300, customKey: (req) => `enrolled:user:${(req as any).user.id}` }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     
@@ -262,8 +263,8 @@ router.get('/my/enrolled', authMiddleware, async (req: Request, res: Response) =
   }
 });
 
-// Admin: Create course
-router.post('/', authMiddleware, async (req: Request, res: Response) => {
+// Admin: Create course - Invalidates all course caches
+router.post('/', authMiddleware, invalidateCacheOn({ patterns: ['courses', 'course:'] }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     if (!['admin', 'teacher'].includes(user.role)) {
@@ -282,8 +283,8 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
-// Admin: Update course
-router.put('/:courseId', authMiddleware, async (req: Request, res: Response) => {
+// Admin: Update course - Invalidates course and enrolled caches
+router.put('/:courseId', authMiddleware, invalidateCacheOn({ patterns: ['courses', 'course:', 'enrolled'] }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     if (!['admin', 'teacher'].includes(user.role)) {
@@ -306,8 +307,8 @@ router.put('/:courseId', authMiddleware, async (req: Request, res: Response) => 
   }
 });
 
-// Admin: Delete course
-router.delete('/:courseId', authMiddleware, async (req: Request, res: Response) => {
+// Admin: Delete course - Invalidates all course caches
+router.delete('/:courseId', authMiddleware, invalidateCacheOn({ patterns: ['courses', 'course:', 'enrolled'] }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     if (!['admin', 'teacher'].includes(user.role)) {
