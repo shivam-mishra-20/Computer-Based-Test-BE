@@ -369,10 +369,19 @@ export const uploadProfileImage = async (req: Request, res: Response) => {
     const current = (req as any).user as { id: string; role?: string } | undefined;
     if (!current) return res.status(401).json({ message: 'Unauthorized' });
 
+    console.log('[UploadProfileImage] Request received from user:', current.id);
+
     const file = (req as any).file;
     if (!file) {
+      console.log('[UploadProfileImage] No file in request');
       return res.status(400).json({ message: 'No image file provided' });
     }
+
+    console.log('[UploadProfileImage] File details:', {
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size
+    });
 
     // Validate file type
     const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
@@ -385,7 +394,9 @@ export const uploadProfileImage = async (req: Request, res: Response) => {
     const fileName = `profile-images/${current.id}_${Date.now()}.${ext}`;
 
     // Upload to Firebase Storage
+    console.log('[UploadProfileImage] Uploading to Firebase Storage:', fileName);
     const imageUrl = await uploadToFirebase(file.buffer, fileName, file.mimetype);
+    console.log('[UploadProfileImage] Upload successful, URL:', imageUrl);
 
     // Update user's profile image URL
     const user = await User.findByIdAndUpdate(
@@ -411,6 +422,11 @@ export const uploadProfileImage = async (req: Request, res: Response) => {
     });
   } catch (err) {
     console.error('Upload profile image error:', err);
-    res.status(500).json({ message: 'Server error while uploading profile image' });
+    // Return more helpful error message
+    const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
+    res.status(500).json({ 
+      message: 'Failed to upload profile image', 
+      error: errorMessage 
+    });
   }
 };

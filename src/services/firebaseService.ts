@@ -268,6 +268,8 @@ export async function uploadToFirebase(
     return `https://storage.googleapis.com/${bucket.name}/${fileName}`;
   } catch (error) {
     console.error('Error uploading to Firebase Storage:', error);
-    throw new Error('Failed to upload file to Firebase Storage');
+    // Preserve actual error message for debugging
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    throw new Error(`Failed to upload to Firebase Storage: ${errorMessage}`);
   }
 }
