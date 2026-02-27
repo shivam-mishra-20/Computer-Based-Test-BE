@@ -201,10 +201,10 @@ router.get('/student/by-date/:date', authMiddleware, async (req: AuthRequest, re
       return res.status(403).json({ error: 'Student access required' });
     }
 
-    // Parse date and build UTC-safe day range
-    const [year, month, day] = req.params.date.split('-').map(Number);
-    const startOfDay = new Date(year, month - 1, day, 0, 0, 0, 0);
-    const endOfDay = new Date(year, month - 1, day, 23, 59, 59, 999);
+    // Build UTC-safe day range (covers 00:00:00Z to 23:59:59.999Z)
+    const dateStr = req.params.date; // "YYYY-MM-DD"
+    const startOfDay = new Date(`${dateStr}T00:00:00.000Z`);
+    const endOfDay = new Date(`${dateStr}T23:59:59.999Z`);
 
     // Fetch full student record to get classLevel and batch
     const student = await User.findById(req.user._id).select('classLevel batch name').lean();
@@ -225,10 +225,17 @@ router.get('/student/by-date/:date', authMiddleware, async (req: AuthRequest, re
     const normalizeClass = (val: string) => val?.replace(/^class\s*/i, '').trim();
     const studentClass = normalizeClass(classLevel);
 
-    // Find all EODs submitted on this date
+    // Find all EODs for this date — match date portion only (ignores stored time/timezone)
     const allEODs = await EOD.find({
-      date: { $gte: startOfDay, $lte: endOfDay }
+      $expr: {
+        $eq: [
+          { $dateToString: { format: '%Y-%m-%d', date: '$date', timezone: 'Asia/Kolkata' } },
+          dateStr
+        ]
+      }
     }).lean();
+
+    console.log(`[EOD Student] found ${allEODs.length} EODs for ${dateStr}`, allEODs.map((e: any) => ({ date: e.date, teacher: e.teacherName, classes: e.classes.map((c: any) => `${c.classLevel}/${c.batch}`) })));
 
     // Filter class reports matching student's class (and batch if available)
     const result = allEODs
