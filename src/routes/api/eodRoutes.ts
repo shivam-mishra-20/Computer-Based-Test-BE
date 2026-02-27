@@ -201,21 +201,25 @@ router.get('/student/by-date/:date', authMiddleware, async (req: AuthRequest, re
       return res.status(403).json({ error: 'Student access required' });
     }
 
-    const targetDate = new Date(req.params.date);
-    const startOfDay = new Date(targetDate);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(targetDate);
-    endOfDay.setHours(23, 59, 59, 999);
+    // Parse date and build UTC-safe day range
+    const [year, month, day] = req.params.date.split('-').map(Number);
+    const startOfDay = new Date(year, month - 1, day, 0, 0, 0, 0);
+    const endOfDay = new Date(year, month - 1, day, 23, 59, 59, 999);
 
-    // Get students class and batch
-    const student = await User.findOne({ firebaseUid: req.user.firebaseUid || req.user._id })
-      || await User.findById(req.user._id);
+    // Fetch full student record to get classLevel and batch
+    const student = await User.findById(req.user._id).select('classLevel batch name').lean();
 
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
     }
 
     const { classLevel, batch } = student as any;
+
+    console.log(`[EOD Student] _id=${req.user._id} classLevel=${classLevel} batch=${batch} date=${req.params.date}`);
+
+    if (!classLevel) {
+      return res.json([]); // Student has no class assigned yet
+    }
 
     // Find all EODs submitted on this date
     const allEODs = await EOD.find({
