@@ -192,6 +192,63 @@ router.get('/by-date/:date', authMiddleware, async (req: AuthRequest, res: Respo
   }
 });
 
+// ==================== STUDENT ROUTES ====================
+
+// GET - Get class reports for a specific date (Student view - filtered by class/batch)
+router.get('/student/by-date/:date', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (req.user?.role !== 'student') {
+      return res.status(403).json({ error: 'Student access required' });
+    }
+
+    const targetDate = new Date(req.params.date);
+    const startOfDay = new Date(targetDate);
+    startOfDay.setHours(0, 0, 0, 0);
+    const endOfDay = new Date(targetDate);
+    endOfDay.setHours(23, 59, 59, 999);
+
+    // Get students class and batch
+    const student = await User.findOne({ firebaseUid: req.user.firebaseUid || req.user._id })
+      || await User.findById(req.user._id);
+
+    if (!student) {
+      return res.status(404).json({ error: 'Student not found' });
+    }
+
+    const { classLevel, batch } = student as any;
+
+    // Find all EODs submitted on this date
+    const allEODs = await EOD.find({
+      date: { $gte: startOfDay, $lte: endOfDay }
+    }).lean();
+
+    // Filter class reports matching student's class (and batch if available)
+    const result = allEODs
+      .map((eod: any) => {
+        const matchingClasses = eod.classes.filter((cls: any) => {
+          const classMatch = cls.classLevel === classLevel;
+          const batchMatch = !batch || !cls.batch || cls.batch === batch;
+          return classMatch && batchMatch;
+        });
+        if (matchingClasses.length === 0) return null;
+        return {
+          _id: eod._id,
+          teacherName: eod.teacherName,
+          date: eod.date,
+          submittedAt: eod.submittedAt,
+          additionalNotes: eod.additionalNotes,
+          classes: matchingClasses,
+        };
+      })
+      .filter(Boolean);
+
+    res.json(result);
+  } catch (error: any) {
+    console.error('Error fetching student EODs:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ==================== ADMIN ROUTES ====================
 
 // GET - Get all EODs (Admin only)
