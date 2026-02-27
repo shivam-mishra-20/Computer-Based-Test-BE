@@ -221,6 +221,10 @@ router.get('/student/by-date/:date', authMiddleware, async (req: AuthRequest, re
       return res.json([]); // Student has no class assigned yet
     }
 
+    // Normalize classLevel for comparison (e.g. "Class 8" → "8", "8" → "8")
+    const normalizeClass = (val: string) => val?.replace(/^class\s*/i, '').trim();
+    const studentClass = normalizeClass(classLevel);
+
     // Find all EODs submitted on this date
     const allEODs = await EOD.find({
       date: { $gte: startOfDay, $lte: endOfDay }
@@ -230,7 +234,7 @@ router.get('/student/by-date/:date', authMiddleware, async (req: AuthRequest, re
     const result = allEODs
       .map((eod: any) => {
         const matchingClasses = eod.classes.filter((cls: any) => {
-          const classMatch = cls.classLevel === classLevel;
+          const classMatch = normalizeClass(cls.classLevel) === studentClass;
           const batchMatch = !batch || !cls.batch || cls.batch === batch;
           return classMatch && batchMatch;
         });
