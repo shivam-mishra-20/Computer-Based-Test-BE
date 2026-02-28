@@ -25,6 +25,9 @@ export const registerToken = async (req: Request, res: Response) => {
 // Get notifications for the authenticated user
 export const getUserNotifications = async (req: Request, res: Response) => {
   try {
+    // Disable caching so new notifications always show up
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
     const userId = (req as any).user?.id;
     const { read, type, limit = 50, skip = 0 } = req.query;
 
