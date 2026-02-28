@@ -1,4 +1,5 @@
 import { Expo, ExpoPushMessage } from 'expo-server-sdk';
+import Notification from '../models/Notification';
 import User from '../models/User';
 
 // Initialize Expo SDK
@@ -123,7 +124,7 @@ export async function sendTeacherNotification(
       sound: 'default',
       title,
       body,
-      data: { type: 'leave_update', screen: 'Leaves' },
+      data: { type: 'leave', role: 'teacher', screen: '/(teacher)/more' },
       priority: 'high',
       channelId: 'default',
     };
@@ -143,7 +144,7 @@ export async function sendTeacherNotification(
 }
 
 /**
- * Send push notifications to specific students
+ * Send push notifications to specific students and persist to DB
  * Supports both MongoDB ObjectIds and Firebase document IDs
  */
 export async function sendStudentNotifications(
@@ -162,20 +163,39 @@ export async function sendStudentNotifications(
     const mongoStudents = objectIds.length > 0 
       ? await User.find({
           _id: { $in: objectIds },
-          pushToken: { $exists: true, $ne: null }
-        }).select('pushToken')
+        }).select('_id pushToken')
       : [];
     
     // Find by Firebase IDs
     const firebaseStudents = firebaseIds.length > 0
       ? await User.find({
           firebaseUid: { $in: firebaseIds },
-          pushToken: { $exists: true, $ne: null }
-        }).select('pushToken')
+        }).select('_id pushToken')
       : [];
     
     const allStudents = [...mongoStudents, ...firebaseStudents];
-    const pushTokens = allStudents.map(s => s.pushToken).filter(t => Expo.isExpoPushToken(t));
+    
+    if (allStudents.length === 0) return;
+
+    const notifType = (type || 'general') as any;
+
+    // ── Persist all notifications to MongoDB ─────────────────────────────────
+    await Notification.insertMany(
+      allStudents.map((s) => ({
+        userId: s._id,
+        type: notifType,
+        title,
+        message: body,
+        data: data || {},
+        priority: 'medium',
+        read: false,
+      }))
+    );
+
+    // ── Send push notifications ───────────────────────────────────────────────
+    const pushTokens = allStudents
+      .map(s => s.pushToken)
+      .filter(t => t && Expo.isExpoPushToken(t));
     
     if (pushTokens.length === 0) return;
     
@@ -186,7 +206,7 @@ export async function sendStudentNotifications(
       priority: 'high',
       channelId: 'default',
       body,
-      data: data || { type: type || 'schedule_update' },
+      data: data || { type: notifType },
     }));
     
     const chunks = expo.chunkPushNotifications(messages);
@@ -204,8 +224,9 @@ export async function sendStudentNotifications(
 }
 
 /**
- * Create and send a notification to a specific user (or users)
- * This acts as a wrapper to unify notification logic if needed
+ * Create and send a notification to a specific user (or users).
+ * Always persists a Notification document to MongoDB so the in-app
+ * notification inbox is populated, then tries to send a push notification.
  */
 export async function createAndSendNotification(payload: {
   userId: string;
@@ -216,36 +237,51 @@ export async function createAndSendNotification(payload: {
 }) {
   try {
     const { userId, title, body, data, type } = payload;
-    
-    // Determine if userId is MongoDB or Firebase
+    const notifType = (type || 'general') as any;
+
+    // ── 1. Resolve MongoDB user ID ──────────────────────────────────────────
+    let mongoUser: any = null;
     if (isValidObjectId(userId)) {
-       const user = await User.findById(userId).select('pushToken');
-       if (user?.pushToken && Expo.isExpoPushToken(user.pushToken)) {
-         await expo.sendPushNotificationsAsync([{
-           to: user.pushToken,
-           sound: 'default',
-           title,
-           body,
-           data: data || { type: type || 'general' },
-           priority: 'high',
-           channelId: 'default',
-         }]);
-       }
+      mongoUser = await User.findById(userId).select('_id pushToken');
     } else {
-       // Should implement Firebase ID logic here if needed, similar to other functions
-       // For now reuse sendTeacher/Student logic or simple find
-       const user = await User.findOne({ firebaseUid: userId }).select('pushToken');
-       if (user?.pushToken && Expo.isExpoPushToken(user.pushToken)) {
-         await expo.sendPushNotificationsAsync([{
-            to: user.pushToken,
-            sound: 'default',
-            title,
-            body,
-            data: data || { type: type || 'general' },
-            priority: 'high',
-            channelId: 'default',
-         }]);
-       }
+      mongoUser = await User.findOne({ firebaseUid: userId }).select('_id pushToken');
+    }
+
+    if (!mongoUser) {
+      console.warn(`[createAndSendNotification] User not found: ${userId}`);
+      return;
+    }
+
+    // ── 2. Persist to MongoDB (notification inbox) ───────────────────────────
+    await Notification.create({
+      userId: mongoUser._id,
+      type: notifType,
+      title,
+      message: body,
+      data: data || {},
+      priority: 'medium',
+      read: false,
+    });
+
+    // ── 3. Send Expo push notification if token is valid ─────────────────────
+    if (mongoUser.pushToken && Expo.isExpoPushToken(mongoUser.pushToken)) {
+      try {
+        const tickets = await expo.sendPushNotificationsAsync([{
+          to: mongoUser.pushToken,
+          sound: 'default',
+          title,
+          body,
+          data: data || { type: notifType },
+          priority: 'high',
+          channelId: 'default',
+        }]);
+        console.log(`[createAndSendNotification] Push sent to ${mongoUser._id}:`, tickets);
+      } catch (pushErr) {
+        // Push failure should not block DB notification
+        console.warn(`[createAndSendNotification] Push error for ${mongoUser._id}:`, pushErr);
+      }
+    } else {
+      console.log(`[createAndSendNotification] No valid push token for user ${mongoUser._id} — in-app notification saved.`);
     }
   } catch (error) {
     console.error('Error in createAndSendNotification:', error);

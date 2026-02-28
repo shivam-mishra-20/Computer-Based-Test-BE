@@ -415,9 +415,10 @@ router.post('/', authMiddleware, messageLimiter, async (req: AuthRequest, res: R
       const senderName = req.user?.name || 'Student';
       createAndSendNotification({
         userId: validTeacherId.toString(),
-        title: `Message from ${senderName}`,
+        title: `New doubt from ${senderName}`,
         body: message.substring(0, 100),
-        data: { doubtId: (doubt as any)._id.toString(), type: 'doubt_message' }
+        type: 'doubt',
+        data: { doubtId: (doubt as any)._id.toString(), type: 'doubt', role: 'teacher', screen: '/(teacher)/doubts' }
       }).catch(err => console.error('Notification error:', err));
     } else {
        // logic for unassigned notification could go here
@@ -514,7 +515,8 @@ router.post('/:id/messages', authMiddleware, messageLimiter, async (req: AuthReq
           userId: doubt.teacher.toString(),
           title: `New message from ${senderName}`,
           body: message.substring(0, 100),
-          data: { doubtId: doubt._id, type: 'doubt_message' }
+          type: 'doubt',
+          data: { doubtId: doubt._id, type: 'doubt', role: 'teacher', screen: '/(teacher)/doubts' }
         });
       }
     } else {
@@ -523,7 +525,8 @@ router.post('/:id/messages', authMiddleware, messageLimiter, async (req: AuthReq
         userId: doubt.student.toString(),
         title: `Reply from ${senderName}`,
         body: message.substring(0, 100),
-        data: { doubtId: doubt._id, type: 'doubt_message' }
+        type: 'doubt',
+        data: { doubtId: doubt._id, type: 'doubt', role: 'student', screen: '/(student)/doubts' }
       });
     }
 
@@ -595,7 +598,8 @@ router.put('/:id/reply', authMiddleware, async (req: AuthRequest, res: Response)
       userId: doubt.student.toString(),
       title: `Reply from ${senderName}`,
       body: reply.substring(0, 100),
-      data: { doubtId: doubt._id, type: 'doubt_message' }
+      type: 'doubt',
+      data: { doubtId: doubt._id, type: 'doubt', role: 'student', screen: '/(student)/doubts' }
     });
 
     return res.json(populated);

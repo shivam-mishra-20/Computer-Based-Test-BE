@@ -10,6 +10,7 @@ import {
   getAttendanceFilters,
 } from '../../services/attendanceService';
 import absentService from '../../services/absentCalculationService';
+import { createAndSendNotification } from '../../services/notificationService';
 
 const router = Router();
 
@@ -298,6 +299,43 @@ router.post('/upload', authMiddleware, requireRole('admin', 'teacher'), async (r
     }
     
     const result = await uploadAttendanceRecords(validated);
+
+    // ── Notify affected students ──────────────────────────────────────────────
+    try {
+      // Build a unique set of name+class keys so we notify each student once
+      const uniqueKeys = [...new Set(validated.map((r) => `${r.name}||${r.class}`))];
+      const dates = [...new Set(validated.map((r) => r.dayAndDate))].sort();
+      const dateLabel =
+        dates.length === 1
+          ? dates[0]
+          : `${dates[0]} to ${dates[dates.length - 1]}`;
+
+      for (const key of uniqueKeys) {
+        const [name, classLevel] = key.split('||');
+        // Match by name (case-insensitive) and classLevel
+        const studentUser = await User.findOne({
+          name: { $regex: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+          classLevel,
+          role: 'student',
+        }).select('_id');
+
+        if (studentUser) {
+          await createAndSendNotification({
+            userId: studentUser._id.toString(),
+            title: 'Attendance Updated',
+            body: `Your attendance for ${dateLabel} has been recorded.`,
+            type: 'attendance',
+            data: {
+              type: 'attendance',
+              screen: '/(student)/modules/attendance',
+            },
+          });
+        }
+      }
+    } catch (notifErr) {
+      console.warn('[attendance/upload] Notification error (non-critical):', notifErr);
+    }
+
     res.json(result);
   } catch (error) {
     console.error('Error uploading attendance:', error);

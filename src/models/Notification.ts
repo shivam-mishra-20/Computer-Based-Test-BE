@@ -1,6 +1,6 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
-export type NotificationType = 'exam' | 'doubt' | 'announcement' | 'material' | 'schedule' | 'general';
+export type NotificationType = 'exam' | 'doubt' | 'announcement' | 'material' | 'schedule' | 'general' | 'attendance' | 'leave';
 export type NotificationPriority = 'low' | 'medium' | 'high';
 
 export interface INotification extends Document {
@@ -20,7 +20,7 @@ const notificationSchema = new Schema<INotification>({
   userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   type: { 
     type: String, 
-    enum: ['exam', 'doubt', 'announcement', 'material', 'schedule', 'general'], 
+    enum: ['exam', 'doubt', 'announcement', 'material', 'schedule', 'general', 'attendance', 'leave'], 
     required: true,
     index: true 
   },

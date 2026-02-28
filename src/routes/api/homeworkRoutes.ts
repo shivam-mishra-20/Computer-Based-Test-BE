@@ -76,12 +76,29 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
       
       // Students see published homework assigned to them
       query.status = 'published';
-      query.$or = [
-        { assignmentType: 'all' },
+
+      // Build $or conditions — always scope to the student's own class to prevent
+      // cross-class leakage when batch names or "all" assignments overlap.
+      const orConditions: any[] = [
+        // "all" type: only if the homework's classLevel matches the student's class
+        { assignmentType: 'all', classLevel: { $in: classLevelVariants } },
+        // "class" type: homework explicitly targeting this student's class
         { assignmentType: 'class', assignedClasses: { $in: classLevelVariants } },
-        { assignmentType: 'batch', assignedBatches: userBatch },
-        { assignmentType: 'students', assignedStudents: user.id }
+        // "students" type: homework targeting this student directly (no class filter needed)
+        { assignmentType: 'students', assignedStudents: user.id },
       ];
+
+      // Only add batch condition when the student actually has a batch assigned —
+      // AND scope it to the student's class so same-named batches across classes don't bleed.
+      if (userBatch) {
+        orConditions.push({
+          assignmentType: 'batch',
+          classLevel: { $in: classLevelVariants },
+          assignedBatches: userBatch,
+        });
+      }
+
+      query.$or = orConditions;
     } else if (user.role === 'admin') {
       // Admin sees all
       if (status) query.status = status;
@@ -141,8 +158,35 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
       return res.status(404).json({ error: 'Homework not found' });
     }
     
-    // For students, include their progress
+    // For students, verify access and include their progress
     if (user.role === 'student') {
+      // Validate the student is actually allowed to see this homework
+      const studentData = await User.findById(user.id).select('classLevel batch firebaseUid').lean();
+      let userClassLevel = studentData?.classLevel || '';
+      let userBatch = studentData?.batch || '';
+
+      if ((!userClassLevel || !userBatch) && studentData?.firebaseUid) {
+        const firestoreProfile = await getFirestoreUserProfile(studentData.firebaseUid);
+        if (firestoreProfile) {
+          userClassLevel = userClassLevel || firestoreProfile.classLevel || '';
+          userBatch = userBatch || firestoreProfile.batch || '';
+        }
+      }
+
+      const classNum = userClassLevel.replace(/Class\s*/i, '').trim();
+      const classLevelVariants = [classNum, `Class ${classNum}`, userClassLevel].filter(v => v && v !== 'Class ');
+
+      const hw = homework as any;
+      const isAllowed =
+        (hw.assignmentType === 'all' && classLevelVariants.includes(hw.classLevel)) ||
+        (hw.assignmentType === 'class' && hw.assignedClasses?.some((c: string) => classLevelVariants.includes(c))) ||
+        (hw.assignmentType === 'batch' && userBatch && classLevelVariants.includes(hw.classLevel) && hw.assignedBatches?.includes(userBatch)) ||
+        (hw.assignmentType === 'students' && hw.assignedStudents?.map((id: any) => id.toString()).includes(user.id));
+
+      if (!isAllowed) {
+        return res.status(403).json({ error: 'You are not assigned this homework' });
+      }
+
       const progress = await StudentProgress.findOne({
         student: user.id,
         targetType: 'homework',
