@@ -1,4 +1,4 @@
-import { Expo, ExpoPushMessage } from 'expo-server-sdk';
+import { Expo, ExpoPushMessage, ExpoPushTicket } from 'expo-server-sdk';
 import Notification from '../models/Notification';
 import User from '../models/User';
 
@@ -11,6 +11,44 @@ function isValidObjectId(id: string): boolean {
 }
 
 /**
+ * Process push tickets and handle errors:
+ * - DeviceNotRegistered → clear the stale push token from the DB
+ * - InvalidCredentials  → log a clear warning so it shows up in Railway logs
+ */
+async function handleTicketErrors(
+  tickets: ExpoPushTicket[],
+  sentTokens: string[]
+): Promise<void> {
+  const staleTokens: string[] = [];
+
+  tickets.forEach((ticket, i) => {
+    if (ticket.status === 'error') {
+      const errCode = (ticket as any).details?.error as string | undefined;
+      const token = sentTokens[i] ?? 'unknown';
+      if (errCode === 'DeviceNotRegistered') {
+        console.warn(`[Push] DeviceNotRegistered – clearing token: ${token.substring(0, 30)}...`);
+        staleTokens.push(token);
+      } else if (errCode === 'InvalidCredentials') {
+        console.error(
+          '[Push] InvalidCredentials – FCM server key rejected. ' +
+          'Upload your FCM V1 service-account JSON at: ' +
+          'https://expo.dev → your project → Credentials → Android'
+        );
+      } else {
+        console.error(`[Push] Ticket error (${errCode ?? 'unknown'}) for token ${token.substring(0, 30)}:`, (ticket as any).message);
+      }
+    }
+  });
+
+  if (staleTokens.length > 0) {
+    await User.updateMany(
+      { pushToken: { $in: staleTokens } },
+      { $unset: { pushToken: '' } }
+    ).catch(err => console.error('[Push] Failed to clear stale tokens:', err));
+  }
+}
+
+/**
  * Send push notifications to users based on class/batch
  */
 export async function sendScheduleNotification(
@@ -20,54 +58,59 @@ export async function sendScheduleNotification(
   batch?: string
 ) {
   try {
-    // Find users who match criteria and have push tokens
-    const query: any = {
-      role: 'student',
-      pushToken: { $exists: true, $ne: null }
-    };
-    
-    if (classLevel) {
-      query.classLevel = classLevel;
-    }
-    if (batch) {
-      query.batch = batch;
-    }
-    
-    const users = await User.find(query).select('pushToken');
-    const pushTokens = users.map(u => u.pushToken).filter(t => Expo.isExpoPushToken(t));
-    
-    if (pushTokens.length === 0) return;
-    
-    // Create messages
-    const messages: ExpoPushMessage[] = [];
-    for (const pushToken of pushTokens) {
-      messages.push({
-        to: pushToken,
-        sound: 'default',
-        title: title,
-        body: body,
+    // Find ALL matching students (even those without a push token) so we can
+    // persist an in-app notification for every student regardless.
+    const query: any = { role: 'student' };
+    if (classLevel) query.classLevel = classLevel;
+    if (batch) query.batch = batch;
+
+    const users = await User.find(query).select('_id pushToken');
+    if (users.length === 0) return;
+
+    // ── 1. Persist in-app notifications to MongoDB ───────────────────────────
+    await Notification.insertMany(
+      users.map(u => ({
+        userId: u._id,
+        type: 'schedule' as const,
+        title,
+        message: body,
         data: { type: 'schedule_update' },
-        priority: 'high',
-        channelId: 'default',
-      });
-    }
-    
-    // Chunk and send
+        priority: 'medium' as const,
+        read: false,
+      }))
+    ).catch(err => console.error('[sendScheduleNotification] DB insert error:', err));
+
+    // ── 2. Send push notifications to users with valid tokens ─────────────────
+    const usersWithTokens = users.filter(u => u.pushToken && Expo.isExpoPushToken(u.pushToken));
+    if (usersWithTokens.length === 0) return;
+
+    const sentTokens: string[] = usersWithTokens.map(u => u.pushToken as string);
+    const messages: ExpoPushMessage[] = sentTokens.map(token => ({
+      to: token,
+      sound: 'default',
+      title,
+      body,
+      data: { type: 'schedule_update' },
+      priority: 'high',
+      channelId: 'default',
+    }));
+
     const chunks = expo.chunkPushNotifications(messages);
-    const tickets = [];
-    
+    const allTickets: ExpoPushTicket[] = [];
+
     for (const chunk of chunks) {
       try {
         const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
-        tickets.push(...ticketChunk);
+        allTickets.push(...ticketChunk);
       } catch (error) {
-        console.error('Error sending push notification chunk:', error);
+        console.error('[sendScheduleNotification] Error sending chunk:', error);
       }
     }
-    
-    return tickets;
+
+    await handleTicketErrors(allTickets, sentTokens);
+    return allTickets;
   } catch (error) {
-    console.error('Error sending schedule notifications:', error);
+    console.error('[sendScheduleNotification] Error:', error);
   }
 }
 
@@ -108,9 +151,20 @@ export async function sendTeacherNotification(
       hasPushToken: !!teacher.pushToken,
       pushToken: teacher.pushToken ? `${teacher.pushToken.substring(0, 20)}...` : 'none'
     });
-    
+
+    // ── Persist in-app notification to MongoDB regardless of push token ──────
+    await Notification.create({
+      userId: teacher._id,
+      type: 'leave' as const,
+      title,
+      message: body,
+      data: { type: 'leave', role: 'teacher', screen: '/(teacher)/more' },
+      priority: 'medium' as const,
+      read: false,
+    }).catch(err => console.error('[sendTeacherNotification] DB insert error:', err));
+
     if (!teacher?.pushToken) {
-      console.error(`[sendTeacherNotification] Teacher ${teacherId} (${teacher.name}) has no push token`);
+      console.log(`[sendTeacherNotification] Teacher ${teacher._id} (${teacher.name}) has no push token — in-app notification saved.`);
       return;
     }
 
@@ -137,6 +191,7 @@ export async function sendTeacherNotification(
     
     const tickets = await expo.sendPushNotificationsAsync([message]);
     console.log('[sendTeacherNotification] Notification sent, tickets:', tickets);
+    await handleTicketErrors(tickets, [teacher.pushToken]);
   } catch (error) {
     console.error('[sendTeacherNotification] Error sending teacher notification:', error);
     throw error; // Re-throw to see the full error
@@ -210,14 +265,18 @@ export async function sendStudentNotifications(
     }));
     
     const chunks = expo.chunkPushNotifications(messages);
-    
+    const allTickets: ExpoPushTicket[] = [];
+
     for (const chunk of chunks) {
       try {
-        await expo.sendPushNotificationsAsync(chunk);
+        const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
+        allTickets.push(...ticketChunk);
       } catch (error) {
         console.error('Error sending student notification chunk:', error);
       }
     }
+
+    await handleTicketErrors(allTickets, pushTokens);
   } catch (error) {
     console.error('Error sending student notifications:', error);
   }
@@ -276,6 +335,7 @@ export async function createAndSendNotification(payload: {
           channelId: 'default',
         }]);
         console.log(`[createAndSendNotification] Push sent to ${mongoUser._id}:`, tickets);
+        await handleTicketErrors(tickets, [mongoUser.pushToken]);
       } catch (pushErr) {
         // Push failure should not block DB notification
         console.warn(`[createAndSendNotification] Push error for ${mongoUser._id}:`, pushErr);
