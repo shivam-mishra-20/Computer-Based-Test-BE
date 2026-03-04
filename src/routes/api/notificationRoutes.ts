@@ -9,6 +9,7 @@ import {
   createNotification,
   createBulkNotifications,
   registerToken,
+  sendTestPush,
 } from '../../controllers/notificationController';
 
 const router = Router();
@@ -22,6 +23,9 @@ router.delete('/read/clear', authMiddleware, deleteAllReadNotifications);
 
 // Register push token
 router.post('/register-token', authMiddleware, registerToken);
+
+// Debug: send a test push to the authenticated user
+router.post('/test-push', authMiddleware, sendTestPush);
 
 // Admin/System endpoints for creating notifications
 router.post('/', authMiddleware, requireRole('admin'), createNotification);

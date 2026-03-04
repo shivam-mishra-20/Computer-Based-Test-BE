@@ -1,7 +1,10 @@
 import { Request, Response } from 'express';
+import { Expo } from 'expo-server-sdk';
 import Notification from '../models/Notification';
 import * as notificationService from '../services/notificationService';
 import User from '../models/User';
+
+const expo = new Expo();
 
 // Register push token
 export const registerToken = async (req: Request, res: Response) => {
@@ -9,8 +12,18 @@ export const registerToken = async (req: Request, res: Response) => {
     const userId = (req as any).user?.id;
     const { pushToken } = req.body;
 
+    if (!userId) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
     if (!pushToken) {
       return res.status(400).json({ message: 'Push token is required' });
+    }
+
+    if (!Expo.isExpoPushToken(pushToken)) {
+      return res.status(400).json({
+        message: 'Invalid push token format (expected Expo push token)',
+      });
     }
 
     await User.findByIdAndUpdate(userId, { pushToken });
@@ -19,6 +32,70 @@ export const registerToken = async (req: Request, res: Response) => {
   } catch (err) {
     console.error('Error registering push token:', err);
     res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Send a test push notification to the authenticated user
+export const sendTestPush = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+    if (!userId) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
+    const { title, body } = (req.body || {}) as { title?: string; body?: string };
+    const safeTitle = (title && String(title).trim()) || 'Test notification';
+    const safeBody = (body && String(body).trim()) || 'If you see this, push notifications are working.';
+
+    const user = await User.findById(userId).select('_id pushToken').lean();
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    // Persist an in-app notification too
+    await Notification.create({
+      userId: user._id,
+      type: 'general',
+      title: safeTitle,
+      message: safeBody,
+      data: { type: 'test' },
+      priority: 'high',
+      read: false,
+    }).catch(() => {
+      // Don't fail the request if DB insert fails
+    });
+
+    if (!user.pushToken) {
+      return res.status(400).json({
+        message: 'No push token registered for this user. Log in on a physical device and allow notifications.',
+      });
+    }
+
+    if (!Expo.isExpoPushToken(user.pushToken)) {
+      return res.status(400).json({
+        message: 'Stored push token is not a valid Expo push token',
+      });
+    }
+
+    const tickets = await expo.sendPushNotificationsAsync([
+      {
+        to: user.pushToken,
+        sound: 'default',
+        title: safeTitle,
+        body: safeBody,
+        data: { type: 'test' },
+        priority: 'high',
+        channelId: 'default',
+      },
+    ]);
+
+    res.json({
+      message: 'Test push sent (ticket returned by Expo).',
+      tickets,
+    });
+  } catch (err: any) {
+    console.error('Error sending test push:', err);
+    res.status(500).json({ message: 'Server error', error: err?.message });
   }
 };
 
