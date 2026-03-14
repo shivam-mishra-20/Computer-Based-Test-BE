@@ -1,24 +1,32 @@
-const { VertexAI } = require('@google-cloud/vertexai');
-const path = require('path');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
+const Groq = require('groq-sdk');
 
-// Initialize Vertex AI
-const GOOGLE_PROJECT = process.env.GOOGLE_CLOUD_PROJECT || 'cbt-vision-api';
-const GOOGLE_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
-const KEY_FILE = process.env.GOOGLE_APPLICATION_CREDENTIALS || path.join(__dirname, '..', 'vision-key.json');
+// Initialize Gemini API
+let genAI = null;
 
-let vertexAI = null;
-
-function getVertexAI() {
-  if (!vertexAI) {
-    vertexAI = new VertexAI({
-      project: GOOGLE_PROJECT,
-      location: GOOGLE_LOCATION,
-      googleAuthOptions: {
-        keyFilename: KEY_FILE
-      }
-    });
+function getGenAI() {
+  if (!genAI) {
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      throw new Error('GEMINI_API_KEY is not set in environment variables');
+    }
+    genAI = new GoogleGenerativeAI(apiKey);
   }
-  return vertexAI;
+  return genAI;
+}
+
+// Initialize Groq API (fallback)
+let groqClient = null;
+
+function getGroq() {
+  if (!groqClient) {
+    const apiKey = process.env.GROQ_API_KEY;
+    if (!apiKey) {
+      throw new Error('GROQ_API_KEY is not set — cannot use Groq fallback');
+    }
+    groqClient = new Groq({ apiKey });
+  }
+  return groqClient;
 }
 
 /**
@@ -27,7 +35,7 @@ function getVertexAI() {
  */
 class AIEnhancer {
   constructor() {
-    this.model = 'gemini-2.5-pro';
+    this.model = 'gemini-2.5-flash';
     this.concurrentBatches = 6; // Process 6 batches in parallel (4-8x speedup)
   }
 
@@ -92,59 +100,71 @@ class AIEnhancer {
    * Send batch of questions to Gemini for structuring
    */
   async structureQuestionBatch(batch, bookMetadata) {
-    const vertexAI = getVertexAI();
-    const generativeModel = vertexAI.getGenerativeModel({
+    const generativeModel = getGenAI().getGenerativeModel({
       model: this.model,
       generationConfig: {
         temperature: 0.0,
         topP: 0.95,
         topK: 40,
-        maxOutputTokens: 16384,
+        maxOutputTokens: 32768,
       },
     });
 
-    // Concatenate all question texts for batch processing
+    // Concatenate all chunks for batch processing
     const inputText = batch.map((q, idx) => {
-      return `[Question ${idx + 1}]\n${q.text}\n`;
+      const label = q.exerciseLabel ? ` [${q.exerciseLabel}]` : '';
+      return `[Chunk ${idx + 1}${label}]\n${q.text}\n`;
     }).join('\n---\n\n');
 
-    const prompt = `You are an academic question extraction and structuring engine for ${bookMetadata.subject || 'Unknown'} subject.
+    const prompt = `You are an expert academic question extractor for ${bookMetadata.subject || 'Unknown'} (${bookMetadata.class || 'Class 12'}, ${bookMetadata.board || 'CBSE'}).
 
-📚 Book Context:
-- Title: ${bookMetadata.title}
-- Subject: ${bookMetadata.subject}
-- Board: ${bookMetadata.board || 'CBSE'}
+📚 Chapter Context:
+- Chapter: ${bookMetadata.chapter || bookMetadata.title || 'Unknown'}
+- Subject: ${bookMetadata.subject || 'Unknown'}
 - Class: ${bookMetadata.class || 'Class 12'}
+- Board: ${bookMetadata.board || 'CBSE'}
 
 🎯 Your Task:
-The input below contains raw text extracted from an EPUB book. Some entries may contain MULTIPLE questions concatenated together. Your job is to:
+The input below is raw text from a PDF textbook chapter. Extract EVERY question and activity you can find. Your job is to:
 
-1. **SPLIT** any multi-question text into individual questions
-2. **IDENTIFY** each question's type (mcq, short, long, etc.)
-3. **EXTRACT** options if MCQ (with correct answer if present)
-4. **ADD** proper LaTeX formatting to mathematical expressions
-5. **CLEAN** the text (remove page numbers, headers, etc.)
-6. **PRESERVE** the original wording exactly - do not paraphrase
+1. **FIND** every question — numbered exercises, in-text questions, "Try These", "Think About It", examples with sub-parts, fill-in-the-blanks, true/false, match the following, assertion-reason
+2. **SPLIT** any multi-question blobs into individual questions  
+3. **IDENTIFY** type: mcq, short, long, truefalse, fill, integer, assertionreason
+4. **EXTRACT** options if MCQ (with correct answer if present)
+5. **ADD** LaTeX to all mathematical expressions
+6. **CLEAN** text (remove page numbers, headers, footers)
+7. **PRESERVE** exact wording — do not paraphrase
 
-⚠️ CRITICAL: If you see text like "11. Question text (a) option1 (b) option2... 12. Another question...", you MUST split this into TWO separate question blocks.
+⚠️ QUESTION PATTERNS — look for ALL of these:
+- Numbered: "1.", "1)", "Q1.", "Q.1", "(i)", "(ii)"
+- MCQ with choices: "(a) ... (b) ... (c) ... (d) ..."
+- Fill in the blank: "________" or "......"
+- True / False statements to evaluate
+- "Match the following" items
+- "State whether ... True or False"
+- "Give reason why ...", "Explain ...", "Define ...", "Describe ..."
+- "Calculate / Find / Determine / Evaluate ..."
+- "Prove that ...", "Show that ..."
+- Any sentence ending with "?"
+- Examples asking students to solve something
 
-📝 Output Format (repeat for EACH question):
+📝 Output Format — use EXACTLY this separator and field names for EACH question:
 ------------------------------------
-QUESTION_NUMBER: <number or sequential>
+QUESTION_NUMBER: <sequential number>
 QUESTION_TEXT: <clean question text with LaTeX>
 QUESTION_TYPE: mcq | short | long | truefalse | fill | integer | assertionreason
 
-OPTION_A: <text or EMPTY>
-OPTION_B: <text or EMPTY>
-OPTION_C: <text or EMPTY>
-OPTION_D: <text or EMPTY>
+OPTION_A: <option text or EMPTY>
+OPTION_B: <option text or EMPTY>
+OPTION_C: <option text or EMPTY>
+OPTION_D: <option text or EMPTY>
 
 CORRECT_OPTION: A | B | C | D | UNKNOWN
-CORRECT_ANSWER_TEXT: <text or EMPTY>
+CORRECT_ANSWER_TEXT: <answer text or EMPTY>
 
 SUBJECT: ${bookMetadata.subject || 'Unknown'}
-TOPIC: <infer from question or use "${bookMetadata.topic || 'General'}">
-CHAPTER: <infer from question or use "${bookMetadata.chapter || 'Unknown'}">
+TOPIC: <infer from question content>
+CHAPTER: ${bookMetadata.chapter || bookMetadata.title || 'Unknown'}
 DIFFICULTY: easy | medium | hard
 MARKS: 1 | 2 | 4 | 5
 
@@ -153,52 +173,21 @@ NEEDS_REVIEW: true | false
 ------------------------------------
 
 🧮 LaTeX Rules:
-- Use $...$ for inline math (e.g., $x^2 + 5x + 6 = 0$)
-- Use $$...$$ for display equations
-- Convert Unicode: ² → $^2$, × → $\\times$, ∞ → $\\infty$
-- Do NOT escape backslashes (write $\\frac{a}{b}$ not $\\\\frac{a}{b}$)
+- Inline math: $x^2 + 5x + 6 = 0$
+- Display equations: $$E = mc^2$$
+- Convert: ² → $^2$, × → $\\times$, ∞ → $\\infty$, √x → $\\sqrt{x}$, fractions → $\\frac{a}{b}$
+- Do NOT double-escape backslashes
 
-📊 Type Detection:
-- **mcq**: Has (a), (b), (c), (d) options
-- **short**: Requires brief answer (1-2 lines)
-- **long**: Requires detailed explanation
-- **truefalse**: True/False question
-- **integer**: Answer is a number
-- **assertionreason**: Has assertion and reason statements
+📊 Type & Marks:
+- mcq → 1 mark | short → 2 marks | long → 5 marks | truefalse → 1 mark | fill → 1 mark | integer → 2 marks
 
-🎯 Marks Assignment:
-- MCQ: 1 mark
-- Short answer: 2 marks
-- Long answer: 5 marks
-- True/False: 1 mark
-
-🔍 Question Splitting Examples:
-
-**Input:** "11. What is photosynthesis? (a) Process A (b) Process B 12. Define respiration?"
-
-**Output:** 
-Two separate blocks:
-1. Question 11 about photosynthesis (MCQ)
-2. Question 12 about respiration (short)
-
-**Input:** "109. (CH3)3NH + CH3COOH (a) Option1 (b) Option2 110. Calculate pH"
-
-**Output:**
-Two separate blocks:
-1. Question 109 with options (MCQ)
-2. Question 110 about pH (short/long)
-
-🚨 DO NOT:
-- Combine multiple questions into one block
-- Skip questions
-- Invent information not in the source
-- Change the question wording
-
-✅ DO:
-- Split every distinct question into its own block
-- Preserve exact question text
-- Add LaTeX to all mathematical expressions
-- Set NEEDS_REVIEW to true if uncertain
+🚨 CRITICAL:
+- Extract EVERY question — if you find 20 questions, output 20 blocks
+- NEVER combine multiple questions into one block
+- NEVER skip a question
+- NEVER invent information
+- If a question is unclear, set NEEDS_REVIEW: true
+- If a chunk has no questions at all, output nothing (no blocks)
 
 ---
 
@@ -207,10 +196,18 @@ ${inputText}
 
 ---
 
-Now extract and structure ALL questions found above:`;
+Extract ALL questions now:`;
 
-    const result = await generativeModel.generateContent(prompt);
-    const responseText = result.response.candidates[0].content.parts[0].text;
+    let responseText;
+    try {
+      const result = await generativeModel.generateContent(prompt);
+      responseText = result.response.text();
+      console.log(`      → Gemini response received`);
+    } catch (geminiError) {
+      console.warn(`      ⚠️  Gemini failed: ${geminiError.message}`);
+      console.log(`      🔄 Falling back to Groq...`);
+      responseText = await this.callGroqFallback(prompt);
+    }
 
     // Parse the structured response, passing original batch for diagram preservation
     const structuredQuestions = this.parseGeminiResponse(responseText, bookMetadata, batch);
@@ -218,6 +215,19 @@ Now extract and structure ALL questions found above:`;
     console.log(`      → Extracted ${structuredQuestions.length} questions from ${batch.length} inputs`);
 
     return structuredQuestions;
+  }
+
+  /**
+   * Groq fallback — uses llama-3.3-70b-versatile for same structured output
+   */
+  async callGroqFallback(prompt) {
+    const completion = await getGroq().chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.0,
+      max_tokens: 16384,
+    });
+    return completion.choices[0].message.content;
   }
 
   /**

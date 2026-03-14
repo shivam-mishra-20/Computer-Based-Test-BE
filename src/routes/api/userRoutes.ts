@@ -12,12 +12,12 @@ router.get('/pending', authMiddleware, requireRole('admin'), adminGetPendingUser
 router.put('/:id/approve', authMiddleware, requireRole('admin'), adminApproveUser);
 router.put('/:id/reject', authMiddleware, requireRole('admin'), adminRejectUser);
 
-// Admin-only user management
-router.post('/', authMiddleware, requireRole('admin'), adminCreateUser);
-router.get('/', authMiddleware, requireRole('admin'), adminListUsers);
-router.get('/:id', authMiddleware, requireRole('admin'), adminGetUser);
-router.put('/:id', authMiddleware, requireRole('admin'), adminUpdateUser);
-router.delete('/:id', authMiddleware, requireRole('admin'), adminDeleteUser);
+// Admin and Teacher user management
+router.post('/', authMiddleware, requireRole('admin', 'teacher'), adminCreateUser);
+router.get('/', authMiddleware, requireRole('admin', 'teacher'), adminListUsers);
+router.get('/:id', authMiddleware, requireRole('admin', 'teacher'), adminGetUser);
+router.put('/:id', authMiddleware, requireRole('admin', 'teacher'), adminUpdateUser);
+router.delete('/:id', authMiddleware, requireRole('admin', 'teacher'), adminDeleteUser);
 
 // User settings (for all authenticated users)
 router.get('/me/settings', authMiddleware, getUserSettings);

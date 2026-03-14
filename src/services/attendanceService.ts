@@ -199,7 +199,38 @@ export async function uploadAttendanceRecords(records: Array<{
   if (!firebase) throw new Error('Firebase not initialized');
   
   const db = firebase.firestore();
-  
+
+  // Resolve missing class for records that don't include it (e.g. from PDF uploads)
+  const needsClass = [...new Set(records.filter(r => !r.class).map(r => r.name))];
+  if (needsClass.length > 0) {
+    const classMap = new Map<string, string>();
+    // Chunk into groups of 10 for Firestore 'in' queries
+    for (let i = 0; i < needsClass.length; i += 10) {
+      const chunk = needsClass.slice(i, i + 10);
+      const snap = await db.collection('Users').where('name', 'in', chunk).get();
+      snap.forEach((doc: any) => {
+        const d = doc.data();
+        if (d.name) classMap.set(d.name, d.Class || d.classLevel || '');
+      });
+    }
+    // Fallback to studentLeaves for any still unresolved
+    const stillMissing = needsClass.filter(n => !classMap.has(n));
+    for (let i = 0; i < stillMissing.length; i += 10) {
+      const chunk = stillMissing.slice(i, i + 10);
+      if (chunk.length === 0) break;
+      const snap = await db.collection('studentLeaves').where('name', 'in', chunk).get();
+      snap.forEach((doc: any) => {
+        const d = doc.data();
+        if (d.name) classMap.set(d.name, d.Class || '');
+      });
+    }
+    // Apply resolved classes
+    records = records.map(r => ({
+      ...r,
+      class: r.class || classMap.get(r.name) || '',
+    })).filter(r => r.class);
+  }
+
   // Group by student (name + class)
   const grouped = new Map<string, { name: string; Class: string; entries: Map<string, AttendanceEntry> }>();
   

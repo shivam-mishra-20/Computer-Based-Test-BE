@@ -60,9 +60,10 @@ export const adminRejectUser = async (req: Request, res: Response) => {
 	}
 };
 
-// Admin-only: Create a user with role teacher or student
+// Admin and Teacher: Create a user with role teacher or student
 export const adminCreateUser = async (req: Request, res: Response) => {
 	try {
+		const currentUser = (req as any).user;
 		const { name, email, password, role, classLevel, batch, empCode } = req.body as {
 			name: string;
 			email: string;
@@ -77,6 +78,11 @@ export const adminCreateUser = async (req: Request, res: Response) => {
 		}
 		if (!['teacher', 'student', 'admin'].includes(role)) {
 			return res.status(400).json({ message: 'Role must be one of admin, teacher, or student' });
+		}
+		
+		// Teachers cannot create admins
+		if (currentUser.role === 'teacher' && role === 'admin') {
+			return res.status(403).json({ message: 'Teacher cannot create admin accounts' });
 		}
 		
 		// Enforce empCode for teachers and students
@@ -97,7 +103,7 @@ export const adminCreateUser = async (req: Request, res: Response) => {
 		}
 
 	const user = await User.create({ name, email: lcEmail, password, role, classLevel, batch, empCode: sanitizedEmpCode });
-		await logAudit((req as any).user?.id, 'admin.user.create', String(user._id), { name, email: lcEmail, role, empCode: sanitizedEmpCode });
+		await logAudit(currentUser.id, 'admin.user.create', String(user._id), { name, email: lcEmail, role, empCode: sanitizedEmpCode });
 		res.status(201).json({ id: user._id, name: user.name, email: user.email, role: user.role, empCode: user.empCode });
 	} catch (err) {
 		console.error('Create User Error:', err);
@@ -135,19 +141,31 @@ export const adminGetUser = async (req: Request, res: Response) => {
 
 import OfflineResult from '../models/OfflineResult';
 
-// Admin-only: Update user (name, email, role, password, empCode)
+// Admin and Teacher: Update user (name, email, role, password, empCode)
 export const adminUpdateUser = async (req: Request, res: Response) => {
 	try {
+		const currentUser = (req as any).user;
 		const { name, email, role, password, classLevel, batch, empCode } = req.body as Partial<IUser> & { role?: UserRole };
 		const user = await User.findById(req.params.id);
 		if (!user) return res.status(404).json({ message: 'User not found' });
+		
+		// Teachers cannot edit admin users, except for themselves
+		if (currentUser.role === 'teacher' && user.role === 'admin') {
+			return res.status(403).json({ message: 'Teacher cannot modify admin accounts' });
+		}
 		
 		const oldName = user.name;
 		const currentClass = (user as any).classLevel;
 
 		if (name) user.name = name;
 		if (email) user.email = email;
-		if (role) user.role = role;
+		if (role) {
+			// Teachers cannot promote users to admin
+			if (currentUser.role === 'teacher' && role === 'admin') {
+				return res.status(403).json({ message: 'Teacher cannot grant admin roles' });
+			}
+			user.role = role;
+		}
 		if (password) user.password = password; // will be hashed by pre-save
 		if (classLevel !== undefined) (user as any).classLevel = classLevel;
 		if (batch !== undefined) (user as any).batch = batch;
@@ -160,7 +178,7 @@ export const adminUpdateUser = async (req: Request, res: Response) => {
 		}
 
 		await user.save();
-		await logAudit((req as any).user?.id, 'admin.user.update', String(user._id), { name, email, role, classLevel, batch, empCode: user.empCode });
+		await logAudit(currentUser.id, 'admin.user.update', String(user._id), { name, email, role, classLevel, batch, empCode: user.empCode });
 		
         // Sync name changes to offline results
 		if (name && oldName && name !== oldName) {
@@ -182,12 +200,20 @@ export const adminUpdateUser = async (req: Request, res: Response) => {
 	}
 };
 
-// Admin-only: Delete user
+// Admin and Teacher: Delete user
 export const adminDeleteUser = async (req: Request, res: Response) => {
 	try {
-		const user = await User.findByIdAndDelete(req.params.id);
+		const currentUser = (req as any).user;
+		const user = await User.findById(req.params.id);
 		if (!user) return res.status(404).json({ message: 'User not found' });
-		await logAudit((req as any).user?.id, 'admin.user.delete', String(user._id));
+		
+		// Teachers cannot delete admin users
+		if (currentUser.role === 'teacher' && user.role === 'admin') {
+			return res.status(403).json({ message: 'Teacher cannot delete admin accounts' });
+		}
+		
+		await User.findByIdAndDelete(req.params.id);
+		await logAudit(currentUser.id, 'admin.user.delete', String(user._id));
 		res.json({ message: 'User deleted' });
 	} catch (err) {
 		res.status(500).json({ message: 'Server error' });

@@ -156,10 +156,10 @@ class AutomationRunner {
         {
           title: parsed.metadata.title,
           subject: parsed.metadata.subject,
-          board: this.extractBoard(parsed.metadata.title),
-          class: this.extractClass(bookFile.fileName),
-          chapter: 'General', // Will be inferred by AI
-          topic: 'General'
+          board: parsed.metadata.board || this.extractBoard(parsed.metadata.title),
+          class: parsed.metadata.class || this.extractClass(bookFile.fileName),
+          chapter: parsed.metadata.chapter || parsed.metadata.title || 'General',
+          topic: parsed.metadata.chapter || 'General'
         }
       );
 

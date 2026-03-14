@@ -75,14 +75,6 @@ connectDB().then(async () => {
   const { AttendanceCron } = require('./services/AttendanceCron');
   AttendanceCron.init();
   
-  // Initialize automation scheduler
-  try {
-    const { automationScheduler } = await import('./services/automationScheduler');
-    await automationScheduler.initialize();
-    console.log('✓ Automation scheduler initialized');
-  } catch (error) {
-    console.error('Failed to initialize automation scheduler:', error);
-  }
 }).catch((err: any) => {
   console.error('Database connection failed at startup:', err);
 });

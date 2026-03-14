@@ -8,14 +8,21 @@ const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
 // Publisher client for Socket.IO adapter
 export const redisPublisher = new Redis(REDIS_URL, {
-  maxRetriesPerRequest: 3,
-  enableReadyCheck: true,
+  maxRetriesPerRequest: null,
+  enableReadyCheck: false,
   retryStrategy: (times: number) => {
     const delay = Math.min(times * 50, 2000);
     console.log(`Redis reconnect attempt ${times}, delay: ${delay}ms`);
     return delay;
   },
   lazyConnect: false,
+  reconnectOnError: (err) => {
+    const targetError = 'READONLY';
+    if (err.message.includes(targetError)) {
+      return true; // Reconnect 
+    }
+    return 1; // Always reconnect
+  }
 });
 
 // Subscriber client for Socket.IO adapter (separate connection required)

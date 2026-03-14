@@ -283,12 +283,12 @@ router.post('/upload', authMiddleware, requireRole('admin', 'teacher'), async (r
       return res.status(400).json({ error: 'No records provided' });
     }
     
-    // Validate records
+    // Validate records (class may be empty — service resolves it from Users collection)
     const validated = records.filter((r: any) => 
-      r.name && r.class && r.dayAndDate
+      r.name && r.dayAndDate
     ).map((r: any) => ({
       name: String(r.name).trim(),
-      class: String(r.class).trim(),
+      class: String(r.class || '').trim(),
       clockIn: String(r.clockIn || '--:--').trim(),
       clockOut: String(r.clockOut || '--:--').trim(),
       dayAndDate: String(r.dayAndDate).trim(),

@@ -28,7 +28,11 @@ class PDFParser {
     
     try {
       const { ImageAnnotatorClient } = require('@google-cloud/vision');
-      const client = new ImageAnnotatorClient();
+      const KEY_FILE = path.resolve(
+        process.env.GOOGLE_APPLICATION_CREDENTIALS || path.join(__dirname, '..', 'vision-key.json')
+      );
+      console.log('[PDF Parser] Using credentials:', KEY_FILE);
+      const client = new ImageAnnotatorClient({ keyFilename: KEY_FILE });
       
       const maxPagesPerBatch = 5; // Vision API limit
       const pagesToProcess = Math.min(totalPages, 50); // Overall limit
@@ -96,7 +100,7 @@ class PDFParser {
         .map((text, idx) => `\n\n=== PAGE ${idx + 1} ===\n${text}`)
         .join('\n');
       
-      console.log(`[PDF Parser] ✅ Total extracted: ${combinedText.length} characters from ${pageTexts.length} pages`);
+      console.log(`[PDF Parser] âœ… Total extracted: ${combinedText.length} characters from ${pageTexts.length} pages`);
       
       if (combinedText.length < 100) {
         throw new Error('Insufficient text extracted from PDF via Vision API');
@@ -153,65 +157,71 @@ Current credentials path: ${process.env.GOOGLE_APPLICATION_CREDENTIALS || 'NOT S
   }
 
   /**
-   * Extract metadata from PDF filename
-   * @param {string} pdfPath - Path to PDF
-   * @returns {Promise<Object>} - Metadata
+   * Extract metadata from PDF filepath and parent folder structure.
+   * Folder naming convention: class_9_mathematics, class_11_physics, class_9
+   * Chapter name comes from the PDF filename.
    */
   async extractMetadata(pdfPath) {
     const filename = path.basename(pdfPath, '.pdf');
-    
+    const parentFolder = path.basename(path.dirname(pdfPath));
+
+    // Parse class + subject from folder name
+    // e.g. class_9_mathematics â†’ Class 9 + Mathematics
+    //      class_11_physics     â†’ Class 11 + Physics
+    //      class_9              â†’ Class 9  + (fallback to filename)
+    const folderMatch = parentFolder.match(/^class[_\s-]?(\d+)[_\s-]?(.*)?$/i);
+    let classLabel = 'Unknown';
+    let subject = 'Unknown';
+
+    if (folderMatch) {
+      classLabel = `Class ${folderMatch[1]}`;
+      const rawSubject = (folderMatch[2] || '').replace(/_/g, ' ').trim();
+      if (rawSubject) subject = this.normalizeSubject(rawSubject);
+    }
+
+    // Fallback: infer subject from chapter filename
+    if (subject === 'Unknown') subject = this.identifySubjectFromTitle(filename);
+
     return {
       title: filename,
+      chapter: filename,   // PDF filename = chapter name
       author: 'Unknown',
-      subject: this.identifySubjectFromTitle(filename),
+      subject,
       language: 'en',
-      class: this.extractClassFromFilename(filename),
-      board: this.extractBoardFromTitle(filename)
+      class: classLabel,
+      board: 'CBSE',
     };
   }
 
-  /**
-   * Identify subject from title
-   */
+  /** Map raw folder subject string â†’ proper display name */
+  normalizeSubject(raw) {
+    const map = {
+      mathematics: 'Mathematics', maths: 'Mathematics', math: 'Mathematics',
+      physics: 'Physics',
+      chemistry: 'Chemistry',
+      biology: 'Biology',
+      english: 'English',
+      science: 'Science',
+      'social science': 'Social Science', 'social studies': 'Social Science',
+      history: 'History', geography: 'Geography', economics: 'Economics',
+      'computer science': 'Computer Science', computers: 'Computer Science',
+      hindi: 'Hindi', sanskrit: 'Sanskrit',
+      accountancy: 'Accountancy', 'business studies': 'Business Studies',
+    };
+    return map[raw.toLowerCase()] || raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+  }
+
+  /** Infer subject from chapter title as last resort */
   identifySubjectFromTitle(title) {
-    const titleLower = title.toLowerCase();
-
-    if (/(physics|mechanics|thermodynamics)/i.test(titleLower)) return 'Physics';
-    if (/(chemistry|organic|inorganic)/i.test(titleLower)) return 'Chemistry';
-    if (/(mathematics|math|algebra|calculus)/i.test(titleLower)) return 'Mathematics';
-    if (/(biology|botany|zoology)/i.test(titleLower)) return 'Biology';
-    if (/(english|literature)/i.test(titleLower)) return 'English';
-    if (/(computer|programming)/i.test(titleLower)) return 'Computer Science';
-    if (/(history|geography|civics)/i.test(titleLower)) return 'Social Science';
-
+    const t = title.toLowerCase();
+    if (/(physics|mechanics|thermodynamics|optics|waves|electricity|magnetism)/i.test(t)) return 'Physics';
+    if (/(chemistry|organic|inorganic|chemical|acids|alkali|mole|bond)/i.test(t)) return 'Chemistry';
+    if (/(math|algebra|calculus|polynomial|triangle|circle|quadrilateral|coordinate|statistics|probability|number system|surface area|volume|heron|euclid|linear equation)/i.test(t)) return 'Mathematics';
+    if (/(biology|botany|zoology|cell|tissue|organ|ecosystem|genetics)/i.test(t)) return 'Biology';
+    if (/(english|literature|grammar|prose|poetry)/i.test(t)) return 'English';
+    if (/(computer|programming|algorithm)/i.test(t)) return 'Computer Science';
+    if (/(history|geography|civics|economics|political|democratic|resource|disaster)/i.test(t)) return 'Social Science';
     return 'Unknown';
-  }
-
-  /**
-   * Extract class from filename
-   */
-  extractClassFromFilename(filename) {
-    const classMatch = filename.match(/(?:class|std)\s*(\d+|xi{1,3}|i{1,3}v?)/i);
-    if (classMatch) {
-      const classNum = classMatch[1].toUpperCase();
-      if (classNum === 'XII' || classNum === '12') return 'Class 12';
-      if (classNum === 'XI' || classNum === '11') return 'Class 11';
-      if (classNum === 'X' || classNum === '10') return 'Class 10';
-      return `Class ${classNum}`;
-    }
-    return 'Unknown';
-  }
-
-  /**
-   * Extract board from title
-   */
-  extractBoardFromTitle(title) {
-    const lower = title.toLowerCase();
-    if (/ncert/i.test(lower)) return 'NCERT';
-    if (/cbse/i.test(lower)) return 'CBSE';
-    if (/jee/i.test(lower)) return 'JEE';
-    if (/neet/i.test(lower)) return 'NEET';
-    return 'CBSE';
   }
 
   /**
@@ -236,130 +246,19 @@ Current credentials path: ${process.env.GOOGLE_APPLICATION_CREDENTIALS || 'NOT S
       const isScannedPDF = avgCharsPerPage < this.minCharactersPerPage;
       
       if (isScannedPDF) {
-        console.log(`[PDF Parser] ⚠️  Detected scanned PDF (avg ${Math.round(avgCharsPerPage)} chars/page)`);
+        console.log(`[PDF Parser] âš ï¸  Detected scanned PDF (avg ${Math.round(avgCharsPerPage)} chars/page)`);
         console.log('[PDF Parser] Switching to OCR extraction...');
         fullText = await this.extractTextWithOCR(pdfBuffer, totalPages);
         console.log(`[PDF Parser] OCR extracted ${fullText.length} characters`);
       }
       
-      // Split text by pages (approximate - pdf-parse doesn't provide page breaks reliably)
-      // We'll use line breaks and common patterns
-      const lines = fullText.split('\n').map(line => line.trim()).filter(line => line.length > 0);
-      
-      let currentChapter = 'General';
-      let questionNumber = 1;
-      let i = 0;
-      
-      while (i < lines.length) {
-        const line = lines[i];
-        
-        // Detect chapter headers
-        const chapterMatch = line.match(/^(?:Chapter|CHAPTER)\s+(\d+|[IVX]+)[:\s\-]?\s*(.+)/i);
-        if (chapterMatch) {
-          currentChapter = chapterMatch[2] || `Chapter ${chapterMatch[1]}`;
-          console.log(`[PDF Parser] Found chapter: ${currentChapter}`);
-          i++;
-          continue;
-        }
-        
-        // Detect exercise/question sections
-        const exerciseMatch = line.match(/^(Exercise|EXERCISE|Questions|QUESTIONS|MCQ|Practice)\s+(\d+\.?\d*)/i);
-        if (exerciseMatch) {
-          console.log(`[PDF Parser] Found exercise section: ${line}`);
-          i++;
-          continue;
-        }
-        
-        // Detect numbered questions: "1. Question text" or "Q1. Question text" or "Q.1 Question text"
-        const questionMatch = line.match(/^(?:Q\.?\s*)?(\d+)[\.\)]\s+(.+)/);
-        
-        if (questionMatch && questionMatch[2] && questionMatch[2].length > 15) {
-          let questionText = questionMatch[2].trim();
-          const originalQuestionNumber = questionMatch[1];
-          
-          // Look ahead to collect multi-line questions
-          let j = i + 1;
-          while (j < lines.length && j < i + 5) {
-            const nextLine = lines[j];
-            // Stop if we hit another question number or option pattern
-            if (/^(?:Q\.?\s*)?\d+[\.\)]/.test(nextLine) || /^[\(\[]?[a-dA-D][\)\]\.]\s+/.test(nextLine)) {
-              break;
-            }
-            // Stop if line looks like a header
-            if (/^(Exercise|EXERCISE|Chapter|CHAPTER)/i.test(nextLine)) {
-              break;
-            }
-            // If line seems to be continuation (doesn't start with number/letter marker)
-            if (nextLine.length > 10 && !/^[\(\[]?[a-dA-D][\)\]]/.test(nextLine)) {
-              questionText += ' ' + nextLine;
-              j++;
-            } else {
-              break;
-            }
-          }
-          
-          i = j; // Move to where we stopped collecting question text
-          
-          // Extract options (for MCQs)
-          const { options, nextIndex } = this.extractOptionsFromLines(lines, i);
-          i = nextIndex;
-          
-          // Determine question type
-          const questionType = options.length > 0 ? 'mcq' : 'short';
-          
-          // Create question object
-          const question = {
-            text: questionText,
-            type: questionType,
-            options: options.length > 0 ? options : undefined,
-            subject: metadata.subject || 'Unknown',
-            topic: currentChapter || 'General',
-            chapter: currentChapter || 'Unknown',
-            board: metadata.board,
-            class: metadata.class,
-            difficulty: 'medium',
-            marks: options.length > 0 ? 1 : 2,
-            correctAnswerText: this.extractCorrectAnswer(options),
-            source: 'PDF Import',
-            isActive: true,
-            questionNumber: questionNumber.toString()
-          };
-          
-          questions.push(question);
-          questionNumber++;
-        } else {
-          i++;
-        }
-      }
-      
-      console.log(`[PDF Parser] Extracted ${questions.length} questions`);
-      
-      // Attempt to extract diagrams for questions (sample first few pages)
-      const maxPagesToScan = Math.min(5, totalPages);
-      console.log(`[PDF Parser] Scanning first ${maxPagesToScan} pages for diagrams...`);
-      
-      for (let pageNum = 1; pageNum <= maxPagesToScan && pageNum <= questions.length; pageNum++) {
-        const questionContext = {
-          chapter: questions[pageNum - 1]?.chapter || 'General',
-          questionNumber: pageNum.toString()
-        };
-        
-        try {
-          const diagramMetadata = await this.diagramExtractor.extractDiagramFromPage(
-            pdfBuffer,
-            pageNum,
-            questionContext
-          );
-          
-          if (diagramMetadata && questions[pageNum - 1]) {
-            questions[pageNum - 1].diagram = diagramMetadata;
-          }
-        } catch (err) {
-          console.warn(`[PDF Parser] Failed to extract diagram from page ${pageNum}:`, err.message);
-        }
-      }
-      
-      return questions;
+      // Split full text into exercise-section chunks.
+      // Each chunk is passed to the AI enhancer as a raw block - the AI splits it
+      // into individual questions (handles multi-question blobs natively).
+      const chunks = this.splitIntoExerciseChunks(fullText, metadata);
+      console.log(`[PDF Parser] Extracted ${chunks.length} exercise chunk(s) for AI processing`);
+
+      return chunks;
       
     } catch (error) {
       console.error('[PDF Parser] Failed to extract questions:', error.message);
@@ -368,69 +267,78 @@ Current credentials path: ${process.env.GOOGLE_APPLICATION_CREDENTIALS || 'NOT S
   }
   
   /**
-   * Extract MCQ options from lines
-   * @param {Array<string>} lines - All lines
-   * @param {number} startIndex - Index to start looking
-   * @returns {Object} - { options: Array, nextIndex: number }
-   */
-  extractOptionsFromLines(lines, startIndex) {
-    const options = [];
-    const optionPattern = /^[\(\[]?([a-dA-D])[\)\]\.]\s+(.+)/;
-    let i = startIndex;
-    
-    // Look at next 6 lines for options
-    while (i < lines.length && i < startIndex + 6) {
-      const line = lines[i];
-      const match = line.match(optionPattern);
-      
-      if (match && match[2]) {
-        let optionText = match[2].trim();
-        
-        // Look ahead for multi-line options
-        let j = i + 1;
-        while (j < lines.length && j < i + 3) {
-          const nextLine = lines[j];
-          // Stop if next option or question
-          if (optionPattern.test(nextLine) || /^(?:Q\.?\s*)?\d+[\.\)]/.test(nextLine)) {
-            break;
-          }
-          // Stop if looks like a header
-          if (/^(Exercise|EXERCISE|Chapter|CHAPTER|Answer|ANSWER)/i.test(nextLine)) {
-            break;
-          }
-          // Continue if seems like continuation
-          if (nextLine.length > 5 && !optionPattern.test(nextLine)) {
-            optionText += ' ' + nextLine;
-            j++;
-          } else {
-            break;
-          }
-        }
-        
-        options.push({
-          text: optionText,
-          isCorrect: false // Will be determined from answer key if available
-        });
-        
-        i = j;
-      } else {
-        // Not an option, stop looking
-        break;
-      }
-    }
-    
-    return { options, nextIndex: i };
-  }
-  
   /**
-   * Extract correct answer from options (if marked)
-   * @param {Array} options - Question options
-   * @returns {string|undefined} - Correct answer text
+   * Split PDF full text into chunks for AI question extraction.
+   * ALWAYS chunks the entire text — no content is skipped.
+   * Section headers are detected only to label chunks, not to gate them.
    */
-  extractCorrectAnswer(options) {
-    if (!options || options.length === 0) return undefined;
-    const correct = options.find(opt => opt.isCorrect);
-    return correct ? correct.text : undefined;
+  splitIntoExerciseChunks(text, metadata) {
+    const CHUNK_SIZE = 6000; // Larger chunks keep question context intact
+    const chunks = [];
+    const chapterName = metadata.chapter || 'General';
+
+    // Detect section markers for labelling (not for filtering)
+    const sectionRe = /(?:EXERCISES?\s*\d+[.]?\d*|Exercise\s+\d+[.]?\d*|THINK ABOUT IT|TRY THESE|LET['']S\s+THINK|IN[-\s]TEXT\s*QUESTIONS?|ACTIVITIES?|CHECK YOUR PROGRESS|PRACTICE\s*QUESTIONS?)/gi;
+    const markers = [];
+    let m;
+    while ((m = sectionRe.exec(text)) !== null) {
+      markers.push({ index: m.index, label: m[0].replace(/\s+/g, ' ').trim() });
+    }
+
+    // Chunk the ENTIRE text — nothing is excluded
+    let start = 0;
+    let chunkIdx = 0;
+    while (start < text.length) {
+      let end = Math.min(start + CHUNK_SIZE, text.length);
+      if (end < text.length) {
+        // Prefer breaking at a blank line, then at any newline
+        const lastDoubleNl = text.lastIndexOf('\n\n', end);
+        const lastNl = text.lastIndexOf('\n', end);
+        if (lastDoubleNl > start + CHUNK_SIZE / 2) end = lastDoubleNl;
+        else if (lastNl > start + CHUNK_SIZE / 2) end = lastNl;
+      }
+
+      const slice = text.slice(start, end).trim();
+      if (slice.length > 80) {
+        // Label with the first section marker that starts inside this chunk
+        const marker = markers.find(mk => mk.index >= start && mk.index < end);
+        const exerciseLabel = marker
+          ? marker.label
+          : chunkIdx === 0 ? 'Introduction' : `Part ${chunkIdx + 1}`;
+
+        chunks.push({ text: slice, topic: chapterName, chapter: chapterName, exerciseLabel });
+        console.log(`[PDF Parser] Chunk ${chunkIdx + 1}: ${slice.length} chars — "${exerciseLabel}"`);
+        chunkIdx++;
+      }
+      start = end + 1;
+    }
+
+    if (chunks.length === 0 && text.trim().length > 100) {
+      chunks.push({ text: text.trim(), topic: chapterName, chapter: chapterName, exerciseLabel: 'Full Text' });
+    }
+
+    console.log(`[PDF Parser] Created ${chunks.length} chunk(s) from ${text.length} chars (chunk size: ${CHUNK_SIZE})`);
+    return chunks;
+  }
+
+  /**
+   * Split text into segments of ~maxChars, breaking on newlines where possible.
+   */
+  chunkText(text, maxChars) {
+    if (text.length <= maxChars) return [text];
+    const chunks = [];
+    let start = 0;
+    while (start < text.length) {
+      let end = Math.min(start + maxChars, text.length);
+      if (end < text.length) {
+        const lastNl = text.lastIndexOf('\n', end);
+        if (lastNl > start + maxChars / 2) end = lastNl;
+      }
+      const slice = text.slice(start, end).trim();
+      if (slice.length > 50) chunks.push(slice);
+      start = end + 1;
+    }
+    return chunks;
   }
 
   /**
@@ -474,19 +382,19 @@ async function main() {
       JSON.stringify(result, null, 2)
     );
     
-    console.log('\n✅ PDF Extraction Complete!');
-    console.log('═══════════════════════════════════════');
-    console.log(`📚 Book: ${result.metadata.title}`);
-    console.log(`📖 Subject: ${result.metadata.subject}`);
-    console.log(`📝 Total Questions: ${result.stats.total}`);
-    console.log(`🖼️  With Diagrams: ${result.stats.withDiagrams}`);
-    console.log(`💾 Saved to: ${outputPath}`);
-    console.log('═══════════════════════════════════════\n');
+    console.log('\nâœ… PDF Extraction Complete!');
+    console.log('â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•');
+    console.log(`ðŸ“š Book: ${result.metadata.title}`);
+    console.log(`ðŸ“– Subject: ${result.metadata.subject}`);
+    console.log(`ðŸ“ Total Questions: ${result.stats.total}`);
+    console.log(`ðŸ–¼ï¸  With Diagrams: ${result.stats.withDiagrams}`);
+    console.log(`ðŸ’¾ Saved to: ${outputPath}`);
+    console.log('â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n');
     
     process.exit(0);
     
   } catch (error) {
-    console.error('❌ Error:', error.message);
+    console.error('âŒ Error:', error.message);
     console.error(error.stack);
     process.exit(1);
   }

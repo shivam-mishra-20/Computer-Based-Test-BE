@@ -11,8 +11,6 @@ import {
   triggerProcessing,
   stopAutomation,
   resetAutomationStatus,
-  getSchedule,
-  updateSchedule,
   getAvailableFolders
 } from '../../controllers/automationController';
 
@@ -36,9 +34,5 @@ router.get('/stats/:id', authMiddleware, requireRole('admin'), getBookProcessing
 // Processing record management (called by automation script)
 router.post('/record', authMiddleware, createProcessingRecord);
 router.put('/record/:id', authMiddleware, updateProcessingRecord);
-
-// Schedule management (Admin only)
-router.get('/schedule', authMiddleware, requireRole('admin'), getSchedule);
-router.put('/schedule', authMiddleware, requireRole('admin'), updateSchedule);
 
 export default router;

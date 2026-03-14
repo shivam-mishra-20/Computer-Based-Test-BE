@@ -93,8 +93,9 @@ export async function generateSolutionsForPaper(paper: GeneratedPaperResult): Pr
   sections: { title: string; solutions: { solutionText: string }[] }[];
 }> {
   try {
-    const vertexAI = getVertexAI();
-    const model = vertexAI.getGenerativeModel({
+    const genAI = getGemini();
+    if (!genAI) throw new Error('Gemini initialized failed check GEMINI_API_KEY');
+    const model = genAI.getGenerativeModel({
       model: 'gemini-2.5-pro',
       generationConfig: {
         temperature: 0.7,
@@ -161,7 +162,7 @@ Return ONLY the JSON object:`;
     const result = await model.generateContent({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
     });
-    const raw = result.response.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const raw = result.response.text() || '';
     let parsed: any;
     try {
       // Clean up the response - remove markdown code blocks if present
@@ -741,9 +742,10 @@ SOURCE MATERIAL (truncate if huge):\n"""\n${source.slice(0, 120_000)}\n"""`;
 
 export async function generatePaperFromTextGemini(source: string, blueprint: PaperBlueprint): Promise<GeneratedPaperResult> {
   try {
-    console.log('[AI Service] Generating paper from text with Vertex AI...');
-    const vertexAI = getVertexAI();
-    const model = vertexAI.getGenerativeModel({
+    console.log('[AI Service] Generating paper from text with Gemini AI...');
+    const genAI = getGemini();
+    if (!genAI) throw new Error('Gemini AI not initialized. Check GEMINI_API_KEY');
+    const model = genAI.getGenerativeModel({
       model: 'gemini-2.5-pro',
       generationConfig: {
         temperature: 0.7,
@@ -759,7 +761,7 @@ export async function generatePaperFromTextGemini(source: string, blueprint: Pap
     const result = await model.generateContent({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
     });
-    const raw = result.response.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const raw = result.response.text() || '';
     console.log(`[AI Service] Received response (${raw.length} chars)`);
   let parsed: any;
   try {

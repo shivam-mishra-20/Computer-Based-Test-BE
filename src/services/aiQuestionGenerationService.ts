@@ -1,20 +1,19 @@
 import { Types } from 'mongoose';
+import { getVisionClient as createVisionClient } from '../lib/googleClients';
 import dotenv from 'dotenv';
-import type { VertexAI } from '@google-cloud/vertexai';
-import { getVertexClient, getVisionClient as createVisionClient } from '../lib/googleClients';
-
-dotenv.config();
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 // Singleton instances
-let vertexAI: VertexAI | null = null;
+let genAI: GoogleGenerativeAI | null = null;
 let visionClient: ReturnType<typeof createVisionClient> | null = null;
 
-/**
- * Get or initialize Vertex AI client
- */
-function getVertexAI(): VertexAI {
-  if (!vertexAI) vertexAI = getVertexClient();
-  return vertexAI;
+function getGemini(): GoogleGenerativeAI {
+  if (!genAI) {
+    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+    if (!apiKey) throw new Error('GEMINI_API_KEY is not set');
+    genAI = new GoogleGenerativeAI(apiKey);
+  }
+  return genAI;
 }
 
 /**
@@ -144,8 +143,8 @@ export async function generateQuestionsFromText(
     console.log(`[AI Generation] Generating ${options.count} questions...`);
     console.log(`[AI Generation] Metadata: Class=${options.class}, Subject=${options.subject}, Topic=${options.topic || 'N/A'}`);
     
-    const vertexAI = getVertexAI();
-    const model = vertexAI.getGenerativeModel({
+    const genAI = getGemini();
+    const model = genAI.getGenerativeModel({
       model: selectedModel,
       generationConfig: {
         temperature: 0.7,
@@ -307,8 +306,7 @@ Generate ${options.count} questions NOW. Return ONLY the JSON array.`;
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
     });
     
-    const response = result.response;
-    const responseText = response.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const responseText = result.response.text() || '';
     
     console.log(`[AI Generation] Received ${responseText.length} chars response`);
     

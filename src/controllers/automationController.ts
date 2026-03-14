@@ -430,7 +430,11 @@ export const triggerProcessing = async (req: Request, res: Response) => {
         TARGET_FOLDER: folder,
         EPUB_BASE_PATH: process.cwd(),
         BACKEND_API_KEY: token, // Pass the admin token
-        BACKEND_API_URL: process.env.BACKEND_URL || 'http://localhost:5000'
+        BACKEND_API_URL: process.env.BACKEND_URL || 'http://localhost:5000',
+        // Resolve to absolute path so child processes can locate the key file regardless of cwd
+        GOOGLE_APPLICATION_CREDENTIALS: path.resolve(
+          process.env.GOOGLE_APPLICATION_CREDENTIALS || './vision-key.json'
+        ),
       },
       detached: false,
       stdio: 'inherit' // Show logs in terminal
@@ -603,78 +607,6 @@ export const getAvailableFolders = async (req: Request, res: Response) => {
   }
 };
 
-// Schedule management
-export const getSchedule = async (req: Request, res: Response) => {
-  try {
-    const { automationScheduler } = await import('../services/automationScheduler');
-    const scheduleStatus = await automationScheduler.getScheduleStatus();
-    
-    res.json({
-      success: true,
-      schedule: scheduleStatus
-    });
-  } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      message: 'Failed to get schedule',
-      error: error.message
-    });
-  }
-};
-
-export const updateSchedule = async (req: Request, res: Response) => {
-  try {
-    const { time, days, enabled } = req.body;
-    
-    if (!time) {
-      return res.status(400).json({
-        success: false,
-        message: 'Time is required (format: HH:MM)'
-      });
-    }
-    
-    // Dynamic imports to avoid circular dependencies
-    const { automationScheduler } = await import('../services/automationScheduler');
-    
-    // Convert to cron expression
-    const [hours, minutes] = time.split(':').map(Number);
-    const dayString = days && days.length > 0 ? days.join(',') : '*';
-    const cronExpression = `${minutes} ${hours} * * ${dayString}`;
-    
-    // Update schedule
-    await automationScheduler.updateSchedule(cronExpression, enabled !== false);
-    
-    // Get human-readable description
-    const timeStr = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
-    let description = '';
-    if (dayString === '*') {
-      description = `Daily at ${timeStr}`;
-    } else if (dayString === '1-5') {
-      description = `Weekdays at ${timeStr}`;
-    } else {
-      const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-      const selectedDays = dayString.split(',').map((d: string) => dayNames[parseInt(d)]).join(', ');
-      description = `${selectedDays} at ${timeStr}`;
-    }
-    
-    res.json({
-      success: true,
-      message: 'Schedule updated successfully',
-      schedule: {
-        time,
-        days,
-        cronExpression,
-        description,
-        enabled: enabled !== false
-      }
-    });
-  } catch (error: any) {
-    res.status(500).json({
-      success: false,
-      message: 'Failed to update schedule',
-      error: error.message
-    });
-  }
-};
+// Schedule management removed as it's manual only now
 
 export { AutomationStatus, ProcessingStats };
