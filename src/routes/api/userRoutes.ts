@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
-import { adminCreateUser, adminListUsers, adminGetUser, adminUpdateUser, adminDeleteUser, adminDashboard, adminGetPendingUsers, adminApproveUser, adminRejectUser, getUserSettings, updateUserSettings, changePassword, updateProfile } from '../../controllers/userController';
+import { adminCreateUser, adminListUsers, adminGetUser, adminUpdateUser, adminDeleteUser, adminDashboard, adminGetPendingUsers, adminApproveUser, adminRejectUser, adminGetRegistrationRecords, getUserSettings, updateUserSettings, changePassword, updateProfile } from '../../controllers/userController';
 
 const router = Router();
 
@@ -9,6 +9,7 @@ router.get('/dashboard', authMiddleware, requireRole('admin'), adminDashboard);
 
 // Admin-only user registration management
 router.get('/pending', authMiddleware, requireRole('admin'), adminGetPendingUsers);
+router.get('/registrations', authMiddleware, requireRole('admin'), adminGetRegistrationRecords);
 router.put('/:id/approve', authMiddleware, requireRole('admin'), adminApproveUser);
 router.put('/:id/reject', authMiddleware, requireRole('admin'), adminRejectUser);
 

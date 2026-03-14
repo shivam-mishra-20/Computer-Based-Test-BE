@@ -3,6 +3,7 @@ import bcrypt from 'bcrypt';
 
 export type UserRole = 'admin' | 'teacher' | 'student';
 export type UserStatus = 'pending' | 'approved' | 'rejected';
+export type RegistrationSource = 'website' | 'app' | 'admin' | 'unknown';
 export type Board = 'CBSE' | 'ICSE' | 'State Board' | 'IB' | 'IGCSE' | 'Other';
 export type TargetExam = 'JEE Main' | 'JEE Advanced' | 'NEET' | 'CET' | 'Board Exams' | 'CUET' | 'Olympiad' | 'Foundation' | 'Other';
 
@@ -12,6 +13,7 @@ export interface IUser extends Document {
   password: string;
   role: UserRole;
   status: UserStatus;
+  registrationSource?: RegistrationSource;
   phone?: string;
   empCode?: string; // For EtimeOffice mapping
   bio?: string; // Teacher/student bio
@@ -52,6 +54,7 @@ const userSchema = new Schema<IUser>({
   password: { type: String, required: true },
   role: { type: String, enum: ['admin', 'teacher', 'student'], default: 'student', index: true },
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'approved', index: true },
+  registrationSource: { type: String, enum: ['website', 'app', 'admin', 'unknown'], default: 'unknown', index: true },
   phone: { type: String },
   empCode: { type: String, unique: true, sparse: true, index: true },
   bio: { type: String },

@@ -12,6 +12,68 @@ export const adminGetPendingUsers = async (req: Request, res: Response) => {
 	}
 };
 
+// Admin-only: registration records across web/app for auditing and management
+export const adminGetRegistrationRecords = async (req: Request, res: Response) => {
+	try {
+		const {
+			role,
+			status,
+			registrationSource,
+			search,
+			from,
+			to,
+		} = req.query as Record<string, string | undefined>;
+
+		const filter: any = {};
+
+		if (role && ['teacher', 'student', 'admin'].includes(role)) {
+			filter.role = role;
+		}
+
+		if (status && ['pending', 'approved', 'rejected'].includes(status)) {
+			filter.status = status;
+		}
+
+		if (registrationSource && ['website', 'app', 'admin', 'unknown'].includes(registrationSource)) {
+			filter.registrationSource = registrationSource;
+		}
+
+		if (search?.trim()) {
+			const rx = new RegExp(search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+			filter.$or = [
+				{ name: rx },
+				{ email: rx },
+				{ phone: rx },
+				{ empCode: rx },
+			];
+		}
+
+		if (from || to) {
+			filter.createdAt = {};
+			if (from) {
+				const fromDate = new Date(from);
+				if (!Number.isNaN(fromDate.getTime())) filter.createdAt.$gte = fromDate;
+			}
+			if (to) {
+				const toDate = new Date(to);
+				if (!Number.isNaN(toDate.getTime())) {
+					toDate.setHours(23, 59, 59, 999);
+					filter.createdAt.$lte = toDate;
+				}
+			}
+			if (Object.keys(filter.createdAt).length === 0) delete filter.createdAt;
+		}
+
+		const users = await User.find(filter)
+			.select('-password')
+			.sort({ createdAt: -1 });
+
+		res.json(users);
+	} catch {
+		res.status(500).json({ message: 'Server error' });
+	}
+};
+
 // Admin-only: Approve user registration
 export const adminApproveUser = async (req: Request, res: Response) => {
 	try {
@@ -102,7 +164,16 @@ export const adminCreateUser = async (req: Request, res: Response) => {
 			if (existingEmp) return res.status(400).json({ message: 'empCode already in use by another user' });
 		}
 
-	const user = await User.create({ name, email: lcEmail, password, role, classLevel, batch, empCode: sanitizedEmpCode });
+	const user = await User.create({
+		name,
+		email: lcEmail,
+		password,
+		role,
+		classLevel,
+		batch,
+		empCode: sanitizedEmpCode,
+		registrationSource: 'admin',
+	});
 		await logAudit(currentUser.id, 'admin.user.create', String(user._id), { name, email: lcEmail, role, empCode: sanitizedEmpCode });
 		res.status(201).json({ id: user._id, name: user.name, email: user.email, role: user.role, empCode: user.empCode });
 	} catch (err) {
@@ -115,10 +186,21 @@ export const adminCreateUser = async (req: Request, res: Response) => {
 export const adminListUsers = async (req: Request, res: Response) => {
 	try {
 		const role = (req.query.role as string) || undefined;
+		const status = (req.query.status as string) || undefined;
+		const registrationSource = (req.query.registrationSource as string) || undefined;
+		const search = (req.query.search as string) || undefined;
 		const classLevel = (req.query.classLevel as string) || undefined;
 		const batch = (req.query.batch as string) || undefined;
 		const filter: any = {};
 		if (role && ['teacher', 'student', 'admin'].includes(role)) filter.role = role;
+		if (status && ['pending', 'approved', 'rejected'].includes(status)) filter.status = status;
+		if (registrationSource && ['website', 'app', 'admin', 'unknown'].includes(registrationSource)) {
+			filter.registrationSource = registrationSource;
+		}
+		if (search && search.trim()) {
+			const rx = new RegExp(search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+			filter.$or = [{ name: rx }, { email: rx }, { phone: rx }, { empCode: rx }];
+		}
 		if (classLevel) filter.classLevel = classLevel;
 		if (batch) filter.batch = batch;
 		const users = await User.find(filter).select('-password');

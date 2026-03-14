@@ -5,15 +5,22 @@ import { AuthPayload } from '../middlewares/authMiddleware';
 import { firebaseSignInWithEmailPassword, getFirestoreUserProfile, getFirestoreUserByEmail, getFirestoreUserByEmailAny, uploadToFirebase } from '../services/firebaseService';
 import bcrypt from 'bcrypt';
 
+const normalizeRegistrationSource = (value: unknown): 'website' | 'app' | 'unknown' => {
+  const source = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (source === 'website' || source === 'web') return 'website';
+  if (source === 'app' || source === 'mobile') return 'app';
+  return 'unknown';
+};
+
 // Public registration endpoint for general users (with admin approval)
 export const publicRegister = async (req: Request, res: Response) => {
-  const { name, email, password, phone, classLevel, board, targetExams } = req.body;
+  const { name, email, password, phone, classLevel, board, targetExams, registrationSource } = req.body;
   const lcEmail = typeof email === 'string' ? email.toLowerCase() : email;
   
   try {
     // Validate required fields
-    if (!name || !email || !password || !classLevel || !board || !targetExams || targetExams.length === 0) {
-      return res.status(400).json({ message: 'Name, email, password, class, board, and at least one target exam are required' });
+    if (!name || !email || !password || !phone || !classLevel || !board || !targetExams || targetExams.length === 0) {
+      return res.status(400).json({ message: 'Name, email, password, phone, class, board, and at least one target exam are required' });
     }
 
     // Check if user already exists
@@ -36,7 +43,8 @@ export const publicRegister = async (req: Request, res: Response) => {
       targetExams,
       role: 'student',
       status: 'pending',
-      authProvider: 'local'
+      authProvider: 'local',
+      registrationSource: normalizeRegistrationSource(registrationSource),
     });
     await user.save();
 
@@ -52,7 +60,7 @@ export const publicRegister = async (req: Request, res: Response) => {
 
 // Public teacher registration endpoint (with admin approval)
 export const publicTeacherRegister = async (req: Request, res: Response) => {
-  const { name, email, password, phone } = req.body;
+  const { name, email, password, phone, registrationSource } = req.body;
   const lcEmail = typeof email === 'string' ? email.toLowerCase() : email;
   
   try {
@@ -78,7 +86,8 @@ export const publicTeacherRegister = async (req: Request, res: Response) => {
       phone,
       role: 'teacher',
       status: 'pending',
-      authProvider: 'local'
+      authProvider: 'local',
+      registrationSource: normalizeRegistrationSource(registrationSource),
     });
     await user.save();
 
@@ -100,13 +109,25 @@ export const register = async (req: Request, res: Response) => {
     });
   }
 
-  const { name, email, password } = req.body;
+  const { name, email, password, phone, registrationSource } = req.body;
   const lcEmail = typeof email === 'string' ? email.toLowerCase() : email;
   try {
+    if (!name || !email || !password || !phone) {
+      return res.status(400).json({ message: 'Name, email, password and phone are required' });
+    }
+
     const existing = await User.findOne({ email: lcEmail });
     if (existing) return res.status(400).json({ message: 'User already exists' });
 
-  const user = new User({ name, email: lcEmail, password, role: 'student', status: 'approved' });
+  const user = new User({
+    name,
+    email: lcEmail,
+    password,
+    phone,
+    role: 'student',
+    status: 'approved',
+    registrationSource: normalizeRegistrationSource(registrationSource),
+  });
     await user.save();
 
   const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET as string, { expiresIn: '3650d' });
@@ -155,7 +176,8 @@ export const login = async (req: Request, res: Response) => {
           firebaseUid: (user as any).firebaseUid,
           profileImage: (user as any).profileImage,
           phone: (user as any).phone,
-          empCode: (user as any).empCode
+          empCode: (user as any).empCode,
+          registrationSource: (user as any).registrationSource,
         } 
       });
     }
@@ -176,6 +198,7 @@ export const login = async (req: Request, res: Response) => {
               status: 'approved',
               firebaseUid: fsUser.uid || fsUser.id,
               authProvider: 'firebase',
+              registrationSource: 'unknown',
               classLevel: (fsUser.classLevel as any) || (fsUser as any).Class,
               batch: (fsUser.batch as any),
             } as any);
@@ -207,6 +230,7 @@ export const login = async (req: Request, res: Response) => {
           status: 'approved',
           firebaseUid: fb.uid,
           authProvider: 'firebase',
+          registrationSource: 'unknown',
         } as any);
       } else {
         local.firebaseUid = fb.uid;
@@ -223,7 +247,7 @@ export const login = async (req: Request, res: Response) => {
   const token = jwt.sign({ id: local._id, role: local.role }, process.env.JWT_SECRET as string, { expiresIn: '3650d' });
   // Login debug: firebase REST sign-in succeeded
   console.log(`Login debug: firebase-rest auth succeeded for ${lcEmail} (uid=${local.firebaseUid || local._id})`);
-  return res.json({ token, user: { id: local._id, name: local.name, email: local.email, role: local.role, classLevel: local.classLevel, batch: local.batch, firebaseUid: local.firebaseUid } });
+  return res.json({ token, user: { id: local._id, name: local.name, email: local.email, role: local.role, classLevel: local.classLevel, batch: local.batch, firebaseUid: local.firebaseUid, registrationSource: (local as any).registrationSource } });
     }
   } catch (err) {
     console.error('Login error:', err);
@@ -236,7 +260,7 @@ export const me = async (req: Request, res: Response) => {
   try {
     const current = (req as any).user as { id: string; role?: string } | undefined;
     if (!current) return res.status(401).json({ message: 'Unauthorized' });
-    const user = await User.findById(current.id).select('name email role classLevel batch firebaseUid profileImage phone empCode bio status');
+    const user = await User.findById(current.id).select('name email role classLevel batch firebaseUid profileImage phone empCode bio status registrationSource');
     if (!user) return res.status(404).json({ message: 'User not found' });
     res.json({ 
       _id: user._id, 
@@ -251,7 +275,8 @@ export const me = async (req: Request, res: Response) => {
       profileImage: (user as any).profileImage, 
       phone: (user as any).phone, 
       empCode: (user as any).empCode, 
-      bio: (user as any).bio 
+      bio: (user as any).bio,
+      registrationSource: (user as any).registrationSource,
     });
   } catch (err) {
     console.error('Get user error:', err);
