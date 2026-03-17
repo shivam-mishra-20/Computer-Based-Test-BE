@@ -2,8 +2,7 @@ import { Request, Response } from 'express';
 import User from '../models/User';
 import jwt from 'jsonwebtoken';
 import { AuthPayload } from '../middlewares/authMiddleware';
-import { firebaseSignInWithEmailPassword, getFirestoreUserProfile, getFirestoreUserByEmail, getFirestoreUserByEmailAny, uploadToFirebase } from '../services/firebaseService';
-import bcrypt from 'bcrypt';
+import { uploadToFirebase } from '../services/firebaseService';
 
 const normalizeRegistrationSource = (value: unknown): 'website' | 'app' | 'unknown' => {
   const source = typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -14,13 +13,13 @@ const normalizeRegistrationSource = (value: unknown): 'website' | 'app' | 'unkno
 
 // Public registration endpoint for general users (with admin approval)
 export const publicRegister = async (req: Request, res: Response) => {
-  const { name, email, password, phone, classLevel, board, targetExams, registrationSource } = req.body;
+  const { name, email, password, phone, classLevel, board, targetExams, registrationSource, profileImage } = req.body;
   const lcEmail = typeof email === 'string' ? email.toLowerCase() : email;
   
   try {
     // Validate required fields
-    if (!name || !email || !password || !phone || !classLevel || !board || !targetExams || targetExams.length === 0) {
-      return res.status(400).json({ message: 'Name, email, password, phone, class, board, and at least one target exam are required' });
+    if (!name || !email || !password || !phone || !classLevel || !board || !targetExams || targetExams.length === 0 || !profileImage) {
+      return res.status(400).json({ message: 'Name, email, password, phone, class, board, profile photo, and at least one target exam are required' });
     }
 
     // Check if user already exists
@@ -45,6 +44,7 @@ export const publicRegister = async (req: Request, res: Response) => {
       status: 'pending',
       authProvider: 'local',
       registrationSource: normalizeRegistrationSource(registrationSource),
+      profileImage,
     });
     await user.save();
 
@@ -60,13 +60,13 @@ export const publicRegister = async (req: Request, res: Response) => {
 
 // Public teacher registration endpoint (with admin approval)
 export const publicTeacherRegister = async (req: Request, res: Response) => {
-  const { name, email, password, phone, registrationSource } = req.body;
+  const { name, email, password, phone, registrationSource, profileImage } = req.body;
   const lcEmail = typeof email === 'string' ? email.toLowerCase() : email;
   
   try {
     // Validate required fields
-    if (!name || !email || !password || !phone) {
-      return res.status(400).json({ message: 'Name, email, password, and phone are required' });
+    if (!name || !email || !password || !phone || !profileImage) {
+      return res.status(400).json({ message: 'Name, email, password, phone, and profile photo are required' });
     }
 
     // Check if user already exists
@@ -88,6 +88,7 @@ export const publicTeacherRegister = async (req: Request, res: Response) => {
       status: 'pending',
       authProvider: 'local',
       registrationSource: normalizeRegistrationSource(registrationSource),
+      profileImage,
     });
     await user.save();
 
@@ -142,113 +143,66 @@ export const login = async (req: Request, res: Response) => {
   const lcEmail = typeof email === 'string' ? email.toLowerCase() : email;
   try {
     const user = await User.findOne({ email: lcEmail });
-    
-    // Check if user exists and verify password
-    if (user && await user.comparePassword(password)) {
-      // Check user status
-      if (user.status === 'pending') {
-        return res.status(403).json({ 
-          message: 'Your account is pending admin approval. Please wait for approval before logging in.',
-          status: 'pending'
-        });
-      }
-      if (user.status === 'rejected') {
-        return res.status(403).json({ 
-          message: 'Your account registration was rejected. Please contact support.',
-          status: 'rejected'
-        });
-      }
-      
-      // User is approved, generate token (10 years - effectively permanent until manual logout)
-      const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET as string, { expiresIn: '3650d' });
-      console.log(`Login debug: local auth succeeded for ${lcEmail}`);
-      return res.json({ 
-        token, 
-        user: { 
-          _id: user._id,
-          id: user._id, 
-          name: user.name, 
-          email: user.email, 
-          role: user.role, 
-          status: user.status,
-          classLevel: (user as any).classLevel, 
-          batch: (user as any).batch, 
-          firebaseUid: (user as any).firebaseUid,
-          profileImage: (user as any).profileImage,
-          phone: (user as any).phone,
-          empCode: (user as any).empCode,
-          registrationSource: (user as any).registrationSource,
-        } 
+
+    if (!user) {
+      return res.status(404).json({
+        message: "You don't seem to have an account. Please register to login.",
+        status: 'account-not-found',
       });
     }
-    
-    if (!user || !(await user.comparePassword(password))) {
-      // Fallback A: Firestore Users hashed password (like StudentLogin.jsx)
-  const fsUser = await getFirestoreUserByEmailAny(lcEmail);
-      if (fsUser?.password) {
-        const isMatch = await bcrypt.compare(password, fsUser.password);
-        if (isMatch) {
-          let local = await User.findOne({ email: lcEmail });
-          if (!local) {
-            local = new User({
-              name: fsUser.name || lcEmail.split('@')[0],
-              email: lcEmail,
-              password: Math.random().toString(36).slice(2),
-              role: (fsUser.role as any) || 'student',
-              status: 'approved',
-              firebaseUid: fsUser.uid || fsUser.id,
-              authProvider: 'firebase',
-              registrationSource: 'unknown',
-              classLevel: (fsUser.classLevel as any) || (fsUser as any).Class,
-              batch: (fsUser.batch as any),
-            } as any);
-          } else {
-            local.firebaseUid = fsUser.uid || fsUser.id;
-            local.authProvider = 'firebase';
-            if (fsUser.classLevel || (fsUser as any).Class) local.classLevel = (fsUser.classLevel as any) || (fsUser as any).Class;
-            if (fsUser.batch) local.batch = (fsUser.batch as any);
-            if (fsUser.name && !local.name) local.name = fsUser.name;
-          }
-          await local.save();
-          const token = jwt.sign({ id: local._id, role: local.role }, process.env.JWT_SECRET as string, { expiresIn: '3650d' });
-          // Login debug: firestore bcrypt authentication succeeded
-          console.log(`Login debug: firestore-bcrypt auth succeeded for ${lcEmail} (uid=${local.firebaseUid || local._id})`);
-          return res.json({ token, user: { id: local._id, name: local.name, email: local.email, role: local.role, classLevel: local.classLevel, batch: local.batch, firebaseUid: local.firebaseUid } });
-        }
-      }
-      // Fallback B: Firebase Auth REST sign-in
-      const fb = await firebaseSignInWithEmailPassword(lcEmail, password);
-  if (!fb) return res.status(400).json({ message: 'Invalid credentials' });
-      // Upsert local user
-      let local = await User.findOne({ email: lcEmail });
-      if (!local) {
-        local = new User({
-          name: fb.displayName || lcEmail.split('@')[0],
-          email: lcEmail,
-          password: Math.random().toString(36).slice(2), // placeholder; not used for Firebase users
-          role: 'student',
-          status: 'approved',
-          firebaseUid: fb.uid,
-          authProvider: 'firebase',
-          registrationSource: 'unknown',
-        } as any);
-      } else {
-        local.firebaseUid = fb.uid;
-        local.authProvider = 'firebase';
-      }
-      // Try to enrich with Firestore profile
-      const profile = await getFirestoreUserProfile(fb.uid);
-      if (profile) {
-        if (profile.name && !local.name) local.name = profile.name;
-        if (profile.classLevel) local.classLevel = profile.classLevel;
-        if (profile.batch) local.batch = profile.batch;
-      }
-  await local.save();
-  const token = jwt.sign({ id: local._id, role: local.role }, process.env.JWT_SECRET as string, { expiresIn: '3650d' });
-  // Login debug: firebase REST sign-in succeeded
-  console.log(`Login debug: firebase-rest auth succeeded for ${lcEmail} (uid=${local.firebaseUid || local._id})`);
-  return res.json({ token, user: { id: local._id, name: local.name, email: local.email, role: local.role, classLevel: local.classLevel, batch: local.batch, firebaseUid: local.firebaseUid, registrationSource: (local as any).registrationSource } });
+
+    // Hard-disable legacy Firebase-auth users in login flow.
+    if ((user as any).authProvider === 'firebase') {
+      return res.status(403).json({
+        message: 'This legacy Firebase account is no longer supported. Please contact admin to migrate/reset your account for MongoDB login.',
+        status: 'legacy-auth-disabled',
+      });
     }
+
+    const isPasswordValid = await user.comparePassword(password);
+    if (!isPasswordValid) {
+      return res.status(400).json({ message: 'Invalid credentials' });
+    }
+
+    // Check user status
+    if (user.status === 'pending') {
+      return res.status(403).json({
+        message: 'Your account is pending admin approval. Please wait for approval before logging in.',
+        status: 'pending',
+      });
+    }
+    if (user.status === 'rejected') {
+      return res.status(403).json({
+        message: 'Your account registration was rejected. Please contact support.',
+        status: 'rejected',
+      });
+    }
+
+    // User is approved, generate token (10 years - effectively permanent until manual logout)
+    const token = jwt.sign(
+      { id: user._id, role: user.role },
+      process.env.JWT_SECRET as string,
+      { expiresIn: '3650d' }
+    );
+    console.log(`Login debug: mongodb-local auth succeeded for ${lcEmail}`);
+    return res.json({
+      token,
+      user: {
+        _id: user._id,
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        status: user.status,
+        classLevel: (user as any).classLevel,
+        batch: (user as any).batch,
+        firebaseUid: (user as any).firebaseUid,
+        profileImage: (user as any).profileImage,
+        phone: (user as any).phone,
+        empCode: (user as any).empCode,
+        registrationSource: (user as any).registrationSource,
+      },
+    });
   } catch (err) {
     console.error('Login error:', err);
     res.status(500).json({ message: 'Server error' });
