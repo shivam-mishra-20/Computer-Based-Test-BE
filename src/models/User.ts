@@ -4,7 +4,7 @@ import bcrypt from 'bcrypt';
 export type UserRole = 'admin' | 'teacher' | 'student';
 export type UserStatus = 'pending' | 'approved' | 'rejected';
 export type RegistrationSource = 'website' | 'app' | 'admin' | 'unknown';
-export type Board = 'CBSE' | 'ICSE' | 'State Board' | 'IB' | 'IGCSE' | 'Other';
+export type Board = 'CBSE' | 'ICSE' | 'GSEB' | 'IB' | 'IGCSE' | 'Other';
 export type TargetExam = 'JEE Main' | 'JEE Advanced' | 'NEET' | 'CET' | 'Board Exams' | 'CUET' | 'Olympiad' | 'Foundation' | 'Other';
 
 export interface IUser extends Document {
@@ -59,7 +59,7 @@ const userSchema = new Schema<IUser>({
   empCode: { type: String, unique: true, sparse: true, index: true },
   bio: { type: String },
   pushToken: { type: String },
-  board: { type: String, enum: ['CBSE', 'ICSE', 'State Board', 'IB', 'IGCSE', 'Other'], index: true },
+  board: { type: String, enum: ['CBSE', 'ICSE', 'GSEB', 'IB', 'IGCSE', 'Other'], index: true },
   targetExams: [{ type: String, enum: ['JEE Main', 'JEE Advanced', 'NEET', 'CET', 'Board Exams', 'CUET', 'Olympiad', 'Foundation', 'Other'] }],
   studyGoals: [{ type: String }],
   profileImage: { type: String },
