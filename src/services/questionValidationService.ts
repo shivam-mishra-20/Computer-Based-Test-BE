@@ -112,6 +112,20 @@ export function sanitizeQuestionData(data: Partial<EnhancedQuestionData>): Parti
   if (sanitized.section) {
     sanitized.section = normalizeField(sanitized.section);
   }
+
+  // 4b. Normalize difficulty aliases coming from UI flows
+  if (sanitized.difficulty) {
+    const difficulty = String(sanitized.difficulty).toLowerCase().trim();
+    if (difficulty === 'mixed') {
+      sanitized.difficulty = 'medium';
+    } else if (difficulty === 'moderate') {
+      sanitized.difficulty = 'medium';
+    } else if (difficulty === 'beginner') {
+      sanitized.difficulty = 'easy';
+    } else if (difficulty === 'advanced') {
+      sanitized.difficulty = 'hard';
+    }
+  }
   
   // 5. Normalize question type
   if (sanitized.type) {
