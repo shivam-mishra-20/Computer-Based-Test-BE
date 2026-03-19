@@ -39,6 +39,7 @@ import syllabusRoutes from './routes/api/syllabusRoutes';
 import automationRoutes from './routes/api/automation';
 import resourceRoutes from './routes/api/resourceRoutes';
 import eodRoutes from './routes/api/eodRoutes';
+import scholarshipRoutes from './routes/api/scholarshipRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import { globalLimiter } from './middlewares/rateLimiter';
 import path from 'path';
@@ -201,6 +202,9 @@ app.use('/api/syllabus', syllabusRoutes);
 app.use('/api/resources', resourceRoutes);
 // EOD (End of Day) reports
 app.use('/api/eod', eodRoutes);
+
+// Scholarship test routes
+app.use('/api/scholarship', scholarshipRoutes);
 
 // Webhook routes
 import webhookRoutes from './routes/api/webhookRoutes';
