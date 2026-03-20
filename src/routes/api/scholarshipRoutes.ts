@@ -12,6 +12,8 @@ import {
   deleteTestCtrl,
   getShareLinkCtrl,
   getTestPreviewCtrl,
+  getAttemptReviewCtrl,
+  updateAttemptReviewCtrl,
 } from '../../controllers/scholarshipController';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 
@@ -26,6 +28,8 @@ router.post('/attempts/:attemptId/submit', submitTestCtrl);
 // Admin routes (authentication required)
 router.get('/results', authMiddleware, getResultsCtrl);
 router.post('/results/publish', authMiddleware, publishResultsCtrl);
+router.get('/results/:attemptId/detail', authMiddleware, getAttemptReviewCtrl);
+router.patch('/results/:attemptId/review', authMiddleware, updateAttemptReviewCtrl);
 
 // Test Management routes
 router.post('/tests', authMiddleware, createTestCtrl);

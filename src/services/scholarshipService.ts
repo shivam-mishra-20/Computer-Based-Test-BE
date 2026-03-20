@@ -2,8 +2,37 @@ import ScholarshipAttempt from '../models/ScholarshipAttempt';
 import ScholarshipTest from '../models/ScholarshipTest';
 import { getClassQuestionModel } from '../models/ClassQuestion';
 import { Types } from 'mongoose';
+import { randomBytes } from 'crypto';
 
 const SCHOLARSHIP_BOARD_PATTERN = /scholarship/i;
+
+function normalizePhone(phone: string): { raw: string; normalized: string } {
+  const raw = String(phone || '').trim();
+  const digits = raw.replace(/\D+/g, '');
+
+  // Common cases: 10-digit local number, or +91/91 prefix.
+  let normalized = digits;
+  if (normalized.length > 10) {
+    normalized = normalized.slice(-10);
+  }
+
+  return { raw, normalized };
+}
+
+function generateAttemptAccessKey(): string {
+  // 48 hex chars (~192 bits). Stored server-side; client keeps it in localStorage.
+  return randomBytes(24).toString('hex');
+}
+
+function requireValidAttemptAccess(attempt: any, providedKey?: string) {
+  const stored = String(attempt?.attemptAccessKey || '');
+  if (!stored) return;
+
+  const given = String(providedKey || '');
+  if (!given || given !== stored) {
+    throw new Error('Unauthorized attempt access');
+  }
+}
 
 function expandSubjectAliases(subject: string): string[] {
   const s = (subject || '').trim();
@@ -198,21 +227,30 @@ function normalizeSubmittedAnswers(answers: any): NormalizedAnswer[] {
 export async function createScholarshipAttempt(
   name: string,
   phone: string,
-  classLevel: number,
+  classLevel: number | undefined,
   testId?: string
 ) {
-  // Generate unique attempt ID
-  let attemptId = generateAttemptId(classLevel);
-  let exists = await ScholarshipAttempt.findOne({ attemptId });
+  const safeName = String(name || '').trim();
+  const { raw: rawPhone, normalized: phoneNormalized } = normalizePhone(phone);
 
-  while (exists) {
-    attemptId = generateAttemptId(classLevel);
-    exists = await ScholarshipAttempt.findOne({ attemptId });
+  if (!safeName) {
+    throw new Error('Name is required');
   }
 
+  if (!rawPhone || phoneNormalized.length < 10) {
+    throw new Error('Valid phone number is required');
+  }
+
+  // Generate unique attempt ID
   let subjects = ['Mathematics', 'Science'];
   let questionsPerSubject = 15;
   let durationMins = 60;
+  let scholarshipTestId = '';
+  let scholarshipTestName = '';
+  let scholarshipShareLink = '';
+
+  let resolvedClassLevel: number | undefined =
+    classLevel !== undefined && classLevel !== null ? Number(classLevel) : undefined;
 
   if (testId) {
     const test = Types.ObjectId.isValid(testId)
@@ -223,8 +261,17 @@ export async function createScholarshipAttempt(
       throw new Error('Selected scholarship test is not available');
     }
 
-    if (!test.eligibleClasses.includes(classLevel)) {
-      throw new Error(`Class ${classLevel} is not eligible for this test`);
+    // If the test is for exactly one class, we can infer the class from the test.
+    if ((test.eligibleClasses || []).length === 1) {
+      resolvedClassLevel = Number(test.eligibleClasses[0]);
+    }
+
+    if (!resolvedClassLevel || !Number.isFinite(resolvedClassLevel)) {
+      throw new Error('classLevel is required for this test');
+    }
+
+    if (!test.eligibleClasses.includes(resolvedClassLevel)) {
+      throw new Error(`Class ${resolvedClassLevel} is not eligible for this test`);
     }
 
     const normalizedSubjects = normalizeSubjects(test.subjects || []);
@@ -235,9 +282,64 @@ export async function createScholarshipAttempt(
     subjects = normalizedSubjects;
     questionsPerSubject = test.questionsPerSubject || 15;
     durationMins = test.durationMins || 60;
+    scholarshipTestId = test._id.toString();
+    scholarshipTestName = test.testName || '';
+    scholarshipShareLink = test.shareLink || '';
+
+    // Enforce: one attempt per phone per test.
+    const phoneTailRegex = new RegExp(`${phoneNormalized}$`);
+    const existing = await ScholarshipAttempt.findOne({
+      scholarshipTestId,
+      $or: [
+        { phoneNormalized },
+        { phone: rawPhone },
+        { phone: phoneNormalized },
+        // Legacy records sometimes stored +91/spacing in `phone`.
+        // Matching last 10 digits is a practical, reliable fallback.
+        { phone: { $regex: phoneTailRegex } },
+      ],
+    }).lean();
+
+    if (existing) {
+      // Backfill access key for legacy attempts.
+      if (!existing.attemptAccessKey) {
+        const key = generateAttemptAccessKey();
+        await ScholarshipAttempt.updateOne({ _id: existing._id }, { attemptAccessKey: key });
+        (existing as any).attemptAccessKey = key;
+      }
+
+      const locked = existing.status === 'submitted';
+      return {
+        attemptId: existing.attemptId,
+        _id: existing._id,
+        startedAt: existing.startedAt,
+        durationMins: existing.durationMins,
+        status: existing.status,
+        attemptAccessKey: (existing as any).attemptAccessKey || '',
+        created: false,
+        resumed: !locked,
+        locked,
+        message: locked
+          ? 'This phone number has already submitted this scholarship test. Retake is not allowed.'
+          : 'Resuming your previous scholarship test attempt.',
+      };
+    }
   }
 
-  const ClassQuestionModel = getClassQuestionModel(`Class ${classLevel}`);
+  if (!resolvedClassLevel || resolvedClassLevel < 7 || resolvedClassLevel > 12) {
+    throw new Error('ClassLevel must be between 7 and 12');
+  }
+
+  // Generate unique attempt ID (depends on classLevel)
+  let attemptId = generateAttemptId(resolvedClassLevel);
+  let exists = await ScholarshipAttempt.findOne({ attemptId });
+
+  while (exists) {
+    attemptId = generateAttemptId(resolvedClassLevel);
+    exists = await ScholarshipAttempt.findOne({ attemptId });
+  }
+
+  const ClassQuestionModel = getClassQuestionModel(`Class ${resolvedClassLevel}`);
 
   const subjectQuestions: Record<string, string[]> = {};
   const allQuestionIds: string[] = [];
@@ -267,72 +369,183 @@ export async function createScholarshipAttempt(
     allQuestionIds.push(...questionIds);
   }
 
-  const attempt = await ScholarshipAttempt.create({
-    attemptId,
-    name,
-    phone,
-    classLevel,
-    durationMins,
-    questions: allQuestionIds,
-    subjectQuestions,
-    status: 'in-progress',
-  });
+  try {
+    const attemptAccessKey = generateAttemptAccessKey();
+    const attempt = await ScholarshipAttempt.create({
+      attemptId,
+      name: safeName,
+      phone: rawPhone,
+      phoneNormalized,
+      attemptAccessKey,
+      scholarshipTestId,
+      scholarshipTestName,
+      scholarshipShareLink,
+      classLevel: resolvedClassLevel,
+      durationMins,
+      questions: allQuestionIds,
+      subjectQuestions,
+      status: 'in-progress',
+    });
 
-  return {
-    attemptId: attempt.attemptId,
-    _id: attempt._id,
-    startedAt: attempt.startedAt,
-    durationMins: attempt.durationMins,
-  };
+    return {
+      attemptId: attempt.attemptId,
+      _id: attempt._id,
+      startedAt: attempt.startedAt,
+      durationMins: attempt.durationMins,
+      status: attempt.status,
+      attemptAccessKey: attempt.attemptAccessKey || '',
+      created: true,
+      resumed: false,
+      locked: false,
+    };
+  } catch (err: any) {
+    // In case of race-condition duplicates, return the existing attempt.
+    if (err?.code === 11000 && scholarshipTestId) {
+      const existing = await ScholarshipAttempt.findOne({
+        scholarshipTestId,
+        $or: [
+          { phoneNormalized },
+          { phone: rawPhone },
+          { phone: phoneNormalized },
+          { phone: { $regex: phoneTailRegex } },
+        ],
+      }).lean();
+
+      if (existing) {
+        if (!existing.attemptAccessKey) {
+          const key = generateAttemptAccessKey();
+          await ScholarshipAttempt.updateOne({ _id: existing._id }, { attemptAccessKey: key });
+          (existing as any).attemptAccessKey = key;
+        }
+
+        const locked = existing.status === 'submitted';
+        return {
+          attemptId: existing.attemptId,
+          _id: existing._id,
+          startedAt: existing.startedAt,
+          durationMins: existing.durationMins,
+          status: existing.status,
+          attemptAccessKey: (existing as any).attemptAccessKey || '',
+          created: false,
+          resumed: !locked,
+          locked,
+          message: locked
+            ? 'This phone number has already submitted this scholarship test. Retake is not allowed.'
+            : 'Resuming your previous scholarship test attempt.',
+        };
+      }
+    }
+    throw err;
+  }
 }
 
-export async function getScholarshipAttempt(attemptId: string) {
+export async function getScholarshipAttempt(attemptId: string, accessKey?: string) {
   const attempt = await ScholarshipAttempt.findOne({ attemptId });
   if (!attempt) {
     throw new Error('Attempt not found');
   }
+
+  // Legacy-safe: if key isn't set yet, set it now and return it.
+  if (!attempt.attemptAccessKey) {
+    attempt.attemptAccessKey = generateAttemptAccessKey();
+    await attempt.save();
+  }
+
+  requireValidAttemptAccess(attempt, accessKey);
 
   const ClassQuestionModel = getClassQuestionModel(`Class ${attempt.classLevel}`);
   const questions = await ClassQuestionModel.find({
     _id: { $in: attempt.questions.map((id) => new Types.ObjectId(id)) },
   }).lean();
 
-  const questionDetails = questions.map((q: any) => ({
-    _id: q._id.toString(),
-    text: q.text,
-    type: q.type || 'mcq',
-    options: q.options || [],
-    subject: q.subject,
-    chapter: q.chapter,
-    topic: q.topic,
-    marks: q.marks || 1,
-    difficulty: q.difficulty,
-    diagramUrl: q.diagramUrl,
-  }));
+  const includePublishedSolutions = Boolean(attempt.resultPublished);
+  const questionDetails = questions.map((q: any) => {
+    const options = Array.isArray(q.options)
+      ? q.options.map((opt: any) => ({
+          _id: opt?._id ? String(opt._id) : '',
+          text: opt?.text || '',
+        }))
+      : [];
 
-  return {
+    const baseQuestion: any = {
+      _id: q._id.toString(),
+      text: q.text,
+      type: q.type || 'mcq',
+      // SECURITY: never expose correct flags unless results are published.
+      options,
+      subject: q.subject,
+      chapter: q.chapter,
+      topic: q.topic,
+      marks: q.marks || 1,
+      difficulty: q.difficulty,
+      diagramUrl: q.diagramUrl,
+    };
+
+    if (!includePublishedSolutions) {
+      return baseQuestion;
+    }
+
+    const correctOption = Array.isArray(q.options)
+      ? q.options.find((opt: any) => Boolean(opt?.isCorrect))
+      : null;
+
+    return {
+      ...baseQuestion,
+      correctOptionId: correctOption?._id ? String(correctOption._id) : '',
+      correctOptionText: correctOption?.text || '',
+      // Some question banks store the expected answer as text (esp. non-mcq).
+      correctAnswerText: q.correctAnswerText || '',
+    };
+  });
+
+  const base: any = {
     attemptId: attempt.attemptId,
     name: attempt.name,
+    phone: attempt.phone,
     classLevel: attempt.classLevel,
     durationMins: attempt.durationMins,
     startedAt: attempt.startedAt,
     status: attempt.status,
+    submittedAt: attempt.submittedAt,
+    resultPublished: Boolean(attempt.resultPublished),
+    attemptAccessKey: attempt.attemptAccessKey || '',
     questions: questionDetails,
     questionIds: attempt.questions,
     subjectQuestions: attempt.subjectQuestions,
     answers: attempt.answers,
   };
+
+  if (attempt.resultPublished) {
+    base.totalScore = attempt.totalScore || 0;
+    base.maxScore = attempt.maxScore || 0;
+    base.scholarshipAward = attempt.scholarshipAward || {
+      percentage: 0,
+      earlyBirdDiscountPercentage: 0,
+      amount: 0,
+      notes: '',
+    };
+    base.adminReview = attempt.adminReview || { isReviewed: false, notes: '' };
+  }
+
+  return base;
 }
 
 export async function saveScholarshipAnswer(
   attemptId: string,
   questionId: string,
-  answer: any
+  answer: any,
+  accessKey?: string
 ) {
   const attempt = await ScholarshipAttempt.findOne({ attemptId });
   if (!attempt) {
     throw new Error('Attempt not found');
   }
+
+  if (!attempt.attemptAccessKey) {
+    attempt.attemptAccessKey = generateAttemptAccessKey();
+  }
+
+  requireValidAttemptAccess(attempt, accessKey);
 
   if (attempt.status === 'submitted') {
     throw new Error('Attempt already submitted');
@@ -360,11 +573,17 @@ export async function saveScholarshipAnswer(
   return { success: true };
 }
 
-export async function submitScholarshipTest(attemptId: string, answers: any) {
+export async function submitScholarshipTest(attemptId: string, answers: any, accessKey?: string) {
   const attempt = await ScholarshipAttempt.findOne({ attemptId });
   if (!attempt) {
     throw new Error('Attempt not found');
   }
+
+  if (!attempt.attemptAccessKey) {
+    attempt.attemptAccessKey = generateAttemptAccessKey();
+  }
+
+  requireValidAttemptAccess(attempt, accessKey);
 
   if (attempt.status === 'submitted') {
     throw new Error('Attempt already submitted');
@@ -455,22 +674,42 @@ export async function getScholarshipResults(filters: any = {}) {
     query.classLevel = filters.classLevel;
   }
 
+  if (filters.submittedOnly !== false) {
+    query.status = 'submitted';
+  }
+
+  if (filters.testId) {
+    query.$or = [
+      { scholarshipTestId: String(filters.testId) },
+      { scholarshipShareLink: String(filters.testId) },
+    ];
+  }
+
   if (filters.publishedOnly) {
     query.resultPublished = true;
   }
 
   const attempts = await ScholarshipAttempt.find(query)
-    .select('attemptId name phone classLevel totalScore maxScore resultPublished submittedAt')
+    .select(
+      'attemptId name phone classLevel scholarshipTestId scholarshipTestName scholarshipShareLink status totalScore maxScore resultPublished submittedAt'
+    )
     .sort({ submittedAt: -1 });
 
   return attempts;
 }
 
-export async function publishScholarshipResults(classLevel?: number) {
+export async function publishScholarshipResults(filters: { classLevel?: number; testId?: string } = {}) {
   const query: any = { status: 'submitted' };
 
-  if (classLevel) {
-    query.classLevel = classLevel;
+  if (filters.classLevel) {
+    query.classLevel = filters.classLevel;
+  }
+
+  if (filters.testId) {
+    query.$or = [
+      { scholarshipTestId: String(filters.testId) },
+      { scholarshipShareLink: String(filters.testId) },
+    ];
   }
 
   const attempts = await ScholarshipAttempt.find(query);
@@ -484,6 +723,183 @@ export async function publishScholarshipResults(classLevel?: number) {
   return {
     published: result.modifiedCount,
     message: `${result.modifiedCount} results published successfully`,
+  };
+}
+
+export async function getScholarshipAttemptReview(attemptId: string) {
+  const attempt = await ScholarshipAttempt.findOne({ attemptId });
+  if (!attempt) {
+    throw new Error('Attempt not found');
+  }
+
+  const ClassQuestionModel = getClassQuestionModel(`Class ${attempt.classLevel}`);
+  const questions = await ClassQuestionModel.find({
+    _id: { $in: attempt.questions.map((id) => new Types.ObjectId(id)) },
+  })
+    .select('_id text type options subject chapter topic marks difficulty correctAnswerText')
+    .lean();
+
+  const questionMap = new Map(questions.map((q: any) => [q._id.toString(), q]));
+  const answerMap = new Map(attempt.answers.map((a: any) => [a.questionId, a]));
+
+  const reviewedQuestions = attempt.questions
+    .map((qid) => {
+      const q = questionMap.get(String(qid));
+      if (!q) return null;
+
+      const ans = answerMap.get(String(qid));
+      const options = Array.isArray(q.options) ? q.options : [];
+      const correctOption = options.find((opt: any) => opt.isCorrect);
+      const selectedOption = options.find(
+        (opt: any) => String(opt?._id) === String(ans?.chosenOptionId || '')
+      );
+      const maxMarks = Number(q.marks || 1);
+      const awardedMarks = Number(ans?.marks || 0);
+
+      const isCorrect =
+        q.type === 'mcq'
+          ? Boolean(
+              correctOption && ans?.chosenOptionId && String(correctOption._id) === String(ans.chosenOptionId)
+            )
+          : Boolean(ans?.isCorrect);
+
+      return {
+        questionId: String(q._id),
+        text: q.text,
+        type: q.type || 'mcq',
+        subject: q.subject,
+        chapter: q.chapter,
+        topic: q.topic,
+        difficulty: q.difficulty,
+        options,
+        maxMarks,
+        awardedMarks,
+        isCorrect,
+        correctAnswerText: q.correctAnswerText || (correctOption?.text || ''),
+        correctOptionId: correctOption?._id ? String(correctOption._id) : '',
+        selectedOptionId: ans?.chosenOptionId ? String(ans.chosenOptionId) : '',
+        selectedOptionText: selectedOption?.text || '',
+        textAnswer: ans?.textAnswer || '',
+      };
+    })
+    .filter(Boolean);
+
+  return {
+    attempt: {
+      attemptId: attempt.attemptId,
+      name: attempt.name,
+      phone: attempt.phone,
+      classLevel: attempt.classLevel,
+      scholarshipTestId: attempt.scholarshipTestId || '',
+      scholarshipTestName: attempt.scholarshipTestName || '',
+      status: attempt.status,
+      submittedAt: attempt.submittedAt,
+      totalScore: attempt.totalScore || 0,
+      maxScore: attempt.maxScore || 0,
+      resultPublished: Boolean(attempt.resultPublished),
+      adminReview: attempt.adminReview || { isReviewed: false, notes: '' },
+      scholarshipAward: attempt.scholarshipAward || {
+        percentage: 0,
+        earlyBirdDiscountPercentage: 0,
+        amount: 0,
+        notes: '',
+      },
+    },
+    questions: reviewedQuestions,
+  };
+}
+
+export async function updateScholarshipAttemptReview(
+  attemptId: string,
+  payload: {
+    questionMarks?: Array<{ questionId: string; marks: number }>;
+    adminNotes?: string;
+    scholarshipAward?: {
+      percentage?: number;
+      earlyBirdDiscountPercentage?: number;
+      amount?: number;
+      notes?: string;
+    };
+  },
+  reviewedBy = 'admin'
+) {
+  const attempt = await ScholarshipAttempt.findOne({ attemptId });
+  if (!attempt) {
+    throw new Error('Attempt not found');
+  }
+
+  const markUpdates = Array.isArray(payload?.questionMarks) ? payload.questionMarks : [];
+
+  const ClassQuestionModel = getClassQuestionModel(`Class ${attempt.classLevel}`);
+  const questions = await ClassQuestionModel.find({
+    _id: { $in: attempt.questions.map((id) => new Types.ObjectId(id)) },
+  })
+    .select('_id marks')
+    .lean();
+
+  const maxMarksByQuestionId = new Map(
+    questions.map((q: any) => [String(q._id), Number(q?.marks || 1)])
+  );
+
+  for (const item of markUpdates) {
+    const questionId = String(item?.questionId || '');
+    if (!questionId) continue;
+    if (!maxMarksByQuestionId.has(questionId)) continue;
+
+    const rawMarks = Number(item?.marks);
+    const validMarks = Number.isFinite(rawMarks) ? rawMarks : 0;
+    const maxMarks = maxMarksByQuestionId.get(questionId) || 0;
+    const marks = Math.max(0, Math.min(validMarks, maxMarks));
+
+    const idx = attempt.answers.findIndex((a) => a.questionId === questionId);
+    if (idx >= 0) {
+      attempt.answers[idx].marks = marks;
+    } else {
+      attempt.answers.push({
+        questionId,
+        marks,
+      });
+    }
+  }
+
+  const maxScore = questions.reduce((sum, q: any) => sum + Number(q?.marks || 1), 0);
+  const validQuestionIds = new Set(questions.map((q: any) => String(q._id)));
+  const totalScore = attempt.answers.reduce((sum, a) => {
+    if (!validQuestionIds.has(String(a?.questionId || ''))) return sum;
+    return sum + Number(a?.marks || 0);
+  }, 0);
+
+  attempt.maxScore = maxScore;
+  attempt.totalScore = totalScore;
+  attempt.adminReview = {
+    isReviewed: true,
+    reviewedBy,
+    reviewedAt: new Date(),
+    notes: payload?.adminNotes || attempt.adminReview?.notes || '',
+  };
+
+  if (payload?.scholarshipAward) {
+    attempt.scholarshipAward = {
+      percentage: Number(payload.scholarshipAward.percentage || 0),
+      earlyBirdDiscountPercentage: Number(
+        payload.scholarshipAward.earlyBirdDiscountPercentage || 0
+      ),
+      amount: Number(payload.scholarshipAward.amount || 0),
+      notes: payload.scholarshipAward.notes || '',
+      updatedBy: reviewedBy,
+      updatedAt: new Date(),
+    };
+  }
+
+  await attempt.save();
+
+  return {
+    attemptId: attempt.attemptId,
+    totalScore: attempt.totalScore,
+    maxScore: attempt.maxScore,
+    adminReview: attempt.adminReview,
+    scholarshipAward: attempt.scholarshipAward,
+    message: 'Attempt review updated successfully',
   };
 }
 

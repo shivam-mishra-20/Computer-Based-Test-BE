@@ -110,7 +110,15 @@ app.use(cors({
 		callback(new Error('Not allowed by CORS'));
 	},
 	credentials: true,
-	allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+	allowedHeaders: [
+		'Content-Type',
+		'Authorization',
+		'X-Requested-With',
+		'Accept',
+		// Scholarship attempt access control
+		'X-Scholarship-Attempt-Key',
+		'X-Attempt-Key',
+	],
 	exposedHeaders: ['Content-Range', 'X-Content-Range'],
 	methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
 }));

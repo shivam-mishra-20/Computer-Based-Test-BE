@@ -13,31 +13,53 @@ import {
   deleteScholarshipTest,
   getTestShareLink,
   getScholarshipTestPreview,
+  getScholarshipAttemptReview,
+  updateScholarshipAttemptReview,
 } from '../services/scholarshipService';
 
 export async function createAttemptCtrl(req: Request, res: Response) {
   try {
     const { name, phone, classLevel, testId } = req.body;
 
-    if (!name || !phone || !classLevel) {
-      return res.status(400).json({ error: 'Name, phone, and classLevel are required' });
+    if (!name || !phone) {
+      return res.status(400).json({ error: 'Name and phone are required' });
     }
 
-    if (classLevel < 7 || classLevel > 12) {
+    const parsedClassLevel =
+      classLevel !== undefined && classLevel !== null && String(classLevel).trim() !== ''
+        ? parseInt(String(classLevel), 10)
+        : undefined;
+
+    // If no testId is provided, classLevel must be explicitly selected.
+    if (!testId && !parsedClassLevel) {
+      return res.status(400).json({ error: 'classLevel is required' });
+    }
+
+    if (parsedClassLevel && (parsedClassLevel < 7 || parsedClassLevel > 12)) {
       return res.status(400).json({ error: 'ClassLevel must be between 7 and 12' });
     }
 
-    const attempt = await createScholarshipAttempt(name, phone, classLevel, testId);
-    res.status(201).json(attempt);
+    const attempt = await createScholarshipAttempt(name, phone, parsedClassLevel, testId);
+    const statusCode = (attempt as any)?.created ? 201 : 200;
+    res.status(statusCode).json(attempt);
   } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Failed to create attempt' });
+    const message = err?.message || 'Failed to create attempt';
+    // Most failures here are user/input/test-selection issues, not server crashes.
+    if (
+      /required|valid phone|classlevel|eligible|not available|no valid subjects/i.test(message)
+    ) {
+      return res.status(400).json({ error: message });
+    }
+    res.status(500).json({ error: message });
   }
 }
 
 export async function getAttemptCtrl(req: Request, res: Response) {
   try {
     const { attemptId } = req.params;
-    const attempt = await getScholarshipAttempt(attemptId);
+    const accessKey =
+      (req.header('x-scholarship-attempt-key') || req.header('x-attempt-key') || '').trim();
+    const attempt = await getScholarshipAttempt(attemptId, accessKey);
     res.json(attempt);
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to fetch attempt' });
@@ -49,11 +71,14 @@ export async function saveAnswerCtrl(req: Request, res: Response) {
     const { attemptId } = req.params;
     const { questionId, answer } = req.body;
 
-    if (!questionId || !answer) {
+    if (!questionId || answer === undefined || answer === null) {
       return res.status(400).json({ error: 'questionId and answer are required' });
     }
 
-    const result = await saveScholarshipAnswer(attemptId, questionId, answer);
+    const accessKey =
+      (req.header('x-scholarship-attempt-key') || req.header('x-attempt-key') || '').trim();
+
+    const result = await saveScholarshipAnswer(attemptId, questionId, answer, accessKey);
     res.json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to save answer' });
@@ -65,7 +90,10 @@ export async function submitTestCtrl(req: Request, res: Response) {
     const { attemptId } = req.params;
     const { answers } = req.body;
 
-    const result = await submitScholarshipTest(attemptId, answers || []);
+    const accessKey =
+      (req.header('x-scholarship-attempt-key') || req.header('x-attempt-key') || '').trim();
+
+    const result = await submitScholarshipTest(attemptId, answers || [], accessKey);
     
     // Auto-grade the test
     await gradeScholarshipAttempt(attemptId);
@@ -81,6 +109,11 @@ export async function getResultsCtrl(req: Request, res: Response) {
     const filters = {
       classLevel: req.query.classLevel ? parseInt(String(req.query.classLevel)) : undefined,
       publishedOnly: req.query.publishedOnly === 'true',
+      submittedOnly:
+        req.query.submittedOnly !== undefined
+          ? req.query.submittedOnly === 'true'
+          : true,
+      testId: req.query.testId ? String(req.query.testId) : undefined,
     };
 
     const results = await getScholarshipResults(filters);
@@ -180,10 +213,45 @@ export async function publishResultsCtrl(req: Request, res: Response) {
       return res.status(403).json({ error: 'Only admins can publish results' });
     }
 
-    const { classLevel } = req.body;
-    const result = await publishScholarshipResults(classLevel);
+    const { classLevel, testId } = req.body || {};
+    const result = await publishScholarshipResults({
+      classLevel,
+      testId,
+    });
     res.json(result);
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to publish results' });
+  }
+}
+
+export async function getAttemptReviewCtrl(req: Request, res: Response) {
+  try {
+    const userRole = (req as any).user?.role;
+    if (userRole !== 'admin') {
+      return res.status(403).json({ error: 'Only admins can view attempt review details' });
+    }
+
+    const { attemptId } = req.params;
+    const data = await getScholarshipAttemptReview(attemptId);
+    res.json(data);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to fetch attempt review details' });
+  }
+}
+
+export async function updateAttemptReviewCtrl(req: Request, res: Response) {
+  try {
+    const userRole = (req as any).user?.role;
+    if (userRole !== 'admin') {
+      return res.status(403).json({ error: 'Only admins can update attempt review details' });
+    }
+
+    const { attemptId } = req.params;
+    const payload = req.body || {};
+    const reviewedBy = (req as any).user?.name || (req as any).user?.email || 'admin';
+    const result = await updateScholarshipAttemptReview(attemptId, payload, reviewedBy);
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to update attempt review details' });
   }
 }
