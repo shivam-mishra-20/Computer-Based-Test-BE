@@ -15,7 +15,10 @@ import {
   getScholarshipTestPreview,
   getScholarshipAttemptReview,
   updateScholarshipAttemptReview,
+  getScholarshipResultPublicLink,
+  getScholarshipPublicResultByToken,
 } from '../services/scholarshipService';
+import ScholarshipAttempt from '../models/ScholarshipAttempt';
 
 export async function createAttemptCtrl(req: Request, res: Response) {
   try {
@@ -294,5 +297,38 @@ export async function updateAttemptBatchCtrl(req: Request, res: Response) {
     });
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to update attempt batch' });
+  }
+}
+
+export async function getAttemptPublicResultLinkCtrl(req: Request, res: Response) {
+  try {
+    const userRole = (req as any).user?.role;
+    if (userRole !== 'admin') {
+      return res.status(403).json({ error: 'Only admins can access result links' });
+    }
+
+    const { attemptId } = req.params;
+    const data = await getScholarshipResultPublicLink(attemptId);
+    res.json(data);
+  } catch (err: any) {
+    const message = err?.message || 'Failed to generate result link';
+    if (/not found|not published/i.test(message)) {
+      return res.status(400).json({ error: message });
+    }
+    res.status(500).json({ error: message });
+  }
+}
+
+export async function getPublicResultByTokenCtrl(req: Request, res: Response) {
+  try {
+    const { token } = req.params;
+    const data = await getScholarshipPublicResultByToken(token);
+    res.json(data);
+  } catch (err: any) {
+    const message = err?.message || 'Failed to fetch public result';
+    if (/invalid|expired|required|not found/i.test(message)) {
+      return res.status(400).json({ error: message });
+    }
+    res.status(500).json({ error: message });
   }
 }

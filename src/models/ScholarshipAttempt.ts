@@ -9,6 +9,7 @@ export interface IScholarshipAttempt extends Document {
   scholarshipTestId?: string;
   scholarshipTestName?: string;
   scholarshipShareLink?: string;
+  resultPublicToken?: string;
   classLevel: number;
   durationMins: number;
   startedAt: Date;
@@ -56,6 +57,7 @@ const ScholarshipAttemptSchema = new Schema(
     scholarshipTestId: { type: String, index: true },
     scholarshipTestName: { type: String, default: '' },
     scholarshipShareLink: { type: String, default: '', index: true },
+    resultPublicToken: { type: String, default: '', index: true },
     classLevel: { type: Number, required: true, min: 7, max: 12 },
     durationMins: { type: Number, default: 60 },
     startedAt: { type: Date, default: Date.now },

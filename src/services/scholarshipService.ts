@@ -24,6 +24,11 @@ function generateAttemptAccessKey(): string {
   return randomBytes(24).toString('hex');
 }
 
+function generateResultPublicToken(): string {
+  // 40 hex chars (~160 bits), safe for public share links.
+  return randomBytes(20).toString('hex');
+}
+
 function requireValidAttemptAccess(attempt: any, providedKey?: string) {
   const stored = String(attempt?.attemptAccessKey || '');
   if (!stored) return;
@@ -581,6 +586,7 @@ export async function getScholarshipAttempt(attemptId: string, accessKey?: strin
   if (attempt.resultPublished) {
     base.totalScore = attempt.totalScore || 0;
     base.maxScore = attempt.maxScore || 0;
+    base.batch = attempt.batch || '';
     base.scholarshipAward = attempt.scholarshipAward || {
       percentage: 0,
       earlyBirdDiscountPercentage: 0,
@@ -754,7 +760,7 @@ export async function getScholarshipResults(filters: any = {}) {
 
   const attempts = await ScholarshipAttempt.find(query)
     .select(
-      'attemptId name phone classLevel scholarshipTestId scholarshipTestName scholarshipShareLink status totalScore maxScore resultPublished submittedAt'
+      'attemptId name phone classLevel scholarshipTestId scholarshipTestName scholarshipShareLink status totalScore maxScore resultPublished submittedAt resultPublicToken batch'
     )
     .sort({ submittedAt: -1 });
 
@@ -781,22 +787,87 @@ export async function publishScholarshipResults(filters: { classLevel?: number; 
     await gradeScholarshipAttempt(attempt.attemptId);
   }
 
-  // Prepare update payload
-  const updatePayload: any = { resultPublished: true };
-  
-  // If batch assignment is provided, add batch info to all matched attempts
-  if (filters.batch) {
-    updatePayload.batch = filters.batch;
-    updatePayload.batchAssignedAt = new Date();
-    updatePayload.batchAssignedBy = filters.batchAssignedBy || 'admin';
+  for (const attempt of attempts) {
+    attempt.resultPublished = true;
+
+    if (!attempt.resultPublicToken) {
+      attempt.resultPublicToken = generateResultPublicToken();
+    }
+
+    if (filters.batch) {
+      attempt.batch = filters.batch;
+      attempt.batchAssignedAt = new Date();
+      attempt.batchAssignedBy = filters.batchAssignedBy || 'admin';
+    }
+
+    await attempt.save();
   }
 
-  const result = await ScholarshipAttempt.updateMany(query, updatePayload);
+  const frontendBase = resolveFrontendBaseUrl();
+  const publishedLinks = attempts
+    .filter((a) => Boolean(a.resultPublicToken))
+    .map((a) => ({
+      attemptId: a.attemptId,
+      name: a.name,
+      publicUrl: `${frontendBase}/scholarship-results?resultToken=${encodeURIComponent(
+        String(a.resultPublicToken)
+      )}`,
+    }));
 
   return {
-    published: result.modifiedCount,
-    message: `${result.modifiedCount} results published successfully${filters.batch ? ` and assigned to batch "${filters.batch}"` : ''}`,
+    published: attempts.length,
+    linksGenerated: publishedLinks.length,
+    resultLinks: publishedLinks,
+    message: `${attempts.length} results published successfully${filters.batch ? ` and assigned to batch "${filters.batch}"` : ''}`,
   };
+}
+
+export async function getScholarshipResultPublicLink(attemptId: string) {
+  const attempt = await ScholarshipAttempt.findOne({ attemptId });
+  if (!attempt) {
+    throw new Error('Attempt not found');
+  }
+
+  if (!attempt.resultPublished) {
+    throw new Error('Result is not published yet');
+  }
+
+  if (!attempt.resultPublicToken) {
+    attempt.resultPublicToken = generateResultPublicToken();
+    await attempt.save();
+  }
+
+  const frontendBase = resolveFrontendBaseUrl();
+  return {
+    attemptId: attempt.attemptId,
+    name: attempt.name,
+    publicUrl: `${frontendBase}/scholarship-results?resultToken=${encodeURIComponent(
+      String(attempt.resultPublicToken)
+    )}`,
+  };
+}
+
+export async function getScholarshipPublicResultByToken(token: string) {
+  const normalizedToken = String(token || '').trim();
+  if (!normalizedToken) {
+    throw new Error('Result token is required');
+  }
+
+  const attempt = await ScholarshipAttempt.findOne({ resultPublicToken: normalizedToken });
+  if (!attempt) {
+    throw new Error('Invalid or expired result link');
+  }
+
+  const data: any = await getScholarshipAttempt(
+    attempt.attemptId,
+    attempt.attemptAccessKey || undefined
+  );
+
+  // Never expose attempt access key on public endpoint.
+  delete data.attemptAccessKey;
+  data.isPublicResult = true;
+
+  return data;
 }
 
 export async function getScholarshipAttemptReview(attemptId: string) {
@@ -870,6 +941,7 @@ export async function getScholarshipAttemptReview(attemptId: string) {
       totalScore: attempt.totalScore || 0,
       maxScore: attempt.maxScore || 0,
       resultPublished: Boolean(attempt.resultPublished),
+      batch: attempt.batch || '',
       adminReview: attempt.adminReview || { isReviewed: false, notes: '' },
       scholarshipAward: attempt.scholarshipAward || {
         percentage: 0,
