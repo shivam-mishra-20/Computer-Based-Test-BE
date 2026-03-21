@@ -2,7 +2,7 @@ import ScholarshipAttempt from '../models/ScholarshipAttempt';
 import ScholarshipTest from '../models/ScholarshipTest';
 import { getClassQuestionModel } from '../models/ClassQuestion';
 import { Types } from 'mongoose';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomInt } from 'crypto';
 
 const SCHOLARSHIP_BOARD_PATTERN = /scholarship/i;
 
@@ -161,9 +161,55 @@ async function ensureLogicalShareLink(test: any): Promise<string> {
 }
 
 // Get random questions from a pool
-function getRandomQuestions<T>(questions: T[], count: number): T[] {
-  const shuffled = [...questions].sort(() => Math.random() - 0.5);
-  return shuffled.slice(0, Math.min(count, shuffled.length));
+function shuffleInPlace<T>(arr: T[]): T[] {
+  // Fisher-Yates with crypto randomness (more reliable than Math.random + sort).
+  for (let i = arr.length - 1; i > 0; i -= 1) {
+    const j = randomInt(0, i + 1);
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function pickRandomUniqueIds(
+  docs: Array<{ _id?: any }> | undefined,
+  count: number,
+  alreadyUsed?: Set<string>
+): string[] {
+  const unique: string[] = [];
+  const seen = new Set<string>();
+
+  for (const doc of docs || []) {
+    const id = doc?._id ? String(doc._id) : '';
+    if (!id) continue;
+    if (seen.has(id)) continue;
+    if (alreadyUsed && alreadyUsed.has(id)) continue;
+    seen.add(id);
+    unique.push(id);
+  }
+
+  shuffleInPlace(unique);
+  return unique.slice(0, Math.min(count, unique.length));
+}
+
+function pickRandomUniqueDocs<T extends { _id?: any }>(
+  docs: T[] | undefined,
+  count: number,
+  alreadyUsed?: Set<string>
+): T[] {
+  const unique: T[] = [];
+  const seen = new Set<string>();
+
+  for (const doc of docs || []) {
+    const id = doc?._id ? String(doc._id) : '';
+    if (!id) continue;
+    if (seen.has(id)) continue;
+    if (alreadyUsed && alreadyUsed.has(id)) continue;
+    seen.add(id);
+    unique.push(doc);
+  }
+
+  shuffleInPlace(unique);
+  return unique.slice(0, Math.min(count, unique.length));
 }
 
 type NormalizedAnswer = {
@@ -232,6 +278,7 @@ export async function createScholarshipAttempt(
 ) {
   const safeName = String(name || '').trim();
   const { raw: rawPhone, normalized: phoneNormalized } = normalizePhone(phone);
+  const phoneTailRegex = new RegExp(`${phoneNormalized}$`);
 
   if (!safeName) {
     throw new Error('Name is required');
@@ -287,7 +334,6 @@ export async function createScholarshipAttempt(
     scholarshipShareLink = test.shareLink || '';
 
     // Enforce: one attempt per phone per test.
-    const phoneTailRegex = new RegExp(`${phoneNormalized}$`);
     const existing = await ScholarshipAttempt.findOne({
       scholarshipTestId,
       $or: [
@@ -343,6 +389,7 @@ export async function createScholarshipAttempt(
 
   const subjectQuestions: Record<string, string[]> = {};
   const allQuestionIds: string[] = [];
+  const usedQuestionIds = new Set<string>();
 
   for (const subject of subjects) {
     const subjectPool = expandSubjectAliases(subject);
@@ -352,22 +399,32 @@ export async function createScholarshipAttempt(
       isActive: true,
     })
       .select('_id')
-      .limit(questionsPerSubject * 3)
+      .limit(questionsPerSubject * 6)
       .lean();
 
     if (questions.length < questionsPerSubject) {
       throw new Error(
-        `Not enough Scholarship-board questions for Class ${classLevel} - ${subject}. ` +
+        `Not enough Scholarship-board questions for Class ${resolvedClassLevel} - ${subject}. ` +
           `Required: ${questionsPerSubject}, Found: ${questions.length}`
       );
     }
 
-    const randomQs = getRandomQuestions(questions, questionsPerSubject);
-    const questionIds = randomQs.map((q: any) => q._id.toString());
+    const questionIds = pickRandomUniqueIds(questions as any, questionsPerSubject, usedQuestionIds);
+    if (questionIds.length < questionsPerSubject) {
+      throw new Error(
+        `Not enough unique Scholarship-board questions for Class ${resolvedClassLevel} - ${subject}. ` +
+          `Required: ${questionsPerSubject}, Available unique (after de-duplication): ${questionIds.length}`
+      );
+    }
+
+    questionIds.forEach((id) => usedQuestionIds.add(id));
 
     subjectQuestions[subject] = questionIds;
     allQuestionIds.push(...questionIds);
   }
+
+  // Shuffle final question order for the actual attempt.
+  shuffleInPlace(allQuestionIds);
 
   try {
     const attemptAccessKey = generateAttemptAccessKey();
@@ -498,6 +555,12 @@ export async function getScholarshipAttempt(attemptId: string, accessKey?: strin
     };
   });
 
+  // Preserve the exact shuffled order stored on the attempt.
+  const byId = new Map(questionDetails.map((q: any) => [String(q._id), q]));
+  const orderedQuestionDetails = (attempt.questions || [])
+    .map((id) => byId.get(String(id)))
+    .filter(Boolean);
+
   const base: any = {
     attemptId: attempt.attemptId,
     name: attempt.name,
@@ -509,7 +572,7 @@ export async function getScholarshipAttempt(attemptId: string, accessKey?: strin
     submittedAt: attempt.submittedAt,
     resultPublished: Boolean(attempt.resultPublished),
     attemptAccessKey: attempt.attemptAccessKey || '',
-    questions: questionDetails,
+    questions: orderedQuestionDetails,
     questionIds: attempt.questions,
     subjectQuestions: attempt.subjectQuestions,
     answers: attempt.answers,
@@ -948,6 +1011,7 @@ export async function getScholarshipTestPreview(testId: string, classLevel?: num
   }> = [];
 
   let totalSelected = 0;
+  const usedPreviewQuestionIds = new Set<string>();
 
   const normalizedSubjects = normalizeSubjects(test.subjects || []);
   if (normalizedSubjects.length === 0) {
@@ -971,7 +1035,15 @@ export async function getScholarshipTestPreview(testId: string, classLevel?: num
       );
     }
 
-    const picked = getRandomQuestions(availableQuestions, test.questionsPerSubject || 15);
+    const picked = pickRandomUniqueDocs(
+      availableQuestions as any,
+      test.questionsPerSubject || 15,
+      usedPreviewQuestionIds
+    );
+
+    picked.forEach((q: any) => {
+      if (q?._id) usedPreviewQuestionIds.add(String(q._id));
+    });
     totalSelected += picked.length;
 
     bySubject.push({
