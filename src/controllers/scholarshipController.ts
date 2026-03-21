@@ -213,10 +213,12 @@ export async function publishResultsCtrl(req: Request, res: Response) {
       return res.status(403).json({ error: 'Only admins can publish results' });
     }
 
-    const { classLevel, testId } = req.body || {};
+    const { classLevel, testId, batch, batchAssignedBy } = req.body || {};
     const result = await publishScholarshipResults({
       classLevel,
       testId,
+      batch,
+      batchAssignedBy: batchAssignedBy || (req as any).user?.email || 'admin',
     });
     res.json(result);
   } catch (err: any) {
@@ -253,5 +255,44 @@ export async function updateAttemptReviewCtrl(req: Request, res: Response) {
     res.json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message || 'Failed to update attempt review details' });
+  }
+}
+
+export async function updateAttemptBatchCtrl(req: Request, res: Response) {
+  try {
+    const userRole = (req as any).user?.role;
+    if (userRole !== 'admin') {
+      return res.status(403).json({ error: 'Only admins can update attempt batch' });
+    }
+
+    const { attemptId } = req.params;
+    const { batch } = req.body || {};
+    
+    if (!batch || batch.trim() === '') {
+      return res.status(400).json({ error: 'Batch name is required' });
+    }
+
+    const result = await ScholarshipAttempt.findOneAndUpdate(
+      { attemptId },
+      {
+        batch: batch.trim(),
+        batchAssignedAt: new Date(),
+        batchAssignedBy: (req as any).user?.email || 'admin',
+      },
+      { new: true }
+    );
+
+    if (!result) {
+      return res.status(404).json({ error: 'Attempt not found' });
+    }
+
+    res.json({
+      success: true,
+      message: `Batch "${batch.trim()}" assigned successfully`,
+      batch: result.batch,
+      batchAssignedAt: result.batchAssignedAt,
+    });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message || 'Failed to update attempt batch' });
   }
 }

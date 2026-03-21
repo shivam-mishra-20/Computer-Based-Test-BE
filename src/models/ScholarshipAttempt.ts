@@ -39,6 +39,9 @@ export interface IScholarshipAttempt extends Document {
     updatedBy?: string;
     updatedAt?: Date;
   };
+  batch?: string; // Batch assignment (e.g., "Batch A", "Morning Session", etc.)
+  batchAssignedAt?: Date; // When batch was assigned
+  batchAssignedBy?: string; // Admin who assigned the batch
   questions: string[]; // Store which questions were in the test
   subjectQuestions: Record<string, string[]>; // Questions per subject
 }
@@ -85,6 +88,9 @@ const ScholarshipAttemptSchema = new Schema(
       updatedBy: { type: String, default: '' },
       updatedAt: { type: Date, default: null },
     },
+    batch: { type: String, default: null, index: true },
+    batchAssignedAt: { type: Date, default: null },
+    batchAssignedBy: { type: String, default: '' },
     questions: [String],
     subjectQuestions: { type: Map, of: [String], default: new Map() },
   },

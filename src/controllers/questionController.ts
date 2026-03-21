@@ -84,6 +84,7 @@ export const getClassQuestionsCtrl = async (req: Request, res: Response) => {
       subject,
       topic,
       chapter,
+      board,
       section,
       difficulty,
       source,
@@ -125,6 +126,7 @@ export const getClassQuestionsCtrl = async (req: Request, res: Response) => {
     if (subject) filter.subject = subject;
     if (chapter) filter.chapter = { $regex: chapter, $options: 'i' };
     if (topic) filter.topic = { $regex: topic, $options: 'i' };
+    if (board) filter.board = { $regex: `^${String(board).trim()}$`, $options: 'i' };
     if (section) filter.section = section;
     if (difficulty) filter.difficulty = difficulty;
     
@@ -236,11 +238,12 @@ export const getClassQuestionFiltersCtrl = async (req: Request, res: Response) =
     if (subject) baseFilter.subject = subject;
 
     // Get distinct values
-    const [subjects, chapters, topics, sections] = await Promise.all([
+    const [subjects, chapters, topics, sections, boards] = await Promise.all([
       ClassQuestionModel.distinct('subject', { isActive: true }),
       ClassQuestionModel.distinct('chapter', baseFilter),
       ClassQuestionModel.distinct('topic', baseFilter),
-      ClassQuestionModel.distinct('section', baseFilter)
+      ClassQuestionModel.distinct('section', baseFilter),
+      ClassQuestionModel.distinct('board', { isActive: true })
     ]);
 
     return res.status(200).json({
@@ -249,7 +252,8 @@ export const getClassQuestionFiltersCtrl = async (req: Request, res: Response) =
         subjects: subjects.filter(Boolean).sort(),
         chapters: chapters.filter(Boolean).sort(),
         topics: topics.filter(Boolean).sort(),
-        sections: sections.filter(Boolean).sort()
+        sections: sections.filter(Boolean).sort(),
+        boards: boards.filter(Boolean).sort()
       }
     });
   } catch (error) {

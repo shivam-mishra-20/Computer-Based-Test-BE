@@ -14,6 +14,7 @@ import {
   getTestPreviewCtrl,
   getAttemptReviewCtrl,
   updateAttemptReviewCtrl,
+  updateAttemptBatchCtrl,
 } from '../../controllers/scholarshipController';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 
@@ -30,6 +31,7 @@ router.get('/results', authMiddleware, getResultsCtrl);
 router.post('/results/publish', authMiddleware, publishResultsCtrl);
 router.get('/results/:attemptId/detail', authMiddleware, getAttemptReviewCtrl);
 router.patch('/results/:attemptId/review', authMiddleware, updateAttemptReviewCtrl);
+router.patch('/results/:attemptId/batch', authMiddleware, updateAttemptBatchCtrl);
 
 // Test Management routes
 router.post('/tests', authMiddleware, createTestCtrl);

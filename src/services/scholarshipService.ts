@@ -761,7 +761,7 @@ export async function getScholarshipResults(filters: any = {}) {
   return attempts;
 }
 
-export async function publishScholarshipResults(filters: { classLevel?: number; testId?: string } = {}) {
+export async function publishScholarshipResults(filters: { classLevel?: number; testId?: string; batch?: string; batchAssignedBy?: string } = {}) {
   const query: any = { status: 'submitted' };
 
   if (filters.classLevel) {
@@ -781,11 +781,21 @@ export async function publishScholarshipResults(filters: { classLevel?: number; 
     await gradeScholarshipAttempt(attempt.attemptId);
   }
 
-  const result = await ScholarshipAttempt.updateMany(query, { resultPublished: true });
+  // Prepare update payload
+  const updatePayload: any = { resultPublished: true };
+  
+  // If batch assignment is provided, add batch info to all matched attempts
+  if (filters.batch) {
+    updatePayload.batch = filters.batch;
+    updatePayload.batchAssignedAt = new Date();
+    updatePayload.batchAssignedBy = filters.batchAssignedBy || 'admin';
+  }
+
+  const result = await ScholarshipAttempt.updateMany(query, updatePayload);
 
   return {
     published: result.modifiedCount,
-    message: `${result.modifiedCount} results published successfully`,
+    message: `${result.modifiedCount} results published successfully${filters.batch ? ` and assigned to batch "${filters.batch}"` : ''}`,
   };
 }
 
