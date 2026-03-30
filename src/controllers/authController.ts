@@ -151,14 +151,6 @@ export const login = async (req: Request, res: Response) => {
       });
     }
 
-    // Hard-disable legacy Firebase-auth users in login flow.
-    if ((user as any).authProvider === 'firebase') {
-      return res.status(403).json({
-        message: 'This legacy Firebase account is no longer supported. Please contact admin to migrate/reset your account for MongoDB login.',
-        status: 'legacy-auth-disabled',
-      });
-    }
-
     const isPasswordValid = await user.comparePassword(password);
     if (!isPasswordValid) {
       return res.status(400).json({ message: 'Invalid credentials' });
