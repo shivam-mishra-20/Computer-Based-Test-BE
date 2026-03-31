@@ -16,6 +16,8 @@ export interface YouTubeMeta {
   thumbnail: string;
   channelTitle: string;
   publishedAt: string;
+  viewCount: number;
+  tags: string[];
 }
 
 // Parse ISO 8601 duration (PT1H2M30S) to seconds
@@ -39,7 +41,7 @@ export async function fetchYouTubeMeta(videoId: string): Promise<YouTubeMeta | n
   try {
     const response = await axios.get(`${YOUTUBE_API_BASE}/videos`, {
       params: {
-        part: 'snippet,contentDetails',
+        part: 'snippet,contentDetails,statistics',
         id: videoId,
         key: YOUTUBE_API_KEY
       }
@@ -54,17 +56,26 @@ export async function fetchYouTubeMeta(videoId: string): Promise<YouTubeMeta | n
     const video = items[0];
     const snippet = video.snippet;
     const contentDetails = video.contentDetails;
+    const statistics = video.statistics || {};
+    const parsedViewCount = parseInt(statistics.viewCount || '0', 10);
     
     const meta: YouTubeMeta = {
       title: snippet.title,
-      description: snippet.description?.substring(0, 500) || '',
+      description: snippet.description || '',
       durationSec: parseDuration(contentDetails.duration),
       thumbnail: snippet.thumbnails?.high?.url || snippet.thumbnails?.default?.url || '',
       channelTitle: snippet.channelTitle,
-      publishedAt: snippet.publishedAt
+      publishedAt: snippet.publishedAt,
+      viewCount: Number.isFinite(parsedViewCount) ? parsedViewCount : 0,
+      tags: Array.isArray(snippet.tags) ? snippet.tags : []
     };
     
-    logger.info('Fetched YouTube metadata', { videoId, title: meta.title, durationSec: meta.durationSec });
+    logger.info('Fetched YouTube metadata', {
+      videoId,
+      title: meta.title,
+      durationSec: meta.durationSec,
+      viewCount: meta.viewCount,
+    });
     
     return meta;
   } catch (error: any) {

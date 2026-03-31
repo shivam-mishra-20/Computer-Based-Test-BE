@@ -3,6 +3,7 @@ import multer from 'multer';
 import StudyResource from '../../models/StudyResource';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import { uploadToFirebase } from '../../services/firebaseService';
+import youtubeService from '../../services/youtubeService';
 
 const router = Router();
 
@@ -116,6 +117,48 @@ router.get('/meta/subjects', async (req: Request, res: Response) => {
 });
 
 // ============ Admin/Teacher Routes (Protected) ============
+
+// Get YouTube metadata for autofill (admin/teacher only)
+router.get('/youtube/metadata', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (!['admin', 'teacher'].includes(user.role)) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
+
+    const rawUrl = String(req.query.url || '').trim();
+    if (!rawUrl) {
+      return res.status(400).json({ error: 'YouTube URL or video ID is required' });
+    }
+
+    const videoId = youtubeService.extractYouTubeId(rawUrl);
+    if (!videoId) {
+      return res.status(400).json({ error: 'Invalid YouTube URL or video ID' });
+    }
+
+    const meta = await youtubeService.fetchYouTubeMeta(videoId);
+    if (!meta) {
+      return res.status(404).json({ error: 'Unable to fetch YouTube metadata for this video' });
+    }
+
+    return res.json({
+      videoId,
+      canonicalUrl: `https://www.youtube.com/watch?v=${videoId}`,
+      title: meta.title,
+      description: meta.description,
+      thumbnailUrl: meta.thumbnail,
+      durationSec: meta.durationSec,
+      viewCount: meta.viewCount,
+      tags: meta.tags,
+      channelTitle: meta.channelTitle,
+      publishedAt: meta.publishedAt,
+      source: 'backend-youtube-service',
+    });
+  } catch (error: any) {
+    console.error('Error fetching YouTube metadata:', error);
+    return res.status(500).json({ error: error.message || 'Failed to fetch YouTube metadata' });
+  }
+});
 
 // Create resource with YouTube URL (admin/teacher only)
 router.post('/', authMiddleware, async (req: Request, res: Response) => {
