@@ -7,6 +7,7 @@ import { authMiddleware } from '../../middlewares/authMiddleware';
 import { sendScheduleNotification, sendTeacherNotification } from '../../services/notificationService';
 import { initFirebaseAdmin } from '../../services/firebaseService';
 import { cacheMiddleware, invalidateCacheOn } from '../../utils/cacheHelpers';
+import { STUDENT_BATCH_RULES, normalizeClassValue } from '../../config/studentBatchConfig';
 
 // Initialize Firebase Admin on module load
 let firebaseAdmin: any = null;
@@ -24,14 +25,25 @@ function getFirebaseAdmin() {
 
 const router = Router();
 
-// Default batch configuration
-const DEFAULT_BATCHES = [
-  { name: 'Basic', classLevels: ['7', '8', '9', '10', '11', '12'], isDefault: true },
-  { name: 'Advanced', classLevels: ['7', '8', '9', '10', '11', '12'], isDefault: true },
-  { name: 'JEE', classLevels: ['9', '10', '11', '12'], isDefault: true },
-  { name: 'NEET', classLevels: ['11', '12'], isDefault: true },
-  { name: 'Commerce', classLevels: ['11', '12'], isDefault: true }
-];
+// Default batch configuration derived from universal student batch rules.
+const DEFAULT_BATCHES = (() => {
+  const batchToClassSet = new Map<string, Set<string>>();
+
+  for (const rule of STUDENT_BATCH_RULES) {
+    for (const batchName of rule.batches) {
+      if (!batchToClassSet.has(batchName)) {
+        batchToClassSet.set(batchName, new Set<string>());
+      }
+      batchToClassSet.get(batchName)?.add(rule.classValue);
+    }
+  }
+
+  return Array.from(batchToClassSet.entries()).map(([name, classLevels]) => ({
+    name,
+    classLevels: Array.from(classLevels).sort((a, b) => Number(a) - Number(b)),
+    isDefault: true,
+  }));
+})();
 
 // Time slots for regular schedule (2:30 PM to 8:30 PM)
 const TIME_SLOTS = [
@@ -194,7 +206,8 @@ router.get('/batches', authMiddleware, async (req: Request, res: Response) => {
     
     const query: any = {};
     if (classLevel) {
-      query.classLevels = classLevel;
+      const normalizedClass = normalizeClassValue(String(classLevel));
+      query.classLevels = normalizedClass || classLevel;
     }
     
     const batches = await Batch.find(query).sort({ name: 1 });
@@ -400,7 +413,8 @@ router.get('/firebase/batches', authMiddleware, async (req: Request, res: Respon
     // Fetch all batches from MongoDB
     const query: any = {};
     if (classLevel) {
-      query.classLevels = classLevel;
+      const normalizedClass = normalizeClassValue(String(classLevel));
+      query.classLevels = normalizedClass || classLevel;
     }
     
     const batches = await Batch.find(query).sort({ name: 1 }).lean();

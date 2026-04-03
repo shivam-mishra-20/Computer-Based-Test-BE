@@ -30,21 +30,27 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as AuthPayload;
     
-    // Fetch user from DB to get name and latest role
+    // Fetch user from DB to get profile and latest role/assignment metadata
     const User = require('../models/User').default;
-    const user = await User.findById(decoded.id).select('name role email').lean();
+    const user = await User.findById(decoded.id)
+      .select('name role email classLevel batch firebaseUid status')
+      .lean();
     
     if (!user) {
       return res.status(401).json({ message: 'User not found' });
     }
     
-    // Set both id and _id for compatibility, plus name and email from DB
+    // Set both id and _id for compatibility, plus profile metadata from DB
     (req as any).user = { 
       id: decoded.id, 
       _id: decoded.id, 
       role: (user as any).role || decoded.role,
       name: (user as any).name,
-      email: (user as any).email
+      email: (user as any).email,
+      classLevel: (user as any).classLevel,
+      batch: (user as any).batch,
+      firebaseUid: (user as any).firebaseUid,
+      status: (user as any).status,
     };
     next();
   } catch (err) {

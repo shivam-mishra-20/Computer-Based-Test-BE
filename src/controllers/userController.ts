@@ -1,6 +1,36 @@
 import { Request, Response } from 'express';
 import User, { IUser, UserRole } from '../models/User';
 import { logAudit } from '../utils/logger';
+import {
+	getAllowedBatchesForClass,
+	getStudentBatchConfigResponse,
+	isBatchRequiredForClass,
+	matchAllowedBatch,
+	normalizeClassValue,
+	toClassLabel,
+} from '../config/studentBatchConfig';
+
+function resolveStudentClassAndBatch(classLevelInput?: string, batchInput?: string): { classLevel: string; batch: string } {
+	const normalizedClass = normalizeClassValue(classLevelInput);
+	if (!normalizedClass) {
+		throw new Error('Student class must be between 7 and 12');
+	}
+
+	const allowedBatches = getAllowedBatchesForClass(normalizedClass);
+	if (!isBatchRequiredForClass(normalizedClass)) {
+		return { classLevel: toClassLabel(normalizedClass), batch: '' };
+	}
+
+	const matchedBatch = matchAllowedBatch(batchInput, allowedBatches);
+	if (!matchedBatch) {
+		throw new Error(`Invalid batch for Class ${normalizedClass}. Allowed: ${allowedBatches.join(', ')}`);
+	}
+
+	return {
+		classLevel: toClassLabel(normalizedClass),
+		batch: matchedBatch,
+	};
+}
 
 // Admin-only: Get pending user registrations
 export const adminGetPendingUsers = async (req: Request, res: Response) => {
@@ -152,6 +182,18 @@ export const adminCreateUser = async (req: Request, res: Response) => {
 			return res.status(400).json({ message: 'empCode is mandatory for teachers and students' });
 		}
 
+		let normalizedClassLevel = classLevel;
+		let normalizedBatch = batch;
+		if (role === 'student') {
+			try {
+				const resolved = resolveStudentClassAndBatch(classLevel, batch);
+				normalizedClassLevel = resolved.classLevel;
+				normalizedBatch = resolved.batch;
+			} catch (validationError: any) {
+				return res.status(400).json({ message: validationError.message || 'Invalid student class or batch' });
+			}
+		}
+
 	const lcEmail = email.toLowerCase();
 	const sanitizedEmpCode = empCode ? empCode.trim() : undefined;
 
@@ -169,8 +211,8 @@ export const adminCreateUser = async (req: Request, res: Response) => {
 		email: lcEmail,
 		password,
 		role,
-		classLevel,
-		batch,
+		classLevel: role === 'student' ? normalizedClassLevel : undefined,
+		batch: role === 'student' ? normalizedBatch : undefined,
 		empCode: sanitizedEmpCode,
 		registrationSource: 'admin',
 	});
@@ -180,6 +222,10 @@ export const adminCreateUser = async (req: Request, res: Response) => {
 		console.error('Create User Error:', err);
 		res.status(500).json({ message: 'Server error' });
 	}
+};
+
+export const getStudentBatchConfig = async (_req: Request, res: Response) => {
+	return res.json(getStudentBatchConfigResponse());
 };
 
 // Admin-only: List users filtered by role
@@ -201,8 +247,15 @@ export const adminListUsers = async (req: Request, res: Response) => {
 			const rx = new RegExp(search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
 			filter.$or = [{ name: rx }, { email: rx }, { phone: rx }, { empCode: rx }];
 		}
-		if (classLevel) filter.classLevel = classLevel;
-		if (batch) filter.batch = batch;
+		if (classLevel) {
+			const normalizedClass = normalizeClassValue(classLevel);
+			if (normalizedClass) {
+				filter.classLevel = { $regex: new RegExp(`^(Class\\s*)?${normalizedClass}$`, 'i') };
+			} else {
+				filter.classLevel = classLevel;
+			}
+		}
+		if (batch) filter.batch = String(batch).trim();
 		const users = await User.find(filter).select('-password');
 		res.json(users);
 	} catch (err) {
@@ -248,9 +301,29 @@ export const adminUpdateUser = async (req: Request, res: Response) => {
 			}
 			user.role = role;
 		}
+
+		const effectiveRole = role || user.role;
+		if (effectiveRole === 'student') {
+			const currentClassLevel = classLevel !== undefined ? classLevel : (user as any).classLevel;
+			const currentBatch = batch !== undefined ? batch : (user as any).batch;
+
+			try {
+				const resolved = resolveStudentClassAndBatch(String(currentClassLevel || ''), String(currentBatch || ''));
+				(user as any).classLevel = resolved.classLevel;
+				(user as any).batch = resolved.batch;
+			} catch (validationError: any) {
+				return res.status(400).json({ message: validationError.message || 'Invalid student class or batch' });
+			}
+		} else if (role && role !== 'student') {
+			(user as any).classLevel = '';
+			(user as any).batch = '';
+		}
+
 		if (password) user.password = password; // will be hashed by pre-save
-		if (classLevel !== undefined) (user as any).classLevel = classLevel;
-		if (batch !== undefined) (user as any).batch = batch;
+		if (effectiveRole !== 'student') {
+			if (classLevel !== undefined) (user as any).classLevel = classLevel;
+			if (batch !== undefined) (user as any).batch = batch;
+		}
 		
 		if (empCode && empCode.trim() !== user.empCode) {
 			const sanitizedEmpCode = empCode.trim();

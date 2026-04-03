@@ -15,12 +15,26 @@ export interface IClassReport {
   remarks?: string;
 }
 
+export interface IDailyWorkReport {
+  activities: string[];
+  summary: string;
+  blockers?: string;
+  tomorrowPlan?: string;
+  workWindow: {
+    startTime: string;
+    endTime: string;
+  };
+  submittedAt: Date;
+  updatedAt: Date;
+}
+
 export interface IEOD extends Document {
   teacherId: string; // Support both MongoDB ObjectId and Firebase UID
   teacherName: string;
   date: Date;
   classes: IClassReport[];
   additionalNotes?: string;
+  dailyWorkReport?: IDailyWorkReport;
   submittedAt: Date;
   reviewedBy?: mongoose.Types.ObjectId;
   reviewedAt?: Date;
@@ -45,12 +59,26 @@ const classReportSchema = new Schema<IClassReport>({
   remarks: { type: String }
 }, { _id: false });
 
+const dailyWorkReportSchema = new Schema<IDailyWorkReport>({
+  activities: [{ type: String, trim: true }],
+  summary: { type: String, trim: true },
+  blockers: { type: String, trim: true },
+  tomorrowPlan: { type: String, trim: true },
+  workWindow: {
+    startTime: { type: String, default: '10:30' },
+    endTime: { type: String, default: '19:30' }
+  },
+  submittedAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+}, { _id: false });
+
 const eodSchema = new Schema<IEOD>({
   teacherId: { type: String, required: true, index: true },
   teacherName: { type: String, required: true },
   date: { type: Date, required: true, index: true },
   classes: [classReportSchema],
   additionalNotes: { type: String },
+  dailyWorkReport: { type: dailyWorkReportSchema },
   submittedAt: { type: Date, default: Date.now },
   reviewedBy: { type: Schema.Types.ObjectId, ref: 'User' },
   reviewedAt: { type: Date },

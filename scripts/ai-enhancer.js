@@ -35,8 +35,9 @@ function getGroq() {
  */
 class AIEnhancer {
   constructor() {
-    this.model = 'gemini-2.5-flash';
-    this.concurrentBatches = 6; // Process 6 batches in parallel (4-8x speedup)
+    this.model = process.env.AI_ENHANCER_MODEL || 'gemini-2.5-flash';
+    this.concurrentBatches = Math.max(1, parseInt(process.env.AI_ENHANCER_CONCURRENCY || '4', 10));
+    this.batchSize = Math.max(1, parseInt(process.env.AI_ENHANCER_BATCH_SIZE || '1', 10));
   }
 
   /**
@@ -49,18 +50,18 @@ class AIEnhancer {
     console.log(`\n🤖 AI Enhancement Started (Parallel Processing)`);
     console.log(`   Model: ${this.model}`);
     console.log(`   Input: ${rawQuestions.length} extracted items`);
+    console.log(`   Batch size: ${this.batchSize}`);
     console.log(`   Concurrency: ${this.concurrentBatches} parallel batches`);
 
     const enhancedQuestions = [];
-    const batchSize = 5; // Process 5 questions at a time to avoid token limits
-    const totalBatches = Math.ceil(rawQuestions.length / batchSize);
+    const totalBatches = Math.ceil(rawQuestions.length / this.batchSize);
 
     // Create all batches
     const batches = [];
-    for (let i = 0; i < rawQuestions.length; i += batchSize) {
+    for (let i = 0; i < rawQuestions.length; i += this.batchSize) {
       batches.push({
-        index: Math.floor(i / batchSize),
-        questions: rawQuestions.slice(i, i + batchSize)
+        index: Math.floor(i / this.batchSize),
+        questions: rawQuestions.slice(i, i + this.batchSize)
       });
     }
 
@@ -92,8 +93,15 @@ class AIEnhancer {
       });
     }
 
-    console.log(`   ✅ Enhanced: ${enhancedQuestions.length} questions`);
-    return enhancedQuestions;
+    const uniqueQuestions = this.deduplicateQuestions(enhancedQuestions);
+    const removedDuplicates = enhancedQuestions.length - uniqueQuestions.length;
+
+    console.log(`   ✅ Enhanced: ${uniqueQuestions.length} questions`);
+    if (removedDuplicates > 0) {
+      console.log(`   ♻️  Removed ${removedDuplicates} duplicate question(s) after overlap parsing`);
+    }
+
+    return uniqueQuestions;
   }
 
   /**
@@ -236,12 +244,13 @@ Extract ALL questions now:`;
    */
   parseGeminiResponse(responseText, bookMetadata, originalBatch) {
     const questions = [];
-    const blocks = responseText.split('------------------------------------').filter(b => b.trim());
+    const blocks = this.extractQuestionBlocks(responseText);
 
     for (let i = 0; i < blocks.length; i++) {
       try {
-        // Preserve diagram metadata from original question (NOT base64, Firebase metadata)
-        const originalQuestion = originalBatch[i] || {};
+        // Preserve diagram metadata from original chunk (NOT base64, Firebase metadata)
+        const chunkIndex = originalBatch.length <= 1 ? 0 : Math.min(i, originalBatch.length - 1);
+        const originalQuestion = originalBatch[chunkIndex] || {};
         const metadataWithDiagram = {
           ...bookMetadata,
           diagram: originalQuestion.diagram || null  // Firebase metadata object
@@ -259,21 +268,80 @@ Extract ALL questions now:`;
     return questions;
   }
 
+  extractQuestionBlocks(responseText) {
+    if (!responseText || typeof responseText !== 'string') return [];
+
+    const normalized = responseText.replace(/\r/g, '').trim();
+    if (!normalized) return [];
+
+    const separatorBlocks = normalized
+      .split('------------------------------------')
+      .map(block => block.trim())
+      .filter(block => /QUESTION_TEXT\s*:/i.test(block));
+
+    if (separatorBlocks.length > 0) {
+      return separatorBlocks;
+    }
+
+    const numberedBlocks = normalized.match(/QUESTION_NUMBER\s*:[\s\S]*?(?=\nQUESTION_NUMBER\s*:|$)/gi);
+    if (numberedBlocks && numberedBlocks.length > 0) {
+      return numberedBlocks.map(block => block.trim());
+    }
+
+    const questionTextBlocks = normalized.match(/QUESTION_TEXT\s*:[\s\S]*?(?=\nQUESTION_TEXT\s*:|$)/gi);
+    if (questionTextBlocks && questionTextBlocks.length > 0) {
+      return questionTextBlocks.map(block => block.trim());
+    }
+
+    return [];
+  }
+
   /**
    * Parse a single question block
    */
   parseQuestionBlock(block, bookMetadata) {
     const lines = block.split('\n').map(l => l.trim()).filter(l => l);
     const fields = {};
+    const knownFields = new Set([
+      'QUESTION_NUMBER',
+      'QUESTION_TEXT',
+      'QUESTION_TYPE',
+      'OPTION_A',
+      'OPTION_B',
+      'OPTION_C',
+      'OPTION_D',
+      'OPTION_E',
+      'OPTION_F',
+      'CORRECT_OPTION',
+      'CORRECT_ANSWER_TEXT',
+      'INTEGER_ANSWER',
+      'SUBJECT',
+      'TOPIC',
+      'CHAPTER',
+      'DIFFICULTY',
+      'MARKS',
+      'CONFIDENCE',
+      'NEEDS_REVIEW'
+    ]);
+    let currentKey = null;
 
     for (const line of lines) {
       const colonIndex = line.indexOf(':');
-      if (colonIndex === -1) continue;
+      if (colonIndex !== -1) {
+        const key = line.substring(0, colonIndex).trim().toUpperCase().replace(/ /g, '_');
+        const value = line.substring(colonIndex + 1).trim();
 
-      const key = line.substring(0, colonIndex).trim().toUpperCase().replace(/ /g, '_');
-      const value = line.substring(colonIndex + 1).trim();
+        if (knownFields.has(key)) {
+          fields[key] = value;
+          currentKey = key;
+          continue;
+        }
+      }
 
-      fields[key] = value;
+      if (currentKey) {
+        const existing = fields[currentKey] ? `${fields[currentKey]} ` : '';
+        fields[currentKey] = `${existing}${line}`.trim();
+      }
     }
 
     // Validate required fields
@@ -281,9 +349,13 @@ Extract ALL questions now:`;
       return null;
     }
 
+    const normalizedType = String(fields.QUESTION_TYPE || 'short').toLowerCase().trim();
+    const allowedTypes = new Set(['mcq', 'short', 'long', 'truefalse', 'fill', 'integer', 'assertionreason']);
+    const questionType = allowedTypes.has(normalizedType) ? normalizedType : 'short';
+
     // Build options array for MCQ
     const options = [];
-    if (fields.QUESTION_TYPE === 'mcq') {
+    if (questionType === 'mcq') {
       ['A', 'B', 'C', 'D', 'E', 'F'].forEach(letter => {
         const optionText = fields[`OPTION_${letter}`];
         if (optionText && optionText !== 'EMPTY') {
@@ -298,14 +370,14 @@ Extract ALL questions now:`;
     // Build question object matching your DB schema
     const question = {
       text: fields.QUESTION_TEXT,
-      type: fields.QUESTION_TYPE || 'short',
+      type: questionType,
       subject: fields.SUBJECT || bookMetadata.subject || 'Unknown',
       topic: fields.TOPIC || bookMetadata.topic || 'General',
       chapter: fields.CHAPTER || bookMetadata.chapter || 'Unknown',
       board: bookMetadata.board || 'CBSE',
       class: bookMetadata.class || 'Unknown',
       difficulty: fields.DIFFICULTY || 'medium',
-      marks: parseInt(fields.MARKS) || (fields.QUESTION_TYPE === 'mcq' ? 1 : 2),
+      marks: parseInt(fields.MARKS) || (questionType === 'mcq' ? 1 : 2),
       source: 'Smart Import',
       isActive: true,
       questionNumber: fields.QUESTION_NUMBER,
@@ -320,7 +392,7 @@ Extract ALL questions now:`;
       question.correctAnswerText = fields.CORRECT_ANSWER_TEXT;
     }
 
-    if (fields.QUESTION_TYPE === 'integer' && fields.INTEGER_ANSWER) {
+    if (questionType === 'integer' && fields.INTEGER_ANSWER) {
       question.integerAnswer = parseInt(fields.INTEGER_ANSWER);
     }
 
@@ -330,6 +402,33 @@ Extract ALL questions now:`;
     }
 
     return question;
+  }
+
+  normalizeQuestionText(text) {
+    return String(text || '')
+      .toLowerCase()
+      .replace(/^\s*(?:q\.?\s*)?\d+[\).:\-]\s*/, '')
+      .replace(/\s+/g, ' ')
+      .replace(/[^a-z0-9\s$]/g, '')
+      .trim();
+  }
+
+  deduplicateQuestions(questions) {
+    const seen = new Set();
+    const unique = [];
+
+    for (const question of questions) {
+      const normalized = this.normalizeQuestionText(question?.text);
+      if (!normalized) continue;
+
+      const key = `${(question?.subject || '').toLowerCase()}::${normalized}`;
+      if (seen.has(key)) continue;
+
+      seen.add(key);
+      unique.push(question);
+    }
+
+    return unique;
   }
 }
 

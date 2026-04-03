@@ -283,15 +283,22 @@ function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+function canonicalizeForComparison(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/^\s*(?:q\.?\s*)?\d+[\).:\-]\s*/, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[^\p{L}\p{N}\s$]/gu, '')
+    .trim();
+}
+
 /**
  * Check for duplicate questions in database
  * Returns true if duplicate exists
  * 
- * IMPORTANT: Deduplication is scoped to the SAME class + chapter combination
- * This means:
- * - Same question can exist in different classes (Class 10 vs Class 11)
- * - Same question can exist in different chapters within same class
- * - Only duplicates within SAME class + SAME chapter are skipped
+ * IMPORTANT: Deduplication is scoped to the SAME class collection.
+ * If the same normalized question text already exists in a class question bank,
+ * the new question will be skipped even if chapter labels differ.
  */
 export async function isDuplicate(
   questionText: string,
@@ -301,43 +308,67 @@ export async function isDuplicate(
   className?: string
 ): Promise<boolean> {
   try {
-    // Normalize for comparison
-    const normalizedText = questionText.trim();
+    const normalizedText = questionText
+      .trim()
+      .replace(/^\s*(?:q\.?\s*)?\d+[\).:\-]\s*/, '')
+      .replace(/\s+/g, ' ');
+    const normalizedForRegex = escapeRegex(normalizedText).replace(/\s+/g, '\\s+');
+    const canonicalIncoming = canonicalizeForComparison(normalizedText);
+    const normalizedSubject = subject?.trim();
+    const normalizedBoard = board?.trim();
 
-    // Require both class AND chapter for duplicate check
-    // Without these, we cannot scope the duplicate check properly
+    // Class determines the collection where we check for duplicates.
     if (!className) {
       console.warn('[Duplicate Check] Skipping: no class provided');
-      return false; // Cannot determine collection
-    }
-    
-    if (!chapter || chapter.trim() === '') {
-      console.warn('[Duplicate Check] Skipping: no chapter provided - allowing question');
-      return false; // Without chapter, cannot scope duplicate check
+      return false;
     }
 
     const ClassQuestion = getClassQuestionModel(className);
-    
-    // Query: identical text (case-insensitive) AND same subject + chapter
-    // Note: We check chapter as the primary scope, board is optional
-    const query: any = {
+
+    // Primary check: exact normalized text match in class collection.
+    const primaryQuery: any = {
       isActive: true,
-      text: { $regex: new RegExp(`^${escapeRegex(normalizedText)}$`, 'i') },
-      subject: subject,
-      chapter: chapter,
+      text: { $regex: new RegExp(`^${normalizedForRegex}$`, 'i') },
     };
-    
-    // Only add board filter if provided
-    if (board && board.trim()) {
-      query.board = board;
+
+    if (normalizedSubject) {
+      primaryQuery.subject = { $regex: new RegExp(`^${escapeRegex(normalizedSubject)}$`, 'i') };
     }
-    
-    const existing = await ClassQuestion.findOne(query)
+
+    if (normalizedBoard) {
+      primaryQuery.board = { $regex: new RegExp(`^${escapeRegex(normalizedBoard)}$`, 'i') };
+    }
+
+    let existing = await ClassQuestion.findOne(primaryQuery)
       .select('_id')
       .lean();
 
+    // Secondary check: punctuation-insensitive canonical comparison.
+    if (!existing) {
+      const narrowedQuery: any = { isActive: true };
+
+      if (normalizedSubject) {
+        narrowedQuery.subject = { $regex: new RegExp(`^${escapeRegex(normalizedSubject)}$`, 'i') };
+      }
+
+      if (normalizedBoard) {
+        narrowedQuery.board = { $regex: new RegExp(`^${escapeRegex(normalizedBoard)}$`, 'i') };
+      }
+
+      const candidates = await ClassQuestion.find(narrowedQuery)
+        .select('_id text')
+        .limit(200)
+        .lean();
+
+      existing = candidates.find((candidate: any) => {
+        const canonicalExisting = canonicalizeForComparison(candidate.text || '');
+        return canonicalExisting.length > 0 && canonicalExisting === canonicalIncoming;
+      }) as any;
+    }
+
     if (existing) {
-      console.log(`[Duplicate Found] Skipping question in ${className}/${chapter}: "${normalizedText.substring(0, 60)}..."`);
+      const chapterLabel = chapter || 'unknown-chapter';
+      console.log(`[Duplicate Found] Skipping question in ${className}/${chapterLabel}: "${normalizedText.substring(0, 60)}..."`);
     }
 
     return !!existing;

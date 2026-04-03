@@ -35,8 +35,16 @@ class PDFParser {
       const client = new ImageAnnotatorClient({ keyFilename: KEY_FILE });
       
       const maxPagesPerBatch = 5; // Vision API limit
-      const pagesToProcess = Math.min(totalPages, 50); // Overall limit
+      const configuredMaxPages = Number(process.env.OCR_MAX_PAGES || totalPages);
+      const safeMaxPages = Number.isFinite(configuredMaxPages) && configuredMaxPages > 0
+        ? configuredMaxPages
+        : totalPages;
+      const pagesToProcess = Math.min(totalPages, safeMaxPages);
       const pageTexts = [];
+
+      if (pagesToProcess < totalPages) {
+        console.warn(`[PDF Parser] OCR page limit active: processing ${pagesToProcess}/${totalPages} pages`);
+      }
       
       console.log(`[PDF Parser] Processing ${pagesToProcess} pages in batches of ${maxPagesPerBatch}...`);
       
@@ -273,7 +281,8 @@ Current credentials path: ${process.env.GOOGLE_APPLICATION_CREDENTIALS || 'NOT S
    * Section headers are detected only to label chunks, not to gate them.
    */
   splitIntoExerciseChunks(text, metadata) {
-    const CHUNK_SIZE = 6000; // Larger chunks keep question context intact
+    const CHUNK_SIZE = Number(process.env.PDF_CHUNK_SIZE || 4000);
+    const CHUNK_OVERLAP = Number(process.env.PDF_CHUNK_OVERLAP || 300);
     const chunks = [];
     const chapterName = metadata.chapter || 'General';
 
@@ -310,7 +319,14 @@ Current credentials path: ${process.env.GOOGLE_APPLICATION_CREDENTIALS || 'NOT S
         console.log(`[PDF Parser] Chunk ${chunkIdx + 1}: ${slice.length} chars — "${exerciseLabel}"`);
         chunkIdx++;
       }
-      start = end + 1;
+
+      if (end >= text.length) {
+        break;
+      }
+
+      const overlap = Math.max(0, Math.min(CHUNK_OVERLAP, CHUNK_SIZE - 500));
+      const nextStart = Math.max(end - overlap, start + 500);
+      start = nextStart > start ? nextStart : end + 1;
     }
 
     if (chunks.length === 0 && text.trim().length > 100) {

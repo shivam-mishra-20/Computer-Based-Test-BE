@@ -4,6 +4,7 @@ import Schedule from '../../models/Schedule';
 import User from '../../models/User';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import mongoose from 'mongoose';
+import { TeacherEodReminderCron } from '../../services/TeacherEodReminderCron';
 
 interface AuthRequest extends Request {
   user?: {
@@ -15,6 +16,30 @@ interface AuthRequest extends Request {
 }
 
 const router = Router();
+
+const WORKDAY_START_TIME = '10:30';
+const WORKDAY_END_TIME = '19:30';
+
+function isValidDate(date: Date): boolean {
+  return !Number.isNaN(date.getTime());
+}
+
+function getDayRange(dateInput: string | Date): { startOfDay: Date; endOfDay: Date } {
+  const base = new Date(dateInput);
+  const startOfDay = new Date(base);
+  startOfDay.setHours(0, 0, 0, 0);
+  const endOfDay = new Date(base);
+  endOfDay.setHours(23, 59, 59, 999);
+  return { startOfDay, endOfDay };
+}
+
+function sanitizeActivities(activities: unknown): string[] {
+  if (!Array.isArray(activities)) return [];
+  return activities
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter(Boolean)
+    .slice(0, 12);
+}
 
 // GET - Get today's scheduled classes for teacher (to pre-fill EOD form)
 router.get('/scheduled-classes', authMiddleware, async (req: AuthRequest, res: Response) => {
@@ -80,13 +105,17 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     const teacherId = req.user.firebaseUid || req.user._id;
     const reportDate = new Date(date);
+    if (!isValidDate(reportDate)) {
+      return res.status(400).json({ error: 'Invalid date format' });
+    }
+    const { startOfDay, endOfDay } = getDayRange(reportDate);
 
     // Check if EOD already exists for this date
     const existing = await EOD.findOne({
       teacherId,
       date: {
-        $gte: new Date(reportDate.setHours(0, 0, 0, 0)),
-        $lte: new Date(reportDate.setHours(23, 59, 59, 999))
+        $gte: startOfDay,
+        $lte: endOfDay
       }
     });
 
@@ -104,7 +133,7 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
     const eod = new EOD({
       teacherId,
       teacherName: req.user.name || 'Teacher',
-      date: reportDate,
+      date: startOfDay,
       classes,
       additionalNotes,
       submittedAt: new Date(),
@@ -116,6 +145,85 @@ router.post('/', authMiddleware, async (req: AuthRequest, res: Response) => {
   } catch (error: any) {
     console.error('Error submitting EOD:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// POST - Submit daily non-class work report (Teacher only)
+router.post('/work-report', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (req.user?.role !== 'teacher') {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    const { date, activities, summary, blockers, tomorrowPlan } = req.body || {};
+
+    if (!date) {
+      return res.status(400).json({ error: 'Date is required' });
+    }
+
+    const reportDate = new Date(date);
+    if (!isValidDate(reportDate)) {
+      return res.status(400).json({ error: 'Invalid date format' });
+    }
+
+    const normalizedActivities = sanitizeActivities(activities);
+    const summaryText = typeof summary === 'string' ? summary.trim() : '';
+    const blockersText = typeof blockers === 'string' ? blockers.trim() : '';
+    const tomorrowPlanText = typeof tomorrowPlan === 'string' ? tomorrowPlan.trim() : '';
+
+    if (!summaryText && normalizedActivities.length === 0) {
+      return res.status(400).json({ error: 'Provide at least one activity or summary' });
+    }
+
+    const teacherId = req.user.firebaseUid || req.user._id;
+    const { startOfDay, endOfDay } = getDayRange(reportDate);
+    const now = new Date();
+
+    const existing = await EOD.findOne({
+      teacherId,
+      date: {
+        $gte: startOfDay,
+        $lte: endOfDay
+      }
+    });
+
+    const dailyWorkReport = {
+      activities: normalizedActivities,
+      summary: summaryText,
+      blockers: blockersText,
+      tomorrowPlan: tomorrowPlanText,
+      workWindow: {
+        startTime: WORKDAY_START_TIME,
+        endTime: WORKDAY_END_TIME
+      },
+      submittedAt: existing?.dailyWorkReport?.submittedAt || now,
+      updatedAt: now
+    };
+
+    if (existing) {
+      existing.dailyWorkReport = dailyWorkReport;
+      existing.submittedAt = now;
+      existing.status = 'pending';
+      await existing.save();
+      return res.json(existing);
+    }
+
+    const eod = new EOD({
+      teacherId,
+      teacherName: req.user.name || 'Teacher',
+      date: startOfDay,
+      classes: [],
+      additionalNotes: '',
+      dailyWorkReport,
+      submittedAt: now,
+      status: 'pending'
+    });
+
+    await eod.save();
+    return res.status(201).json(eod);
+  } catch (error: any) {
+    console.error('Error submitting daily work report:', error);
+    return res.status(500).json({ error: error.message });
   }
 });
 
@@ -171,13 +279,17 @@ router.get('/by-date/:date', authMiddleware, async (req: AuthRequest, res: Respo
     }
 
     const targetDate = new Date(req.params.date);
+    if (!isValidDate(targetDate)) {
+      return res.status(400).json({ error: 'Invalid date format' });
+    }
+    const { startOfDay, endOfDay } = getDayRange(targetDate);
     const teacherId = req.user.firebaseUid || req.user._id;
 
     const eod = await EOD.findOne({
       teacherId,
       date: {
-        $gte: new Date(targetDate.setHours(0, 0, 0, 0)),
-        $lte: new Date(targetDate.setHours(23, 59, 59, 999))
+        $gte: startOfDay,
+        $lte: endOfDay
       }
     });
 
@@ -265,6 +377,32 @@ router.get('/student/by-date/:date', authMiddleware, async (req: AuthRequest, re
 });
 
 // ==================== ADMIN ROUTES ====================
+
+// POST - Trigger teacher EOD reminder manually (Admin only)
+router.post('/admin/send-reminder', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (req.user?.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const result = await TeacherEodReminderCron.sendDailyReminder();
+    if (!result.success) {
+      return res.status(500).json({
+        success: false,
+        message: result.error || 'Failed to send EOD reminders',
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: `Teacher EOD reminders sent to ${result.notified ?? 0} teacher(s)`,
+      notified: result.notified ?? 0,
+    });
+  } catch (error: any) {
+    console.error('Error triggering teacher reminder:', error);
+    return res.status(500).json({ error: error.message });
+  }
+});
 
 // GET - Get all EODs (Admin only)
 router.get('/admin/all', authMiddleware, async (req: AuthRequest, res: Response) => {

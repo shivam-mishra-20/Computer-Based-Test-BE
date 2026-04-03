@@ -5,12 +5,33 @@ const EPUBParser = require('./epub-parser');
 const PDFParser = require('./pdf-parser');
 const AIEnhancer = require('./ai-enhancer');
 
+function parseSelectedFiles(rawValue) {
+  if (!rawValue) return [];
+
+  try {
+    const parsed = JSON.parse(rawValue);
+    if (!Array.isArray(parsed)) return [];
+
+    return Array.from(
+      new Set(
+        parsed
+          .filter((file) => typeof file === 'string' && file.trim().length > 0)
+          .map((file) => file.trim())
+      )
+    );
+  } catch (error) {
+    console.warn('[Runner] Failed to parse SELECTED_FILES, defaulting to all files');
+    return [];
+  }
+}
+
 const CONFIG = {
   backendUrl: process.env.BACKEND_API_URL || 'http://localhost:5000',
   apiToken: process.env.BACKEND_API_KEY || process.env.ADMIN_TOKEN,
   adminUserId: process.env.ADMIN_USER_ID,
   baseFolder: process.env.EPUB_BASE_PATH || path.join(__dirname, '..'),
   targetFolder: process.env.TARGET_FOLDER || 'class_12', // Start with class_12
+  selectedFiles: parseSelectedFiles(process.env.SELECTED_FILES),
   batchSize: parseInt(process.env.BATCH_SIZE || '50'),
 };
 
@@ -33,6 +54,9 @@ class AutomationRunner {
     console.log('═══════════════════════════════════════');
     console.log(`⏰ Time: ${new Date().toLocaleString()}`);
     console.log(`📁 Target Folder: ${CONFIG.targetFolder}`);
+    if (CONFIG.selectedFiles.length > 0) {
+      console.log(`📄 Selected Files: ${CONFIG.selectedFiles.length}`);
+    }
     console.log('═══════════════════════════════════════\n');
 
     try {
@@ -117,14 +141,27 @@ class AutomationRunner {
     try {
       const files = await fs.readdir(folderPath);
       const bookFiles = files
-        .filter(file => file.endsWith('.epub') || file.endsWith('.pdf'))
+        .filter(file => /\.(epub|pdf)$/i.test(file))
         .map(file => ({
           fileName: file,
           filePath: path.join(folderPath, file),
-          fileType: file.endsWith('.epub') ? 'epub' : 'pdf'
+          fileType: file.toLowerCase().endsWith('.epub') ? 'epub' : 'pdf'
         }));
 
-      return bookFiles;
+      if (CONFIG.selectedFiles.length === 0) {
+        return bookFiles;
+      }
+
+      const selectedSet = new Set(CONFIG.selectedFiles.map(file => file.toLowerCase()));
+      const filteredFiles = bookFiles.filter(file => selectedSet.has(file.fileName.toLowerCase()));
+      const foundSet = new Set(filteredFiles.map(file => file.fileName.toLowerCase()));
+      const missingFiles = CONFIG.selectedFiles.filter(file => !foundSet.has(file.toLowerCase()));
+
+      if (missingFiles.length > 0) {
+        console.warn(`⚠️  Selected files not found in ${CONFIG.targetFolder}: ${missingFiles.join(', ')}`);
+      }
+
+      return filteredFiles;
 
     } catch (error) {
       console.error(`❌ Failed to scan folder ${folderPath}:`, error.message);

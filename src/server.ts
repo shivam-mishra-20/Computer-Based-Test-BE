@@ -48,6 +48,7 @@ import { existsSync, writeFileSync, readFileSync } from 'fs';
 })();
 
 import http from 'http';
+import cluster from 'cluster';
 import SocketService from './services/SocketService';
 import { closeRedis } from './config/redis';
 
@@ -57,6 +58,13 @@ const { connectDB } = require('./config/db');
 
 const PORT = parseInt(process.env.PORT || '5000', 10);
 const WORKER_ID = process.env.WORKER_ID || process.pid;
+
+function shouldRunCronJobs(): boolean {
+  if (process.env.ENABLE_CRON === 'false') return false;
+  if (process.env.CRON_ON_ALL_WORKERS === 'true') return true;
+  if (!cluster.isWorker) return true;
+  return cluster.worker?.id === 1;
+}
 
 const httpServer = http.createServer(app);
 
@@ -71,9 +79,18 @@ const server = httpServer.listen(PORT, '0.0.0.0', () => {
 server.maxConnections = 10000;
 
 connectDB().then(async () => {
-  // Initialize attendance auto-sync cron after DB is ready
-  const { AttendanceCron } = require('./services/AttendanceCron');
-  AttendanceCron.init();
+  if (shouldRunCronJobs()) {
+    // Initialize attendance auto-sync cron after DB is ready
+    const { AttendanceCron } = require('./services/AttendanceCron');
+    AttendanceCron.init();
+
+    // Initialize daily 8 PM IST reminder for teacher EOD work reports
+    const { TeacherEodReminderCron } = require('./services/TeacherEodReminderCron');
+    TeacherEodReminderCron.init();
+    console.log(`✅ [Worker ${WORKER_ID}] Cron jobs initialized`);
+  } else {
+    console.log(`ℹ️ [Worker ${WORKER_ID}] Skipping cron initialization on this worker`);
+  }
   
 }).catch((err: any) => {
   console.error('Database connection failed at startup:', err);

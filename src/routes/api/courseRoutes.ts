@@ -6,12 +6,38 @@ import { cacheMiddleware, invalidateCacheOn } from '../../utils/cacheHelpers';
 
 const router = Router();
 
+function normalizeClassLevel(input?: string): string {
+  if (!input) return '';
+  const match = String(input).match(/(\d{1,2})/);
+  if (match) return String(Number(match[1]));
+  return String(input).trim().toLowerCase();
+}
+
+function classFilterQuery(classLevel?: string): any {
+  if (!classLevel) return undefined;
+  const normalized = normalizeClassLevel(classLevel);
+  if (/^\d{1,2}$/.test(normalized)) {
+    return { $regex: new RegExp(`^(Class\\s*)?${normalized}$`, 'i') };
+  }
+  return classLevel;
+}
+
+function classesMatch(studentClass?: string, courseClass?: string): boolean {
+  if (!studentClass || !courseClass) return false;
+  return normalizeClassLevel(studentClass) === normalizeClassLevel(courseClass);
+}
+
+function ensureStudentClassAccess(user: any, courseClassLevel?: string): boolean {
+  return Boolean(user?.classLevel && courseClassLevel && classesMatch(user.classLevel, courseClassLevel));
+}
+
 // Get all courses (admin/teacher sees all; students see only published) - Cached for 5 minutes
 router.get('/', authMiddleware, cacheMiddleware({ ttl: 300, keyFn: (req) => `courses:list:user:${(req as any).user?.id}:${JSON.stringify(req.query)}` }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const { classLevel, subject, batch, status } = req.query;
     const isAdmin = ['admin', 'teacher'].includes(user.role);
+    const requestedClassLevel = typeof classLevel === 'string' ? classLevel : '';
 
     const query: any = {};
 
@@ -23,15 +49,24 @@ router.get('/', authMiddleware, cacheMiddleware({ ttl: 300, keyFn: (req) => `cou
     }
 
     // Filter by class level
-    if (classLevel) {
-      query.classLevel = classLevel;
-    } else if (!isAdmin && user.classLevel) {
-      // Only auto-filter by classLevel for students, not admins
-      query.classLevel = user.classLevel;
+    if (isAdmin) {
+      if (requestedClassLevel) {
+        query.classLevel = classFilterQuery(requestedClassLevel);
+      }
+    } else {
+      if (!user.classLevel) {
+        return res.status(403).json({ error: 'Student class is not assigned. Contact admin.' });
+      }
+
+      if (requestedClassLevel && !classesMatch(user.classLevel, requestedClassLevel)) {
+        return res.status(403).json({ error: 'Students can only access courses for their own class' });
+      }
+
+      query.classLevel = classFilterQuery(user.classLevel);
     }
 
-    if (subject) query.subject = subject;
-    if (batch) query.batch = batch;
+    if (typeof subject === 'string' && subject.trim()) query.subject = subject.trim();
+    if (typeof batch === 'string' && batch.trim()) query.batch = batch.trim();
 
     const courses = await Course.find(query)
       .populate('instructor', 'name')
@@ -90,6 +125,10 @@ router.get('/:courseId', authMiddleware, cacheMiddleware({ ttl: 300, keyFn: (req
       return res.status(404).json({ error: 'Course not found' });
     }
 
+    if (!isAdmin && !ensureStudentClassAccess(user, course.classLevel)) {
+      return res.status(403).json({ error: 'You can only access courses for your own class' });
+    }
+
     // Admins and teachers get full course data
     if (isAdmin) {
       res.json({ ...course, enrolledStudents: undefined });
@@ -135,13 +174,26 @@ router.get('/:courseId', authMiddleware, cacheMiddleware({ ttl: 300, keyFn: (req
 router.post('/:courseId/enroll', authMiddleware, invalidateCacheOn(['courses', 'course:', 'enrolled']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
+
+    if (user.role !== 'student') {
+      return res.status(403).json({ error: 'Only students can enroll in courses' });
+    }
+
     const course = await Course.findById(req.params.courseId);
     
     if (!course) {
       return res.status(404).json({ error: 'Course not found' });
     }
+
+    if (!ensureStudentClassAccess(user, course.classLevel)) {
+      return res.status(403).json({ error: 'You can only enroll in courses for your own class' });
+    }
     
-    if (course.enrolledStudents?.includes(user.id)) {
+    const alreadyEnrolled = course.enrolledStudents?.some(
+      (id: any) => String(id) === String(user.id)
+    );
+
+    if (alreadyEnrolled) {
       return res.status(400).json({ error: 'Already enrolled' });
     }
     
@@ -172,10 +224,18 @@ router.post('/:courseId/progress', authMiddleware, invalidateCacheOn(['enrolled'
   try {
     const user = (req as any).user;
     const { lectureId, timeSpent } = req.body;
+
+    if (user.role !== 'student') {
+      return res.status(403).json({ error: 'Only students can update course progress' });
+    }
     
     const course = await Course.findById(req.params.courseId);
     if (!course) {
       return res.status(404).json({ error: 'Course not found' });
+    }
+
+    if (!ensureStudentClassAccess(user, course.classLevel)) {
+      return res.status(403).json({ error: 'You can only track progress for your own class courses' });
     }
     
     // Calculate total lectures
@@ -218,6 +278,19 @@ router.post('/:courseId/lectures/:lectureId/position', authMiddleware, async (re
     const user = (req as any).user;
     const { courseId, lectureId } = req.params;
     const { position } = req.body; // position in seconds
+
+    if (user.role !== 'student') {
+      return res.status(403).json({ error: 'Only students can save lecture positions' });
+    }
+
+    const course = await Course.findById(courseId).select('classLevel').lean();
+    if (!course) {
+      return res.status(404).json({ error: 'Course not found' });
+    }
+
+    if (!ensureStudentClassAccess(user, (course as any).classLevel)) {
+      return res.status(403).json({ error: 'You can only access lecture videos for your own class' });
+    }
     
     if (typeof position !== 'number') {
       return res.status(400).json({ error: 'Position (in seconds) is required' });
@@ -246,6 +319,19 @@ router.get('/:courseId/lectures/:lectureId/position', authMiddleware, cacheMiddl
   try {
     const user = (req as any).user;
     const { courseId, lectureId } = req.params;
+
+    if (user.role !== 'student') {
+      return res.status(403).json({ error: 'Only students can fetch lecture positions' });
+    }
+
+    const course = await Course.findById(courseId).select('classLevel').lean();
+    if (!course) {
+      return res.status(404).json({ error: 'Course not found' });
+    }
+
+    if (!ensureStudentClassAccess(user, (course as any).classLevel)) {
+      return res.status(403).json({ error: 'You can only access lecture videos for your own class' });
+    }
     
     const progress = await CourseProgress.findOne({ studentId: user.id, courseId }).lean();
     
@@ -265,6 +351,10 @@ router.get('/:courseId/lectures/:lectureId/position', authMiddleware, cacheMiddl
 router.get('/my/enrolled', authMiddleware, cacheMiddleware({ ttl: 300, keyFn: (req) => `enrolled:user:${(req as any).user.id}` }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
+
+    if (user.role !== 'student') {
+      return res.status(403).json({ error: 'Only students can access enrolled courses' });
+    }
     
     const progress = await CourseProgress.find({ studentId: user.id })
       .populate({
@@ -284,7 +374,8 @@ router.get('/my/enrolled', authMiddleware, cacheMiddleware({ ttl: 300, keyFn: (r
         timeSpent: p.timeSpent,
         lastWatchedLectureId: p.lastWatchedLectureId,
         lecturePositions: p.lecturePositions
-      }));
+      }))
+      .filter((course: any) => ensureStudentClassAccess(user, course.classLevel));
     
     res.json(enrolledCourses);
   } catch (error: any) {

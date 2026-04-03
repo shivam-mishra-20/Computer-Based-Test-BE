@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
-import { adminCreateUser, adminListUsers, adminGetUser, adminUpdateUser, adminDeleteUser, adminDashboard, adminGetPendingUsers, adminApproveUser, adminRejectUser, adminGetRegistrationRecords, getUserSettings, updateUserSettings, changePassword, updateProfile } from '../../controllers/userController';
+import { adminCreateUser, adminListUsers, adminGetUser, adminUpdateUser, adminDeleteUser, adminDashboard, adminGetPendingUsers, adminApproveUser, adminRejectUser, adminGetRegistrationRecords, getStudentBatchConfig, getUserSettings, updateUserSettings, changePassword, updateProfile } from '../../controllers/userController';
 
 const router = Router();
 
@@ -16,6 +16,7 @@ router.put('/:id/reject', authMiddleware, requireRole('admin'), adminRejectUser)
 // Admin and Teacher user management
 router.post('/', authMiddleware, requireRole('admin', 'teacher'), adminCreateUser);
 router.get('/', authMiddleware, requireRole('admin', 'teacher'), adminListUsers);
+router.get('/student-batch-config', authMiddleware, requireRole('admin', 'teacher'), getStudentBatchConfig);
 router.get('/:id', authMiddleware, requireRole('admin', 'teacher'), adminGetUser);
 router.put('/:id', authMiddleware, requireRole('admin', 'teacher'), adminUpdateUser);
 router.delete('/:id', authMiddleware, requireRole('admin', 'teacher'), adminDeleteUser);

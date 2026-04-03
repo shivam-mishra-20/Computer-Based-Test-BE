@@ -378,7 +378,17 @@ export const updateProcessingRecord = async (req: Request, res: Response) => {
  */
 export const triggerProcessing = async (req: Request, res: Response) => {
   try {
-    const { folder = 'class_12' } = req.body;
+    const { folder = 'class_12', selectedFiles } = req.body;
+
+    const normalizedSelectedFiles = Array.isArray(selectedFiles)
+      ? Array.from(
+          new Set(
+            selectedFiles
+              .filter((file: unknown): file is string => typeof file === 'string' && file.trim().length > 0)
+              .map((file: string) => file.trim())
+          )
+        )
+      : [];
     
     // Extract token from request
     const token = req.headers.authorization?.replace('Bearer ', '');
@@ -411,6 +421,24 @@ export const triggerProcessing = async (req: Request, res: Response) => {
       });
     }
 
+    const folderEntries = fs.readdirSync(folderPath);
+    const availableBookFiles = folderEntries.filter((fileName: string) => /\.(epub|pdf)$/i.test(fileName));
+
+    if (normalizedSelectedFiles.length > 0) {
+      const invalidFileNames = normalizedSelectedFiles.filter(
+        (fileName: string) =>
+          !availableBookFiles.includes(fileName) ||
+          /[/\\]/.test(fileName)
+      );
+
+      if (invalidFileNames.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid file selection: ${invalidFileNames.join(', ')}`,
+        });
+      }
+    }
+
     // Update status to running
     automationStatus.currentlyRunning = true;
     await automationStatus.save();
@@ -422,12 +450,16 @@ export const triggerProcessing = async (req: Request, res: Response) => {
     console.log(`[Manual Trigger] Starting processing for folder: ${folder}`);
     console.log(`[Manual Trigger] Folder path: ${folderPath}`);
     console.log(`[Manual Trigger] Script path: ${scriptPath}`);
+    if (normalizedSelectedFiles.length > 0) {
+      console.log(`[Manual Trigger] Selected files (${normalizedSelectedFiles.length}): ${normalizedSelectedFiles.join(', ')}`);
+    }
 
     // Spawn the automation runner script
     const child = spawn('node', [scriptPath], {
       env: {
         ...process.env,
         TARGET_FOLDER: folder,
+        SELECTED_FILES: JSON.stringify(normalizedSelectedFiles),
         EPUB_BASE_PATH: process.cwd(),
         BACKEND_API_KEY: token, // Pass the admin token
         BACKEND_API_URL: process.env.BACKEND_URL || 'http://localhost:5000',
@@ -463,6 +495,7 @@ export const triggerProcessing = async (req: Request, res: Response) => {
       success: true, 
       message: 'Processing started',
       folder,
+      selectedFiles: normalizedSelectedFiles,
       scriptPath 
     });
 
@@ -569,7 +602,12 @@ export const getAvailableFolders = async (req: Request, res: Response) => {
     const path = require('path');
     
     const rootDir = process.cwd();
-    const folders: Array<{ name: string; path: string; fileCount: number }> = [];
+    const folders: Array<{
+      name: string;
+      path: string;
+      fileCount: number;
+      files: Array<{ name: string; path: string; size: number; type: 'epub' | 'pdf' }>;
+    }> = [];
     
     // Check for class folders
     const classFolderPattern = /^class_\d+$/;
@@ -583,12 +621,26 @@ export const getAvailableFolders = async (req: Request, res: Response) => {
         if (stats.isDirectory()) {
           // Count EPUB and PDF files
           const files = fs.readdirSync(folderPath);
-          const bookFiles = files.filter((f: string) => f.endsWith('.epub') || f.endsWith('.pdf'));
+          const bookFiles = files
+            .filter((f: string) => /\.(epub|pdf)$/i.test(f))
+            .sort((a: string, b: string) => a.localeCompare(b))
+            .map((f: string) => {
+              const absoluteFilePath = path.join(folderPath, f);
+              const fileStats = fs.statSync(absoluteFilePath);
+
+              return {
+                name: f,
+                path: absoluteFilePath,
+                size: fileStats.size,
+                type: f.toLowerCase().endsWith('.epub') ? 'epub' as const : 'pdf' as const,
+              };
+            });
           
           folders.push({
             name: item,
             path: folderPath,
-            fileCount: bookFiles.length
+            fileCount: bookFiles.length,
+            files: bookFiles,
           });
         }
       }
