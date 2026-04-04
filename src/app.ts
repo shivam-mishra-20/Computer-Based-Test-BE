@@ -62,12 +62,12 @@ app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // CORS configuration - allow credentials and Authorization header
 // When credentials is true, origin cannot be '*', so we use a function to dynamically allow origins
-const allowedOrigins = process.env.CORS_ORIGIN 
-	? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
+const allowedOrigins = process.env.CORS_ORIGIN
+	? process.env.CORS_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean)
 	: [
-		'http://localhost:3000', 
-		'http://localhost:3001', 
-		'http://127.0.0.1:3000', 
+		'http://localhost:3000',
+		'http://localhost:3001',
+		'http://127.0.0.1:3000',
 		'http://localhost:5173',
 		'https://computer-based-test.vercel.app',
 		'https://examease-pi.vercel.app',
@@ -75,39 +75,67 @@ const allowedOrigins = process.env.CORS_ORIGIN
 		// Abhigyan Gurukul website
 		'https://abhigyangurukul.com',
 		'https://www.abhigyangurukul.com',
+		'http://abhigyangurukul.com',
+		'http://www.abhigyangurukul.com',
 	];
 
-app.use(cors({
+const allowedOriginSet = new Set(allowedOrigins.map((o) => o.toLowerCase()));
+const allowedHostSet = new Set(
+	allowedOrigins
+		.map((originValue) => {
+			try {
+				return new URL(originValue).hostname.toLowerCase();
+			} catch {
+				return null;
+			}
+		})
+		.filter((hostname): hostname is string => Boolean(hostname))
+);
+
+const parseOriginHostname = (origin: string): string | null => {
+	try {
+		return new URL(origin).hostname.toLowerCase();
+	} catch {
+		return null;
+	}
+};
+
+const corsOptions: cors.CorsOptions = {
 	origin: (origin, callback) => {
-		// Allow requests with no origin (like mobile apps, Postman, curl, native apps)
-		if (!origin) return callback(null, true);
-		
+		// Allow requests with no origin (Postman/curl/native) and null-origin webviews.
+		if (!origin || origin === 'null') return callback(null, true);
+
 		// Allow all origins if CORS_ORIGIN is explicitly set to '*'
 		if (process.env.CORS_ORIGIN === '*') return callback(null, true);
-		
-		// Check if origin is in allowed list
-		if (allowedOrigins.includes(origin)) {
+
+		const originLower = origin.toLowerCase();
+		if (allowedOriginSet.has(originLower)) {
 			return callback(null, true);
 		}
-		
-		// For development, allow localhost with any port
-		if (origin.startsWith('http://localhost:') || origin.startsWith('http://127.0.0.1:')) {
+
+		const hostname = parseOriginHostname(originLower);
+		if (!hostname) {
+			console.warn('[CORS] Rejected malformed origin:', origin);
+			return callback(new Error('Not allowed by CORS'));
+		}
+
+		// Allow listed hostnames irrespective of protocol.
+		if (allowedHostSet.has(hostname)) {
 			return callback(null, true);
 		}
-		
-		// Allow Railway preview deployments
-		if (origin.includes('.railway.app') || origin.includes('.up.railway.app')) {
+
+		// For development, allow localhost/127.0.0.1 with any port and protocol.
+		if (hostname === 'localhost' || hostname === '127.0.0.1') {
 			return callback(null, true);
 		}
-		
-		// Allow Vercel deployments
-		if (origin.includes('.vercel.app')) {
+
+		// Allow Railway/Vercel preview deployments.
+		if (hostname.endsWith('.railway.app') || hostname.endsWith('.up.railway.app') || hostname.endsWith('.vercel.app')) {
 			return callback(null, true);
 		}
-		
-		// Log rejected origins for debugging
+
 		console.warn('[CORS] Rejected origin:', origin);
-		callback(new Error('Not allowed by CORS'));
+		return callback(new Error('Not allowed by CORS'));
 	},
 	credentials: true,
 	allowedHeaders: [
@@ -120,8 +148,12 @@ app.use(cors({
 		'X-Attempt-Key',
 	],
 	exposedHeaders: ['Content-Range', 'X-Content-Range'],
-	methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']
-}));
+	methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+	optionsSuccessStatus: 200,
+};
+
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 // Helmet with CSP disabled to avoid devtools CSP console noise on API root
 app.use(helmet({ contentSecurityPolicy: false }));
