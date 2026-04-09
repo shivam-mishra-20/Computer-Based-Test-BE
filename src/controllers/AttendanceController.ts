@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import QueueService from '../services/QueueService';
 import Attendance from '../models/Attendance';
+import absentService from '../services/absentCalculationService';
 
 export class AttendanceController {
   
@@ -316,41 +317,205 @@ export class AttendanceController {
      try {
        const { userId } = req.params;
        const { from, to } = req.query;
-       
-       const query: any = { studentId: new (require('mongoose').Types.ObjectId)(userId) }; // Ensure ObjectId match
-       
-       if (from && to) {
-         query.date = { 
-           $gte: new Date(from as string), 
-           $lte: new Date(to as string) 
+
+       const mongoose = require('mongoose');
+       if (!mongoose.Types.ObjectId.isValid(userId)) {
+         res.status(400).json({ message: 'Invalid user id' });
+         return;
+       }
+
+       const parseDateOnly = (dateValue: string, endOfDay: boolean): Date | null => {
+         const normalized = String(dateValue || '').trim();
+         if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) return null;
+
+         const [yearStr, monthStr, dayStr] = normalized.split('-');
+         const year = Number(yearStr);
+         const month = Number(monthStr);
+         const day = Number(dayStr);
+
+         const parsed = endOfDay
+           ? new Date(year, month - 1, day, 23, 59, 59, 999)
+           : new Date(year, month - 1, day, 0, 0, 0, 0);
+
+         if (
+           Number.isNaN(parsed.getTime()) ||
+           parsed.getFullYear() !== year ||
+           parsed.getMonth() + 1 !== month ||
+           parsed.getDate() !== day
+         ) {
+           return null;
+         }
+
+         return parsed;
+       };
+
+       const formatDateLocal = (value: Date): string => {
+         const year = value.getFullYear();
+         const month = String(value.getMonth() + 1).padStart(2, '0');
+         const day = String(value.getDate()).padStart(2, '0');
+         return `${year}-${month}-${day}`;
+       };
+
+       let fromDate: Date | null = null;
+       let toDate: Date | null = null;
+
+       if (from || to) {
+         if (!from || !to) {
+           res.status(400).json({ message: 'Both from and to dates are required' });
+           return;
+         }
+
+         fromDate = parseDateOnly(from as string, false);
+         toDate = parseDateOnly(to as string, true);
+
+         if (!fromDate || !toDate) {
+           res.status(400).json({ message: 'Invalid date format. Use YYYY-MM-DD' });
+           return;
+         }
+
+         if (fromDate.getTime() > toDate.getTime()) {
+           res.status(400).json({ message: 'From date cannot be greater than to date' });
+           return;
+         }
+       }
+
+       const User = require('../models/User').default;
+       const userInfo = await User.findById(userId).select('name empCode role').lean();
+       if (!userInfo) {
+         res.status(404).json({ message: 'User not found' });
+         return;
+       }
+
+       const matchQuery: any = {
+         studentId: new mongoose.Types.ObjectId(userId)
+       };
+
+       if (fromDate && toDate) {
+         matchQuery.date = {
+           $gte: fromDate,
+           $lte: toDate
          };
        }
 
-       const records = await AttendanceController.aggregateAttendance(query, { date: -1 });
+       const records = await Attendance.aggregate([
+         { $match: matchQuery },
+         { $sort: { date: 1, clockIn: 1 } },
+         {
+           $group: {
+             _id: {
+               $dateToString: { format: '%Y-%m-%d', date: '$date' }
+             },
+             date: { $first: '$date' },
+             clockIn: { $first: '$clockIn' },
+             lastPunchClockIn: { $last: '$clockIn' },
+             actualClockOut: { $last: '$clockOut' },
+             status: { $first: '$status' },
+             lateIn: { $first: '$lateIn' },
+             punchCount: { $sum: 1 }
+           }
+         },
+         {
+           $project: {
+             _id: 1,
+             date: 1,
+             clockIn: 1,
+             clockOut: {
+               $cond: {
+                 if: {
+                   $and: [
+                     { $ne: ['$actualClockOut', null] },
+                     { $ne: ['$actualClockOut', '--:--'] }
+                   ]
+                 },
+                 then: '$actualClockOut',
+                 else: {
+                   $cond: {
+                     if: { $gt: ['$punchCount', 1] },
+                     then: '$lastPunchClockIn',
+                     else: null
+                   }
+                 }
+               }
+             },
+             status: 1,
+             lateIn: 1,
+             punchCount: 1
+           }
+         },
+         { $sort: { date: -1 } }
+       ]);
 
-       // Extract user info from first record if available, or fetch separate
-       let userInfo = null;
-       if (records.length > 0) {
-         userInfo = {
-           name: records[0].user.name,
-           empCode: records[0].user.empCode,
-           role: records[0].user.role
+       const attendance = records.map((r: any) => {
+         const rawState = String(r.status || '').toLowerCase();
+         const normalizedState =
+           rawState === 'present' || rawState === 'in'
+             ? 'IN'
+             : rawState === 'absent' || rawState === 'a'
+               ? 'ABSENT'
+               : rawState === 'late'
+                 ? 'LATE'
+                 : rawState
+                   ? rawState.toUpperCase()
+                   : 'UNKNOWN';
+
+         const lateMinutes = r.lateIn ? parseInt(r.lateIn, 10) || 0 : 0;
+
+         return {
+           date: formatDateLocal(new Date(r.date)),
+           inTime: r.clockIn && r.clockIn !== '--:--' ? r.clockIn : null,
+           outTime: r.clockOut && r.clockOut !== '--:--' ? r.clockOut : null,
+           state: normalizedState,
+           lateMinutes,
+           punchCount: r.punchCount || 1
          };
-       } else {
-          // Fetch user separately if no attendance
-           const User = require('../models/User').default;
-           const u = await User.findById(userId).select('name empCode role');
-           if (u) userInfo = { name: u.name, empCode: u.empCode, role: u.role };
+       });
+
+       let statsFrom = fromDate;
+       let statsTo = toDate;
+       if (!statsFrom || !statsTo) {
+         const now = new Date();
+         statsFrom = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+         statsTo = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
        }
+
+       const advancedStats = await absentService.calculateStats(userId, statsFrom, statsTo);
+
+       const lateCount = attendance.filter(
+         (row: any) => String(row.state || '').toUpperCase() === 'LATE' || Number(row.lateMinutes || 0) > 0
+       ).length;
+
+       const presentWorkingDays = Math.max(
+         advancedStats.expectedDays - advancedStats.absentDays,
+         0
+       );
 
        res.json({
-         user: userInfo,
-         attendance: records.map((r: any) => ({
-           date: r.date.toISOString().split('T')[0],
-           inTime: r.clockIn,
-           outTime: r.clockOut,
-           state: r.status
-         }))
+         user: {
+           name: userInfo.name,
+           empCode: userInfo.empCode,
+           role: userInfo.role
+         },
+         period: {
+           from: statsFrom ? formatDateLocal(statsFrom) : null,
+           to: statsTo ? formatDateLocal(statsTo) : null
+         },
+         generatedAt: new Date().toISOString(),
+         stats: {
+           present: presentWorkingDays,
+           absent: advancedStats.absentDays,
+           late: lateCount,
+           total: advancedStats.expectedDays,
+           holidays: advancedStats.holidays,
+           extraDays: advancedStats.extraDays
+         },
+         attendance,
+         meta: {
+           expectedDays: advancedStats.expectedDays,
+           presentDates: advancedStats.presentDates,
+           absentDates: advancedStats.absentDates,
+           workingDates: advancedStats.workingDates,
+           holidayDates: advancedStats.holidayDates
+         }
        });
      } catch (error) {
        console.error('User Attendance Error:', error);

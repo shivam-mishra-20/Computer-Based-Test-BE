@@ -1,7 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export type LeaveStatus = 'pending' | 'approved' | 'rejected';
-export type LeaveType = 'sick' | 'personal' | 'emergency' | 'vacation' | 'other';
+export type LeaveType = 'sick' | 'personal' | 'emergency' | 'vacation' | 'half_day' | 'other';
 
 export interface ILeave extends Document {
   teacherId: string; // Support both MongoDB ObjectId and Firebase UID
@@ -25,7 +25,7 @@ const leaveSchema = new Schema<ILeave>({
   teacherEmail: { type: String, required: true },
   leaveType: { 
     type: String, 
-    enum: ['sick', 'personal', 'emergency', 'vacation', 'other'], 
+    enum: ['sick', 'personal', 'emergency', 'vacation', 'half_day', 'other'], 
     required: true 
   },
   startDate: { type: Date, required: true, index: true },

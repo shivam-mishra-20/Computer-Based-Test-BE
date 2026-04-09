@@ -7,11 +7,25 @@ import { sendTeacherNotification } from '../../services/notificationService';
 
 const router = Router();
 
+const ALLOWED_LEAVE_TYPES = ['sick', 'personal', 'emergency', 'vacation', 'half_day', 'other'] as const;
+
+function escapeRegex(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function getLeaveTypeLabel(leaveType: string): string {
+  if (leaveType === 'half_day') return 'Half Day';
+  return leaveType
+    .split('_')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
 // Get all leaves (Admin: all, Teacher: their own)
 router.get('/', authMiddleware, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const { status, startDate, endDate } = req.query;
+    const { status, leaveType, startDate, endDate, search } = req.query;
 
     let query: any = {};
 
@@ -27,6 +41,26 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
     // Filter by status if provided
     if (status) {
       query.status = status;
+    }
+
+    // Filter by leave type if provided
+    if (leaveType) {
+      query.leaveType = leaveType;
+    }
+
+    // Admin search by teacher name/email
+    if (search) {
+      const searchText = String(search).trim();
+      if (searchText) {
+        const regex = new RegExp(escapeRegex(searchText), 'i');
+        query.$and = query.$and || [];
+        query.$and.push({
+          $or: [
+            { teacherName: regex },
+            { teacherEmail: regex }
+          ]
+        });
+      }
     }
 
     // Filter by date range if provided
@@ -98,9 +132,19 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
 
     const { leaveType, startDate, endDate, reason } = req.body;
 
+    if (!leaveType || !ALLOWED_LEAVE_TYPES.includes(leaveType)) {
+      return res.status(400).json({
+        error: `Invalid leave type. Allowed values: ${ALLOWED_LEAVE_TYPES.join(', ')}`
+      });
+    }
+
     // Validate dates
     const start = new Date(startDate);
     const end = new Date(endDate);
+
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      return res.status(400).json({ error: 'Invalid startDate or endDate' });
+    }
 
     if (start > end) {
       return res.status(400).json({ error: 'Start date must be before end date' });
@@ -149,7 +193,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
         type: 'general',
         priority: 'medium',
         title: 'New Leave Request',
-        message: `${user.name} has requested leave from ${start.toLocaleDateString()} to ${end.toLocaleDateString()}`,
+        message: `${user.name} has requested ${getLeaveTypeLabel(leaveType)} leave from ${start.toLocaleDateString()} to ${end.toLocaleDateString()}`,
         data: { leaveId: leave._id, teacherId: user.id },
         actionUrl: '/admin/leaves'
       });

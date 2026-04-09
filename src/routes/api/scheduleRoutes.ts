@@ -1143,6 +1143,7 @@ router.post('/', authMiddleware, invalidateCacheOn({ patterns: ['schedule'] }), 
       const teacherLeave = await Leave.findOne({
         teacherId,
         status: 'approved',
+        leaveType: { $ne: 'half_day' },
         startDate: { $lte: scheduleDate },
         endDate: { $gte: scheduleDate }
       });
