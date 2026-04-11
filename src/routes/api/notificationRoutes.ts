@@ -9,6 +9,7 @@ import {
   createNotification,
   createBulkNotifications,
   registerToken,
+  unregisterToken,
   sendTestPush,
 } from '../../controllers/notificationController';
 
@@ -16,16 +17,19 @@ const router = Router();
 
 // User notification endpoints
 router.get('/', authMiddleware, getUserNotifications);
-router.put('/:id/read', authMiddleware, markNotificationAsRead);
 router.put('/read-all', authMiddleware, markAllNotificationsAsRead);
-router.delete('/:id', authMiddleware, deleteNotification);
+router.put('/:id/read', authMiddleware, markNotificationAsRead);
 router.delete('/read/clear', authMiddleware, deleteAllReadNotifications);
 
 // Register push token
 router.post('/register-token', authMiddleware, registerToken);
+router.delete('/unregister-token', authMiddleware, unregisterToken);
 
 // Debug: send a test push to the authenticated user
 router.post('/test-push', authMiddleware, sendTestPush);
+
+// Keep this dynamic route after static delete routes.
+router.delete('/:id', authMiddleware, deleteNotification);
 
 // Admin/System endpoints for creating notifications
 router.post('/', authMiddleware, requireRole('admin'), createNotification);

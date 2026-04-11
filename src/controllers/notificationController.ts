@@ -10,7 +10,7 @@ const expo = new Expo();
 export const registerToken = async (req: Request, res: Response) => {
   try {
     const userId = (req as any).user?.id;
-    const { pushToken } = req.body;
+    const pushToken = typeof req.body?.pushToken === 'string' ? req.body.pushToken.trim() : '';
 
     if (!userId) {
       return res.status(401).json({ message: 'Unauthorized' });
@@ -26,11 +26,42 @@ export const registerToken = async (req: Request, res: Response) => {
       });
     }
 
+    // Ensure one physical device token is bound to only one account at a time.
+    // This prevents cross-account notification leakage when users switch accounts.
+    const detachResult = await User.updateMany(
+      { _id: { $ne: userId }, pushToken },
+      { $unset: { pushToken: '' } }
+    );
+
     await User.findByIdAndUpdate(userId, { pushToken });
 
-    res.json({ message: 'Push token registered successfully' });
+    const detachedUsers =
+      (detachResult as any).modifiedCount ?? (detachResult as any).nModified ?? 0;
+
+    res.json({
+      message: 'Push token registered successfully',
+      detachedUsers,
+    });
   } catch (err) {
     console.error('Error registering push token:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Unregister push token for the authenticated user (used during logout)
+export const unregisterToken = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+
+    if (!userId) {
+      return res.status(401).json({ message: 'Unauthorized' });
+    }
+
+    await User.findByIdAndUpdate(userId, { $unset: { pushToken: '' } });
+
+    res.json({ message: 'Push token unregistered successfully' });
+  } catch (err) {
+    console.error('Error unregistering push token:', err);
     res.status(500).json({ message: 'Server error' });
   }
 };

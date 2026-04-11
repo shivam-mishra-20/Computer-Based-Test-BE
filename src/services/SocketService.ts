@@ -219,6 +219,23 @@ class SocketService {
   }
 
   /**
+   * Emit permanent doubt deletion to all relevant listeners.
+   */
+  public emitDoubtDeleted(doubtId: string, studentId: string, teacherId: string | null): void {
+    if (!this.io) return;
+
+    const payload = { doubtId };
+    this.io.to(`doubt_${doubtId}`).emit('doubt_deleted', payload);
+
+    const userRooms = [`user:${studentId}`];
+    if (teacherId) {
+      userRooms.push(`user:${teacherId}`);
+    }
+
+    this.io.to(userRooms).emit('doubt_deleted', payload);
+  }
+
+  /**
    * Get current connection count (for this server instance only)
    */
   public getConnectionCount(): number {

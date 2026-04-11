@@ -637,6 +637,71 @@ router.put('/:id/resolve', authMiddleware, async (req: AuthRequest, res: Respons
   }
 });
 
+// DELETE - Permanently delete a doubt chat (teacher/admin)
+router.delete('/:id/permanent', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (req.user?.role !== 'teacher' && req.user?.role !== 'admin') {
+      return res.status(403).json({ error: 'Only teachers or admins can permanently delete chats' });
+    }
+
+    const doubt = await Doubt.findById(req.params.id);
+    if (!doubt) {
+      return res.status(404).json({ error: 'Doubt not found' });
+    }
+
+    const storagePaths = new Set<string>();
+
+    // Collect storage paths from embedded message attachments
+    if (doubt.messages?.length) {
+      for (const msg of doubt.messages) {
+        if (msg.attachments?.length) {
+          for (const att of msg.attachments) {
+            if (att.storagePath) {
+              storagePaths.add(att.storagePath);
+            }
+          }
+        }
+      }
+    }
+
+    // Collect storage paths from metadata documents
+    const metadataDocs = await FileMetadata.find({ relatedDoubtId: doubt._id })
+      .select('storagePath')
+      .lean();
+
+    for (const doc of metadataDocs) {
+      if (doc.storagePath) {
+        storagePaths.add(doc.storagePath);
+      }
+    }
+
+    // Best-effort storage cleanup
+    await Promise.all(
+      Array.from(storagePaths).map(async (path) => {
+        try {
+          await bucket.file(path).delete({ ignoreNotFound: true });
+        } catch (error) {
+          console.error('[DoubtDelete] Failed to delete storage object:', path, error);
+        }
+      })
+    );
+
+    await FileMetadata.deleteMany({ relatedDoubtId: doubt._id });
+    await doubt.deleteOne();
+
+    SocketService.emitDoubtDeleted(
+      req.params.id,
+      doubt.student.toString(),
+      doubt.teacher ? doubt.teacher.toString() : null,
+    );
+
+    return res.json({ message: 'Doubt chat permanently deleted' });
+  } catch (error) {
+    console.error('Error permanently deleting doubt:', error);
+    return res.status(500).json({ error: 'Failed to permanently delete doubt chat' });
+  }
+});
+
 // DELETE - Delete doubt (admin only)
 router.delete('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
