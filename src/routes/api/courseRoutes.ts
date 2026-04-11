@@ -31,6 +31,40 @@ function ensureStudentClassAccess(user: any, courseClassLevel?: string): boolean
   return Boolean(user?.classLevel && courseClassLevel && classesMatch(user.classLevel, courseClassLevel));
 }
 
+function extractYouTubeId(input?: string): string | null {
+  if (!input) return null;
+  const value = String(input).trim();
+  if (/^[a-zA-Z0-9_-]{11}$/.test(value)) return value;
+
+  const patterns = [
+    /(?:youtube\.com\/watch\?.*?[?&]v=|youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/,
+    /youtube\.com\/shorts\/([a-zA-Z0-9_-]{11})/
+  ];
+
+  for (const pattern of patterns) {
+    const match = value.match(pattern);
+    if (match) return match[1];
+  }
+
+  return null;
+}
+
+function getFirstLectureThumbnail(syllabus?: any[]): string | undefined {
+  const firstLecture = syllabus?.[0]?.lectures?.[0];
+  if (!firstLecture) return undefined;
+
+  if (firstLecture.youtubeMeta?.thumbnail) {
+    return firstLecture.youtubeMeta.thumbnail;
+  }
+
+  const videoId = extractYouTubeId(firstLecture.youtubeVideoId || firstLecture.videoUrl);
+  if (videoId) {
+    return `https://img.youtube.com/vi/${videoId}/mqdefault.jpg`;
+  }
+
+  return undefined;
+}
+
 // Get all courses (admin/teacher sees all; students see only published) - Cached for 5 minutes
 router.get('/', authMiddleware, cacheMiddleware({ ttl: 300, keyFn: (req) => `courses:list:user:${(req as any).user?.id}:${JSON.stringify(req.query)}` }), async (req: Request, res: Response) => {
   try {
@@ -84,6 +118,7 @@ router.get('/', authMiddleware, cacheMiddleware({ ttl: 300, keyFn: (req) => `cou
       const isEnrolled = course.enrolledStudents?.some(
         (id: any) => id.toString() === user.id
       );
+      const resolvedThumbnail = course.thumbnail || getFirstLectureThumbnail(course.syllabus as any[]);
 
       const progress = await CourseProgress.findOne({
         studentId: user.id,
@@ -92,6 +127,7 @@ router.get('/', authMiddleware, cacheMiddleware({ ttl: 300, keyFn: (req) => `cou
 
       return {
         ...course,
+        thumbnail: resolvedThumbnail,
         isEnrolled,
         progressPercent: progress?.progressPercent || 0,
         enrolledStudents: undefined,
@@ -143,10 +179,12 @@ router.get('/:courseId', authMiddleware, cacheMiddleware({ ttl: 300, keyFn: (req
       studentId: user.id,
       courseId: course._id
     }).lean();
+    const resolvedThumbnail = course.thumbnail || getFirstLectureThumbnail(course.syllabus as any[]);
 
     // If not enrolled or free, hide video URLs
     const courseFinal = {
       ...course,
+      thumbnail: resolvedThumbnail,
       isEnrolled,
       progressPercent: progress?.progressPercent || 0,
       completedLectures: progress?.completedLectures || [],
@@ -366,15 +404,22 @@ router.get('/my/enrolled', authMiddleware, cacheMiddleware({ ttl: 300, keyFn: (r
     
     const enrolledCourses = progress
       .filter(p => p.courseId)
-      .map(p => ({
-        ...(p.courseId as any),
-        progressPercent: p.progressPercent,
-        lastAccessedAt: p.lastAccessedAt,
-        completedLectures: p.completedLectures,
-        timeSpent: p.timeSpent,
-        lastWatchedLectureId: p.lastWatchedLectureId,
-        lecturePositions: p.lecturePositions
-      }))
+      .map(p => {
+        const courseData = p.courseId as any;
+        const resolvedThumbnail =
+          courseData?.thumbnail || getFirstLectureThumbnail(courseData?.syllabus);
+
+        return {
+          ...courseData,
+          thumbnail: resolvedThumbnail,
+          progressPercent: p.progressPercent,
+          lastAccessedAt: p.lastAccessedAt,
+          completedLectures: p.completedLectures,
+          timeSpent: p.timeSpent,
+          lastWatchedLectureId: p.lastWatchedLectureId,
+          lecturePositions: p.lecturePositions
+        };
+      })
       .filter((course: any) => ensureStudentClassAccess(user, course.classLevel));
     
     res.json(enrolledCourses);
