@@ -51,16 +51,28 @@ export const publicRegister = async (req: Request, res: Response) => {
   try {
     // Validate required fields
     if (!name || !email || !password || !phone || !classLevel || !board || !targetExams || targetExams.length === 0 || !profileImage) {
-      return res.status(400).json({ message: 'Name, email, password, phone, class, board, profile photo, and at least one target exam are required' });
+      const missingFields = [];
+      if (!name) missingFields.push('name');
+      if (!email) missingFields.push('email');
+      if (!password) missingFields.push('password');
+      if (!phone) missingFields.push('phone');
+      if (!classLevel) missingFields.push('class');
+      if (!board) missingFields.push('board');
+      if (!targetExams || targetExams.length === 0) missingFields.push('target exam');
+      if (!profileImage) missingFields.push('profile photo');
+      return res.status(400).json({ message: `Missing required fields: ${missingFields.join(', ')}` });
     }
 
     // Check if user already exists
     const existing = await User.findOne({ email: lcEmail });
     if (existing) {
       if (existing.status === 'pending') {
-        return res.status(400).json({ message: 'Registration pending admin approval' });
+        return res.status(409).json({ message: 'An account with this email is already registered and awaiting admin approval.' });
       }
-      return res.status(400).json({ message: 'User already exists' });
+      if (existing.status === 'rejected') {
+        return res.status(409).json({ message: 'This email was rejected during registration. Please contact support.' });
+      }
+      return res.status(409).json({ message: 'An account with this email already exists. Please log in.' });
     }
 
     let resolvedClassLevel = classLevel;
@@ -70,7 +82,7 @@ export const publicRegister = async (req: Request, res: Response) => {
       resolvedClassLevel = resolved.classLevel;
       resolvedBatch = resolved.batch;
     } catch (validationError: any) {
-      return res.status(400).json({ message: validationError?.message || 'Invalid class/batch combination' });
+      return res.status(400).json({ message: validationError?.message || 'Invalid class or batch selection' });
     }
 
     // Create user with pending status
@@ -92,8 +104,9 @@ export const publicRegister = async (req: Request, res: Response) => {
     await user.save();
 
     res.status(201).json({ 
-      message: 'Registration successful! Your account is pending admin approval. You will be able to login once approved.',
-      userId: user._id 
+      message: 'Registration successful! Your account has been submitted for admin approval. You will receive a notification once approved.',
+      userId: user._id,
+      status: 'pending'
     });
   } catch (err) {
     console.error('Registration error:', err);
@@ -109,16 +122,25 @@ export const publicTeacherRegister = async (req: Request, res: Response) => {
   try {
     // Validate required fields
     if (!name || !email || !password || !phone || !profileImage) {
-      return res.status(400).json({ message: 'Name, email, password, phone, and profile photo are required' });
+      const missingFields = [];
+      if (!name) missingFields.push('name');
+      if (!email) missingFields.push('email');
+      if (!password) missingFields.push('password');
+      if (!phone) missingFields.push('phone');
+      if (!profileImage) missingFields.push('profile photo');
+      return res.status(400).json({ message: `Missing required fields: ${missingFields.join(', ')}` });
     }
 
     // Check if user already exists
     const existing = await User.findOne({ email: lcEmail });
     if (existing) {
       if (existing.status === 'pending') {
-        return res.status(400).json({ message: 'Registration pending admin approval' });
+        return res.status(409).json({ message: 'An account with this email is already registered and awaiting admin approval.' });
       }
-      return res.status(400).json({ message: 'User already exists' });
+      if (existing.status === 'rejected') {
+        return res.status(409).json({ message: 'This email was rejected during registration. Please contact support.' });
+      }
+      return res.status(409).json({ message: 'An account with this email already exists. Please log in.' });
     }
 
     // Create teacher with pending status
@@ -136,8 +158,9 @@ export const publicTeacherRegister = async (req: Request, res: Response) => {
     await user.save();
 
     res.status(201).json({ 
-      message: 'Teacher registration successful! Your account is pending admin approval. You will be able to login once approved.',
-      userId: user._id 
+      message: 'Teacher registration successful! Your account has been submitted for admin approval. You will receive a notification once approved.',
+      userId: user._id,
+      status: 'pending'
     });
   } catch (err) {
     console.error('Teacher registration error:', err);
