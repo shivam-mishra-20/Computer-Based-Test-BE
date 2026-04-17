@@ -11,6 +11,7 @@ import { ImportModel } from '../../models/Import';
 import Blueprint from '../../models/Blueprint';
 import Paper from '../../models/Paper';
 import { upload as memUpload } from '../../middlewares/upload';
+import { uploadLimiter } from '../../middlewares/rateLimiter';
 
 const router = express.Router();
 
@@ -57,7 +58,7 @@ const upload = multer({
  * POST /api/import-paper
  * Upload and process question paper
  */
-router.post('/import-paper', authMiddleware, upload.single('questionPaper'), async (req, res) => {
+router.post('/import-paper', authMiddleware, uploadLimiter, upload.single('questionPaper'), async (req, res) => {
   try {
   const { subject, topic, ocrProvider = 'tesseract', mode, model = 'gemini-2.5-flash', class: className, board, chapter, section, marks } = req.body;
     const userId = (req as any).user.id;
@@ -499,7 +500,7 @@ router.get('/imports/questions', authMiddleware, async (req, res) => {
  * POST /api/import-paper/question/:questionId/diagram
  * Attach a diagram image to a specific imported question
  */
-router.post('/import-paper/question/:questionId/diagram', authMiddleware, memUpload.single('image'), async (req, res) => {
+router.post('/import-paper/question/:questionId/diagram', authMiddleware, uploadLimiter, memUpload.single('image'), async (req, res) => {
   try {
     const { questionId } = req.params;
     if (!Types.ObjectId.isValid(questionId)) return errorResponse(res, 'Invalid question ID', 400);

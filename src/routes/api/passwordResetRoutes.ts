@@ -2,11 +2,12 @@ import { Router, Request, Response } from 'express';
 import User from '../../models/User';
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';
+import { passwordResetLimiter } from '../../middlewares/rateLimiter';
 
 const router = Router();
 
 // Request password reset - generates token
-router.post('/forgot-password', async (req: Request, res: Response) => {
+router.post('/forgot-password', passwordResetLimiter, async (req: Request, res: Response) => {
   try {
     const { email } = req.body;
     const lcEmail = typeof email === 'string' ? email.toLowerCase().trim() : email;
@@ -57,7 +58,7 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
 });
 
 // Reset password with token
-router.post('/reset-password', async (req: Request, res: Response) => {
+router.post('/reset-password', passwordResetLimiter, async (req: Request, res: Response) => {
   try {
     const { email, token, newPassword } = req.body;
     const lcEmail = typeof email === 'string' ? email.toLowerCase().trim() : email;

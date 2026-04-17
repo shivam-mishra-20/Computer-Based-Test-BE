@@ -49,7 +49,11 @@ const uploadRoutes = require('./routes/api/uploadRoutes').default as import('exp
 
 dotenv.config();
 
+const BODY_LIMIT = process.env.REQUEST_BODY_LIMIT || '10mb';
+const MORGAN_FORMAT = process.env.NODE_ENV === 'production' ? 'combined' : 'dev';
+
 const app = express();
+app.disable('x-powered-by');
 
 // Trust proxy for proper IP detection behind load balancers
 app.set('trust proxy', 1);
@@ -57,8 +61,8 @@ app.set('trust proxy', 1);
 // Apply global rate limiter (must be early in middleware chain)
 app.use(globalLimiter);
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ limit: '50mb', extended: true }));
+app.use(express.json({ limit: BODY_LIMIT }));
+app.use(express.urlencoded({ limit: BODY_LIMIT, extended: true, parameterLimit: 1000 }));
 
 // CORS configuration - allow credentials and Authorization header
 // When credentials is true, origin cannot be '*', so we use a function to dynamically allow origins
@@ -157,7 +161,9 @@ app.options(/.*/, cors(corsOptions));
 
 // Helmet with CSP disabled to avoid devtools CSP console noise on API root
 app.use(helmet({ contentSecurityPolicy: false }));
-app.use(morgan('dev'));
+app.use(morgan(MORGAN_FORMAT, {
+	skip: (req) => req.path === '/api/health' || req.path.startsWith('/.well-known/'),
+}));
 
 // Serve static uploads (images) from /uploads
 app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));

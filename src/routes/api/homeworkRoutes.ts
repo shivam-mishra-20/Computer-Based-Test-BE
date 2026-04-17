@@ -4,6 +4,7 @@ import Homework from '../../models/Homework';
 import StudentProgress from '../../models/StudentProgress';
 import User from '../../models/User';
 import { authMiddleware } from '../../middlewares/authMiddleware';
+import { uploadLimiter } from '../../middlewares/rateLimiter';
 import { sendStudentNotifications } from '../../services/notificationService';
 import { getFirestoreUserProfile, uploadToFirebase } from '../../services/firebaseService';
 
@@ -397,7 +398,7 @@ router.post('/:id/grade/:studentId', authMiddleware, async (req: Request, res: R
 });
 
 // Upload attachment to homework (teachers/admin only)
-router.post('/:id/upload', authMiddleware, upload.single('file'), async (req: Request, res: Response) => {
+router.post('/:id/upload', authMiddleware, uploadLimiter, upload.single('file'), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     if (!['admin', 'teacher'].includes(user.role)) {

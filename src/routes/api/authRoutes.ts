@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { register, login, me, publicRegister, publicTeacherRegister, changePassword, updateProfile, uploadProfileImage } from '../../controllers/authController';
+import { register, login, me, publicRegister, publicTeacherRegister, changePassword, updateProfile, uploadProfileImage, publicStudentBatchConfig } from '../../controllers/authController';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import { authLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
 import multer from 'multer';
@@ -25,6 +25,7 @@ const upload = multer({
 router.post('/register', authLimiter, register);
 router.post('/public-register', authLimiter, publicRegister);
 router.post('/public-register-teacher', authLimiter, publicTeacherRegister);
+router.get('/public-student-batch-config', publicStudentBatchConfig);
 router.post('/login', authLimiter, login);
 router.get('/me', authMiddleware, me);
 router.post('/change-password', authMiddleware, changePassword);

@@ -1,0 +1,168 @@
+﻿node.exe : npm warn Unknown project config "puppeteer_skip_chromium_download". This 
+will stop working in the next major version of npm.
+At C:\Users\Shivam\AppData\Roaming\npm\npm.ps1:24 char:5
++     & "node$exe"  "$basedir/node_modules/npm/bin/npm-cli.js" $args
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (npm warn Unknow...version of npm.:Stri 
+   ng) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+@hungknguyen/docx-math-converter@1.1.4
+node_modules/@hungknguyen/docx-math-converter
+  @hungknguyen/docx-math-converter@"^1.1.4" from the root project
+
+request@2.88.2
+node_modules/request
+  request@"^2.79.0" from jsdom@9.12.0
+  node_modules/get-dom/node_modules/jsdom
+    jsdom@"^9" from get-dom@9.0.0
+    node_modules/get-dom
+      get-dom@"9.0.0" from omml2mathml@1.3.0
+      node_modules/omml2mathml
+        omml2mathml@"^1.3.0" from @hungknguyen/docx-math-converter@1.1.4
+        node_modules/@hungknguyen/docx-math-converter
+          @hungknguyen/docx-math-converter@"^1.1.4" from the root project
+
+jsonwebtoken@8.5.1
+node_modules/firebase-admin/node_modules/jsonwebtoken
+  jsonwebtoken@"^8.5.1" from firebase-admin@10.3.0
+  node_modules/firebase-admin
+    firebase-admin@"^10.3.0" from the root project
+
+jsonwebtoken@9.0.2
+node_modules/jsonwebtoken
+  jsonwebtoken@"^9.0.2" from the root project
+
+protobufjs@6.11.5 optional
+node_modules/@google-cloud/firestore/node_modules/protobufjs
+  protobufjs@"^6.8.6" from @google-cloud/firestore@4.15.1
+  node_modules/@google-cloud/firestore
+    optional @google-cloud/firestore@"^4.15.1" from firebase-admin@10.3.0
+    node_modules/firebase-admin
+      firebase-admin@"^10.3.0" from the root project
+
+protobufjs@6.11.5 optional
+node_modules/@grpc/proto-loader/node_modules/protobufjs
+  protobufjs@"^6.11.3" from @grpc/proto-loader@0.6.13
+  node_modules/@grpc/proto-loader
+    @grpc/proto-loader@"^0.6.12" from google-gax@2.30.5
+    node_modules/google-gax
+      google-gax@"^2.24.1" from @google-cloud/firestore@4.15.1
+      node_modules/@google-cloud/firestore
+        optional @google-cloud/firestore@"^4.15.1" from firebase-admin@10.3.0
+        node_modules/firebase-admin
+          firebase-admin@"^10.3.0" from the root project
+
+protobufjs@7.5.5 optional
+node_modules/google-gax/node_modules/@grpc/grpc-js/node_modules/protobufjs
+  protobufjs@"^7.2.5" from @grpc/proto-loader@0.7.15
+  node_modules/google-gax/node_modules/@grpc/grpc-js/node_modules/@grpc/proto-loader
+    @grpc/proto-loader@"^0.7.0" from @grpc/grpc-js@1.6.12
+    node_modules/google-gax/node_modules/@grpc/grpc-js
+      @grpc/grpc-js@"~1.6.0" from google-gax@2.30.5
+      node_modules/google-gax
+        google-gax@"^2.24.1" from @google-cloud/firestore@4.15.1
+        node_modules/@google-cloud/firestore
+          optional @google-cloud/firestore@"^4.15.1" from firebase-admin@10.3.0
+          node_modules/firebase-admin
+            firebase-admin@"^10.3.0" from the root project
+
+protobufjs@6.11.3 optional
+node_modules/google-gax/node_modules/protobufjs
+  protobufjs@"6.11.3" from google-gax@2.30.5
+  node_modules/google-gax
+    google-gax@"^2.24.1" from @google-cloud/firestore@4.15.1
+    node_modules/@google-cloud/firestore
+      optional @google-cloud/firestore@"^4.15.1" from firebase-admin@10.3.0
+      node_modules/firebase-admin
+        firebase-admin@"^10.3.0" from the root project
+
+protobufjs@6.11.5 optional
+node_modules/proto3-json-serializer/node_modules/protobufjs
+  protobufjs@"^6.11.2" from proto3-json-serializer@0.1.9
+  node_modules/proto3-json-serializer
+    proto3-json-serializer@"^0.1.8" from google-gax@2.30.5
+    node_modules/google-gax
+      google-gax@"^2.24.1" from @google-cloud/firestore@4.15.1
+      node_modules/@google-cloud/firestore
+        optional @google-cloud/firestore@"^4.15.1" from firebase-admin@10.3.0
+        node_modules/firebase-admin
+          firebase-admin@"^10.3.0" from the root project
+
+protobufjs@7.5.4
+node_modules/protobufjs
+  protobufjs@"^7.5.3" from @grpc/proto-loader@0.8.0
+  node_modules/@google-cloud/vision/node_modules/@grpc/proto-loader
+    @grpc/proto-loader@"^0.8.0" from google-gax@5.0.5
+    node_modules/@google-cloud/vision/node_modules/google-gax
+      google-gax@"^5.0.0" from @google-cloud/vision@5.3.4
+      node_modules/@google-cloud/vision
+        @google-cloud/vision@"^5.3.4" from the root project
+  protobufjs@"^7.5.3" from google-gax@5.0.5
+  node_modules/@google-cloud/vision/node_modules/google-gax
+    google-gax@"^5.0.0" from @google-cloud/vision@5.3.4
+    node_modules/@google-cloud/vision
+      @google-cloud/vision@"^5.3.4" from the root project
+  protobufjs@"^7.4.0" from proto3-json-serializer@3.0.4
+  node_modules/@google-cloud/vision/node_modules/proto3-json-serializer
+    proto3-json-serializer@"^3.0.0" from google-gax@5.0.5
+    node_modules/@google-cloud/vision/node_modules/google-gax
+      google-gax@"^5.0.0" from @google-cloud/vision@5.3.4
+      node_modules/@google-cloud/vision
+        @google-cloud/vision@"^5.3.4" from the root project
+  protobufjs@"^7.5.3" from @grpc/proto-loader@0.8.0
+  node_modules/@grpc/grpc-js/node_modules/@grpc/proto-loader
+    @grpc/proto-loader@"^0.8.0" from @grpc/grpc-js@1.14.0
+    node_modules/@grpc/grpc-js
+      @grpc/grpc-js@"^1.12.6" from google-gax@5.0.5
+      node_modules/@google-cloud/vision/node_modules/google-gax
+        google-gax@"^5.0.0" from @google-cloud/vision@5.3.4
+        node_modules/@google-cloud/vision
+          @google-cloud/vision@"^5.3.4" from the root project
+
+tar@6.2.1
+node_modules/tar
+  tar@"^6.1.11" from @mapbox/node-pre-gyp@1.0.11
+  node_modules/@mapbox/node-pre-gyp
+    @mapbox/node-pre-gyp@"^1.0.0" from canvas@2.11.2
+    node_modules/canvas
+      canvas@"^2.11.2" from the root project
+      peerOptional canvas@"^2.11.2" from jsdom@23.2.0
+      node_modules/jsdom
+        jsdom@"^23.2.0" from @hungknguyen/docx-math-converter@1.1.4
+        node_modules/@hungknguyen/docx-math-converter
+          @hungknguyen/docx-math-converter@"^1.1.4" from the root project
+
+tough-cookie@2.5.0
+node_modules/get-dom/node_modules/tough-cookie
+  tough-cookie@"^2.3.2" from jsdom@9.12.0
+  node_modules/get-dom/node_modules/jsdom
+    jsdom@"^9" from get-dom@9.0.0
+    node_modules/get-dom
+      get-dom@"9.0.0" from omml2mathml@1.3.0
+      node_modules/omml2mathml
+        omml2mathml@"^1.3.0" from @hungknguyen/docx-math-converter@1.1.4
+        node_modules/@hungknguyen/docx-math-converter
+          @hungknguyen/docx-math-converter@"^1.1.4" from the root project
+
+tough-cookie@2.5.0
+node_modules/request/node_modules/tough-cookie
+  tough-cookie@"~2.5.0" from request@2.88.2
+  node_modules/request
+    request@"^2.79.0" from jsdom@9.12.0
+    node_modules/get-dom/node_modules/jsdom
+      jsdom@"^9" from get-dom@9.0.0
+      node_modules/get-dom
+        get-dom@"9.0.0" from omml2mathml@1.3.0
+        node_modules/omml2mathml
+          omml2mathml@"^1.3.0" from @hungknguyen/docx-math-converter@1.1.4
+          node_modules/@hungknguyen/docx-math-converter
+            @hungknguyen/docx-math-converter@"^1.1.4" from the root project
+
+tough-cookie@4.1.4
+node_modules/tough-cookie
+  tough-cookie@"^4.1.3" from jsdom@23.2.0
+  node_modules/jsdom
+    jsdom@"^23.2.0" from @hungknguyen/docx-math-converter@1.1.4
+    node_modules/@hungknguyen/docx-math-converter
+      @hungknguyen/docx-math-converter@"^1.1.4" from the root project

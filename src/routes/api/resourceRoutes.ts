@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import StudyResource from '../../models/StudyResource';
 import { authMiddleware } from '../../middlewares/authMiddleware';
+import { uploadLimiter } from '../../middlewares/rateLimiter';
 import { uploadToFirebase } from '../../services/firebaseService';
 import youtubeService from '../../services/youtubeService';
 
@@ -184,7 +185,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
 });
 
 // Upload PDF file (admin/teacher only)
-router.post('/upload-pdf', authMiddleware, upload.single('file'), async (req: Request, res: Response) => {
+router.post('/upload-pdf', authMiddleware, uploadLimiter, upload.single('file'), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     if (!['admin', 'teacher'].includes(user.role)) {

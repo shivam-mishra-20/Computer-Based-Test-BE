@@ -1,0 +1,45 @@
+﻿node.exe : npm warn Unknown project config "puppeteer_skip_chromium_download". This 
+will stop working in the next major version of npm.
+At C:\Users\Shivam\AppData\Roaming\npm\npm.ps1:24 char:5
++     & "node$exe"  "$basedir/node_modules/npm/bin/npm-cli.js" $args
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (npm warn Unknow...version of npm.:Stri 
+   ng) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Package                           Current   Wanted   Latest  Location                                       Depended by  Package Type     Homepage                                                                                Depended By Location
+@google-cloud/vertexai             1.10.0   1.12.0   1.12.0  node_modules/@google-cloud/vertexai            cbt-exam-be  dependencies     https://github.com/googleapis/nodejs-vertexai
+@google-cloud/vision                5.3.4    5.3.5    5.3.5  node_modules/@google-cloud/vision              cbt-exam-be  dependencies     https://github.com/googleapis/google-cloud-node/tree/main/packages/google-cloud-vision
+@sparticuz/chromium               140.0.0  140.0.0  147.0.0  node_modules/@sparticuz/chromium               cbt-exam-be  dependencies     https://github.com/Sparticuz/chromium
+@types/adm-zip                      0.5.7    0.5.8    0.5.8  node_modules/@types/adm-zip                    cbt-exam-be  dependencies     https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/adm-zip
+@types/express                      5.0.3    5.0.6    5.0.6  node_modules/@types/express                    cbt-exam-be  devDependencies  https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/express
+@types/multer                       2.0.0    2.1.0    2.1.0  node_modules/@types/multer                     cbt-exam-be  devDependencies  https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/multer
+@types/node                        24.5.2  24.12.2   25.6.0  node_modules/@types/node                       cbt-exam-be  devDependencies  https://github.com/DefinitelyTyped/DefinitelyTyped/tree/master/types/node
+@typescript-eslint/eslint-plugin   8.44.1   8.58.2   8.58.2  node_modules/@typescript-eslint/eslint-plugin  cbt-exam-be  devDependencies  https://typescript-eslint.io/packages/eslint-plugin
+@typescript-eslint/parser          8.44.1   8.58.2   8.58.2  node_modules/@typescript-eslint/parser         cbt-exam-be  devDependencies  https://typescript-eslint.io/packages/parser
+adm-zip                            0.5.16   0.5.17   0.5.17  node_modules/adm-zip                           cbt-exam-be  dependencies     https://github.com/cthackers/adm-zip
+canvas                             2.11.2   2.11.2    3.2.3  node_modules/canvas                            cbt-exam-be  dependencies     https://github.com/Automattic/node-canvas
+cors                                2.8.5    2.8.6    2.8.6  node_modules/cors                              cbt-exam-be  dependencies     https://github.com/expressjs/cors#readme
+docx                                9.5.1    9.6.1    9.6.1  node_modules/docx                              cbt-exam-be  dependencies     https://docx.js.org
+dotenv                             17.2.2   17.4.2   17.4.2  node_modules/dotenv                            cbt-exam-be  dependencies     https://github.com/motdotla/dotenv#readme
+esbuild                            0.27.3   0.27.7   0.28.0  node_modules/esbuild                           cbt-exam-be  devDependencies  https://github.com/evanw/esbuild#readme
+eslint                             9.36.0   9.39.4   10.2.0  node_modules/eslint                            cbt-exam-be  devDependencies  https://eslint.org
+eslint-plugin-prettier              5.5.4    5.5.5    5.5.5  node_modules/eslint-plugin-prettier            cbt-exam-be  devDependencies  https://github.com/prettier/eslint-plugin-prettier#readme
+expo-server-sdk                     4.0.0    4.0.0    6.1.0  node_modules/expo-server-sdk                   cbt-exam-be  dependencies     https://github.com/expo/expo-server-sdk-node#readme
+express                             5.1.0    5.2.1    5.2.1  node_modules/express                           cbt-exam-be  dependencies     https://expressjs.com/
+express-rate-limit                  7.5.1    7.5.1    8.3.2  node_modules/express-rate-limit                cbt-exam-be  dependencies     https://github.com/express-rate-limit/express-rate-limit
+firebase-admin                     10.3.0   10.3.0   13.8.0  node_modules/firebase-admin                    cbt-exam-be  dependencies     https://firebase.google.com/
+groq-sdk                           0.34.0   0.34.0    1.1.2  node_modules/groq-sdk                          cbt-exam-be  dependencies     https://github.com/groq/groq-typescript#readme
+ioredis                             5.9.3   5.10.1   5.10.1  node_modules/ioredis                           cbt-exam-be  dependencies     https://github.com/luin/ioredis#readme
+jsonwebtoken                        9.0.2    9.0.3    9.0.3  node_modules/jsonwebtoken                      cbt-exam-be  dependencies     https://github.com/auth0/node-jsonwebtoken#readme
+katex                             0.16.23  0.16.45  0.16.45  node_modules/katex                             cbt-exam-be  dependencies     https://katex.org
+mathjax-full                        3.2.2    3.2.2    3.2.1  node_modules/mathjax-full                      cbt-exam-be  dependencies     https://github.com/mathjax/Mathjax-src#readme
+mongoose                           8.18.2   8.23.0    9.4.1  node_modules/mongoose                          cbt-exam-be  dependencies     https://mongoosejs.com
+pdf-parse                           1.1.4    1.1.4    2.4.5  node_modules/pdf-parse                         cbt-exam-be  dependencies     https://mehmet-kozan.github.io/pdf-parse/
+pdfjs-dist                        4.10.38  4.10.38  5.6.205  node_modules/pdfjs-dist                        cbt-exam-be  dependencies     https://mozilla.github.io/pdf.js/
+prettier                            3.6.2    3.8.3    3.8.3  node_modules/prettier                          cbt-exam-be  devDependencies  https://prettier.io
+puppeteer-core                    24.22.3  24.41.0  24.41.0  node_modules/puppeteer-core                    cbt-exam-be  dependencies     https://github.com/puppeteer/puppeteer/tree/main#readme
+sharp                              0.34.4   0.34.5   0.34.5  node_modules/sharp                             cbt-exam-be  dependencies     https://sharp.pixelplumbing.com
+socket.io-redis                     6.1.1    6.1.1    5.4.0  node_modules/socket.io-redis                   cbt-exam-be  dependencies     https://github.com/socketio/socket.io-redis#readme
+tesseract.js                        6.0.1    6.0.1    7.0.0  node_modules/tesseract.js                      cbt-exam-be  dependencies     https://github.com/naptha/tesseract.js
+typescript                          5.9.2    5.9.3    6.0.2  node_modules/typescript                        cbt-exam-be  devDependencies  https://www.typescriptlang.org/

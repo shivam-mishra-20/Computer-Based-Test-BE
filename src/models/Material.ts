@@ -7,7 +7,7 @@ export type MaterialType =
   | 'link'
   | 'image'
   | 'other';
-export type AssignmentType = 'all' | 'class' | 'batch' | 'students';
+export type AssignmentType = 'all' | 'class' | 'batch' | 'class_batch' | 'students';
 
 export interface IMaterialVersion {
   version: number;
@@ -83,7 +83,7 @@ const materialSchema = new Schema<IMaterial>(
     // Assignment targeting
     assignmentType: {
       type: String,
-      enum: ['all', 'class', 'batch', 'students'],
+      enum: ['all', 'class', 'batch', 'class_batch', 'students'],
       default: 'class',
     },
     assignedClasses: [{ type: String }],

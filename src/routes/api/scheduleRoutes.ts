@@ -7,7 +7,8 @@ import { authMiddleware } from '../../middlewares/authMiddleware';
 import { sendScheduleNotification, sendTeacherNotification } from '../../services/notificationService';
 import { initFirebaseAdmin } from '../../services/firebaseService';
 import { cacheMiddleware, invalidateCacheOn } from '../../utils/cacheHelpers';
-import { STUDENT_BATCH_RULES, normalizeClassValue } from '../../config/studentBatchConfig';
+import { normalizeClassValue } from '../../config/studentBatchConfig';
+import { mergeAdvancedBasicBatchValues } from '../../services/batchConfigService';
 
 // Initialize Firebase Admin on module load
 let firebaseAdmin: any = null;
@@ -25,51 +26,32 @@ function getFirebaseAdmin() {
 
 const router = Router();
 
-// Default batch configuration derived from universal student batch rules.
-const DEFAULT_BATCHES = (() => {
-  const batchToClassSet = new Map<string, Set<string>>();
-
-  for (const rule of STUDENT_BATCH_RULES) {
-    for (const batchName of rule.batches) {
-      if (!batchToClassSet.has(batchName)) {
-        batchToClassSet.set(batchName, new Set<string>());
-      }
-      batchToClassSet.get(batchName)?.add(rule.classValue);
-    }
-  }
-
-  return Array.from(batchToClassSet.entries()).map(([name, classLevels]) => ({
-    name,
-    classLevels: Array.from(classLevels).sort((a, b) => Number(a) - Number(b)),
-    isDefault: true,
-  }));
-})();
-
-// Time slots for regular schedule (2:30 PM to 8:30 PM)
-const TIME_SLOTS = [
-  { start: '14:30', end: '15:30', label: '2:30 - 3:30 PM' },
-  { start: '15:30', end: '16:30', label: '3:30 - 4:30 PM' },
-  { start: '16:30', end: '17:30', label: '4:30 - 5:30 PM' },
-  { start: '17:30', end: '18:30', label: '5:30 - 6:30 PM' },
-  { start: '18:30', end: '19:30', label: '6:30 - 7:30 PM' },
-  { start: '19:30', end: '20:30', label: '7:30 - 8:30 PM' }
+const MORNING_TIME_SLOTS = [
+  { start: '10:30', end: '11:30', label: '10:30 AM - 11:30 AM' },
+  { start: '11:30', end: '12:30', label: '11:30 AM - 12:30 PM' },
+  { start: '12:30', end: '13:30', label: '12:30 PM - 1:30 PM' },
+  { start: '13:30', end: '14:30', label: '1:30 PM - 2:30 PM' },
+  { start: '14:30', end: '15:30', label: '2:30 PM - 3:30 PM' },
 ];
+
+const EVENING_TIME_SLOTS = [
+  { start: '15:30', end: '16:30', label: '3:30 PM - 4:30 PM' },
+  { start: '16:30', end: '17:30', label: '4:30 PM - 5:30 PM' },
+  { start: '17:30', end: '18:30', label: '5:30 PM - 6:30 PM' },
+  { start: '18:30', end: '19:30', label: '6:30 PM - 7:30 PM' },
+  { start: '19:30', end: '20:30', label: '7:30 PM - 8:30 PM' },
+  { start: '20:30', end: '21:30', label: '8:30 PM - 9:30 PM' },
+  { start: '21:30', end: '22:30', label: '9:30 PM - 10:30 PM' },
+];
+
+// All regular slots are used for live schedule, timetable grid defaults, and labels.
+const TIME_SLOTS = [...MORNING_TIME_SLOTS, ...EVENING_TIME_SLOTS];
 
 const DAYS_OF_WEEK = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
 // ========================
 // UTILITY FUNCTIONS
 // ========================
-
-async function ensureDefaultBatches() {
-  for (const batch of DEFAULT_BATCHES) {
-    await Batch.findOneAndUpdate(
-      { name: batch.name },
-      batch,
-      { upsert: true, new: true }
-    );
-  }
-}
 
 function parseTimeToMinutes(time: string): number {
   const [hours, minutes] = time.split(':').map(Number);
@@ -105,6 +87,16 @@ function getCurrentTimeSlot(): { currentSlot: string | null; nextSlot: string | 
 // Check if string is a valid MongoDB ObjectId
 function isValidObjectId(id: string): boolean {
   return /^[0-9a-fA-F]{24}$/.test(id);
+}
+
+function normalizeClassLevels(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+
+  const normalized = input
+    .map((value) => normalizeClassValue(String(value)))
+    .filter((value): value is string => Boolean(value));
+
+  return Array.from(new Set(normalized)).sort((a, b) => Number(a) - Number(b));
 }
 
 /**
@@ -201,7 +193,7 @@ async function resolveTeacherNameAndSync(teacherId: string): Promise<string> {
 // Get all batches
 router.get('/batches', authMiddleware, async (req: Request, res: Response) => {
   try {
-    await ensureDefaultBatches();
+    await mergeAdvancedBasicBatchValues();
     const { classLevel } = req.query;
     
     const query: any = {};
@@ -224,12 +216,53 @@ router.post('/batches', authMiddleware, async (req: Request, res: Response) => {
     if (user.role !== 'admin') {
       return res.status(403).json({ error: 'Only admins can create batches' });
     }
+
+    const normalizedClassLevels = normalizeClassLevels(req.body?.classLevels);
+    if (!req.body?.name || normalizedClassLevels.length === 0) {
+      return res.status(400).json({ error: 'Batch name and valid class levels are required' });
+    }
     
-    const batch = new Batch(req.body);
+    const batch = new Batch({
+      ...req.body,
+      classLevels: normalizedClassLevels,
+    });
     await batch.save();
     res.status(201).json(batch);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Update batch
+router.put('/batches/:id', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (user.role !== 'admin') {
+      return res.status(403).json({ error: 'Only admins can update batches' });
+    }
+
+    const updatePayload: Record<string, unknown> = { ...req.body };
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'classLevels')) {
+      const normalizedClassLevels = normalizeClassLevels(req.body?.classLevels);
+      if (normalizedClassLevels.length === 0) {
+        return res.status(400).json({ error: 'At least one valid class level is required' });
+      }
+      updatePayload.classLevels = normalizedClassLevels;
+    }
+
+    const updatedBatch = await Batch.findByIdAndUpdate(req.params.id, updatePayload, {
+      new: true,
+      runValidators: true,
+    });
+
+    if (!updatedBatch) {
+      return res.status(404).json({ error: 'Batch not found' });
+    }
+
+    return res.json(updatedBatch);
+  } catch (error: any) {
+    return res.status(500).json({ error: error.message });
   }
 });
 
@@ -406,9 +439,8 @@ router.get('/firebase/teachers', authMiddleware, async (req: Request, res: Respo
 router.get('/firebase/batches', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { classLevel } = req.query;
-    
-    // Ensure default batches exist
-    await ensureDefaultBatches();
+
+    await mergeAdvancedBasicBatchValues();
     
     // Fetch all batches from MongoDB
     const query: any = {};
@@ -500,7 +532,7 @@ router.get('/rooms', authMiddleware, async (_req: Request, res: Response) => {
 
 // Get time slots
 router.get('/timeslots', authMiddleware, async (_req: Request, res: Response) => {
-  res.json(TIME_SLOTS);
+  res.json(EVENING_TIME_SLOTS);
 });
 
 // ========================
@@ -621,7 +653,7 @@ router.get('/institute-view', authMiddleware, async (req: Request, res: Response
 });
 
 // Get current and next class for a user - Cached per user for 1 hour
-router.get('/live', authMiddleware, cacheMiddleware({ ttl: 3600, customKey: (req) => `schedule-live:user:${(req as any).user.id}` }), async (req: Request, res: Response) => {
+router.get('/live', authMiddleware, cacheMiddleware({ ttl: 3600, keyFn: (req) => `schedule-live:user:${(req as any).user.id}` }), async (req: Request, res: Response) => {
   try {
     const authUser = (req as any).user;
     // Fetch full user details from DB to get classLevel and batch
@@ -1088,7 +1120,7 @@ router.get('/institute-view', authMiddleware, async (req: Request, res: Response
 });
 
 // Create schedule - Invalidates schedule caches
-router.post('/', authMiddleware, invalidateCacheOn({ patterns: ['schedule'] }), async (req: Request, res: Response) => {
+router.post('/', authMiddleware, invalidateCacheOn(['schedule']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     if (!['admin', 'teacher'].includes(user.role)) {
@@ -1202,7 +1234,7 @@ router.post('/', authMiddleware, invalidateCacheOn({ patterns: ['schedule'] }), 
 });
 
 // Update schedule - Invalidates schedule caches
-router.put('/:scheduleId', authMiddleware, invalidateCacheOn({ patterns: ['schedule'] }), async (req: Request, res: Response) => {
+router.put('/:scheduleId', authMiddleware, invalidateCacheOn(['schedule']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     if (!['admin', 'teacher'].includes(user.role)) {
@@ -1320,7 +1352,7 @@ router.get('/students', authMiddleware, async (req: Request, res: Response) => {
   }
 });
 // Delete schedule - Invalidates schedule caches
-router.delete('/:scheduleId', authMiddleware, invalidateCacheOn({ patterns: ['schedule'] }), async (req: Request, res: Response) => {
+router.delete('/:scheduleId', authMiddleware, invalidateCacheOn(['schedule']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     if (!['admin', 'teacher'].includes(user.role)) {

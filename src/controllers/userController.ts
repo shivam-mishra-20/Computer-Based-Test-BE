@@ -2,26 +2,27 @@ import { Request, Response } from 'express';
 import User, { IUser, UserRole } from '../models/User';
 import { logAudit } from '../utils/logger';
 import {
-	getAllowedBatchesForClass,
-	getStudentBatchConfigResponse,
-	isBatchRequiredForClass,
-	matchAllowedBatch,
 	normalizeClassValue,
 	toClassLabel,
 } from '../config/studentBatchConfig';
+import {
+	getStudentBatchConfigFromDatabase,
+	matchBatchName,
+} from '../services/batchConfigService';
 
-function resolveStudentClassAndBatch(classLevelInput?: string, batchInput?: string): { classLevel: string; batch: string } {
+async function resolveStudentClassAndBatch(classLevelInput?: string, batchInput?: string): Promise<{ classLevel: string; batch: string }> {
 	const normalizedClass = normalizeClassValue(classLevelInput);
 	if (!normalizedClass) {
 		throw new Error('Student class must be between 7 and 12');
 	}
 
-	const allowedBatches = getAllowedBatchesForClass(normalizedClass);
-	if (!isBatchRequiredForClass(normalizedClass)) {
+	const config = await getStudentBatchConfigFromDatabase();
+	const allowedBatches = config.batchRules[normalizedClass] || [];
+	if (allowedBatches.length === 0) {
 		return { classLevel: toClassLabel(normalizedClass), batch: '' };
 	}
 
-	const matchedBatch = matchAllowedBatch(batchInput, allowedBatches);
+	const matchedBatch = matchBatchName(batchInput, allowedBatches);
 	if (!matchedBatch) {
 		throw new Error(`Invalid batch for Class ${normalizedClass}. Allowed: ${allowedBatches.join(', ')}`);
 	}
@@ -186,7 +187,7 @@ export const adminCreateUser = async (req: Request, res: Response) => {
 		let normalizedBatch = batch;
 		if (role === 'student') {
 			try {
-				const resolved = resolveStudentClassAndBatch(classLevel, batch);
+				const resolved = await resolveStudentClassAndBatch(classLevel, batch);
 				normalizedClassLevel = resolved.classLevel;
 				normalizedBatch = resolved.batch;
 			} catch (validationError: any) {
@@ -225,7 +226,8 @@ export const adminCreateUser = async (req: Request, res: Response) => {
 };
 
 export const getStudentBatchConfig = async (_req: Request, res: Response) => {
-	return res.json(getStudentBatchConfigResponse());
+	const config = await getStudentBatchConfigFromDatabase();
+	return res.json(config);
 };
 
 // Admin-only: List users filtered by role
@@ -308,7 +310,7 @@ export const adminUpdateUser = async (req: Request, res: Response) => {
 			const currentBatch = batch !== undefined ? batch : (user as any).batch;
 
 			try {
-				const resolved = resolveStudentClassAndBatch(String(currentClassLevel || ''), String(currentBatch || ''));
+				const resolved = await resolveStudentClassAndBatch(String(currentClassLevel || ''), String(currentBatch || ''));
 				(user as any).classLevel = resolved.classLevel;
 				(user as any).batch = resolved.batch;
 			} catch (validationError: any) {

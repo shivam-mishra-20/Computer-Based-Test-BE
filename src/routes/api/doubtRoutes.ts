@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import Doubt, { IDoubt } from '../../models/Doubt';
 import { authMiddleware } from '../../middlewares/authMiddleware';
-import { messageLimiter } from '../../middlewares/rateLimiter';
+import { messageLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
 import { IUser } from '../../models/User';
 import { upload } from '../../middlewares/upload';
 import { 
@@ -39,13 +39,13 @@ router.get('/teachers', authMiddleware, async (req: AuthRequest, res: Response) 
 });
 
 // File upload routes (must come before parameterized routes)
-router.post('/upload-url', authMiddleware, generateUploadUrl);
-router.post('/upload', authMiddleware, upload.single('file'), uploadDoubtFile);
+router.post('/upload-url', authMiddleware, uploadLimiter, generateUploadUrl);
+router.post('/upload', authMiddleware, uploadLimiter, upload.single('file'), uploadDoubtFile);
 router.get('/files/:fileId/url', authMiddleware, getFileSignedUrl);
 router.delete('/files/:fileId', authMiddleware, deleteDoubtFile);
 
 // POST - Save Firebase Storage file metadata
-router.post('/save-file-metadata', authMiddleware, async (req: AuthRequest, res: Response) => {
+router.post('/save-file-metadata', authMiddleware, uploadLimiter, async (req: AuthRequest, res: Response) => {
   try {
     const { url, fileName, fileType, fileSize, doubtId, storagePath } = req.body;
 

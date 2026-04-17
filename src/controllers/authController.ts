@@ -3,6 +3,8 @@ import User from '../models/User';
 import jwt from 'jsonwebtoken';
 import { AuthPayload } from '../middlewares/authMiddleware';
 import { uploadToFirebase } from '../services/firebaseService';
+import { normalizeClassValue, toClassLabel } from '../config/studentBatchConfig';
+import { getStudentBatchConfigFromDatabase, matchBatchName } from '../services/batchConfigService';
 
 const normalizeRegistrationSource = (value: unknown): 'website' | 'app' | 'unknown' => {
   const source = typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -11,9 +13,39 @@ const normalizeRegistrationSource = (value: unknown): 'website' | 'app' | 'unkno
   return 'unknown';
 };
 
+const resolveStudentClassAndBatch = async (classLevelInput?: string, batchInput?: string): Promise<{ classLevel: string; batch: string }> => {
+  const normalizedClass = normalizeClassValue(classLevelInput);
+  if (!normalizedClass) {
+    throw new Error('Student class must be between 7 and 12');
+  }
+
+  const config = await getStudentBatchConfigFromDatabase();
+  const allowedBatches = config.batchRules[normalizedClass] || [];
+  if (allowedBatches.length === 0) {
+    return { classLevel: toClassLabel(normalizedClass), batch: '' };
+  }
+
+  const matchedBatch = matchBatchName(batchInput, allowedBatches);
+  if (!matchedBatch) {
+    throw new Error(`Invalid batch for Class ${normalizedClass}. Allowed: ${allowedBatches.join(', ')}`);
+  }
+
+  return { classLevel: toClassLabel(normalizedClass), batch: matchedBatch };
+};
+
+export const publicStudentBatchConfig = async (_req: Request, res: Response) => {
+  try {
+    const config = await getStudentBatchConfigFromDatabase();
+    return res.json(config);
+  } catch (err) {
+    console.error('Public student batch config error:', err);
+    return res.status(500).json({ message: 'Failed to load student batch configuration' });
+  }
+};
+
 // Public registration endpoint for general users (with admin approval)
 export const publicRegister = async (req: Request, res: Response) => {
-  const { name, email, password, phone, classLevel, board, targetExams, registrationSource, profileImage } = req.body;
+  const { name, email, password, phone, classLevel, board, batch, targetExams, registrationSource, profileImage } = req.body;
   const lcEmail = typeof email === 'string' ? email.toLowerCase() : email;
   
   try {
@@ -31,13 +63,24 @@ export const publicRegister = async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'User already exists' });
     }
 
+    let resolvedClassLevel = classLevel;
+    let resolvedBatch = '';
+    try {
+      const resolved = await resolveStudentClassAndBatch(classLevel, batch);
+      resolvedClassLevel = resolved.classLevel;
+      resolvedBatch = resolved.batch;
+    } catch (validationError: any) {
+      return res.status(400).json({ message: validationError?.message || 'Invalid class/batch combination' });
+    }
+
     // Create user with pending status
     const user = new User({ 
       name, 
       email: lcEmail, 
       password, 
       phone,
-      classLevel,
+      classLevel: resolvedClassLevel,
+      batch: resolvedBatch,
       board,
       targetExams,
       role: 'student',
