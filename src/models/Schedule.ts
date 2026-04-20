@@ -14,8 +14,9 @@ export interface ISchedule extends Document {
   // Class details
   subject: string;
   classLevel: string;
-  batch: string;
-  roomNumber: number; // 1-10
+  batch?: string;
+  batches?: string[];
+  roomNumber: number; // 1-11
   // Instructor (String to support both Firebase IDs and MongoDB ObjectIds)
   teacherId?: string;
   teacherName?: string; // Denormalized for quick display
@@ -39,8 +40,9 @@ const scheduleSchema = new Schema<ISchedule>({
   date: { type: Date, index: true },
   subject: { type: String, required: true },
   classLevel: { type: String, required: true, index: true },
-  batch: { type: String, required: true, index: true },
-  roomNumber: { type: Number, min: 1, max: 10, required: true },
+  batch: { type: String, default: '', index: true },
+  batches: [{ type: String, index: true }],
+  roomNumber: { type: Number, min: 1, max: 11, required: true },
   teacherId: { type: String }, // String for Firebase ID compatibility
   teacherName: { type: String },
   students: [{ type: String }], // String array for Firebase ID compatibility
@@ -50,8 +52,10 @@ const scheduleSchema = new Schema<ISchedule>({
 
 // Compound indexes for efficient queries
 scheduleSchema.index({ classLevel: 1, batch: 1, dayOfWeek: 1 });
+scheduleSchema.index({ classLevel: 1, batches: 1, dayOfWeek: 1 });
 scheduleSchema.index({ teacherId: 1, dayOfWeek: 1 });
 scheduleSchema.index({ roomNumber: 1, dayOfWeek: 1, startTimeSlot: 1 });
 scheduleSchema.index({ date: 1, classLevel: 1, batch: 1 });
+scheduleSchema.index({ date: 1, classLevel: 1, batches: 1 });
 
 export default mongoose.model<ISchedule>('Schedule', scheduleSchema);

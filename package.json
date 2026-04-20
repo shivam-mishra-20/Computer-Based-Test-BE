@@ -42,7 +42,7 @@
     "expo-server-sdk": "^4.0.0",
     "express": "^5.1.0",
     "express-rate-limit": "^7.5.1",
-    "firebase-admin": "^10.3.0",
+    "firebase-admin": "^13.8.0",
     "groq-sdk": "^0.34.0",
     "helmet": "^8.1.0",
     "ioredis": "^5.9.3",

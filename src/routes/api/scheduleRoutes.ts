@@ -99,6 +99,104 @@ function normalizeClassLevels(input: unknown): string[] {
   return Array.from(new Set(normalized)).sort((a, b) => Number(a) - Number(b));
 }
 
+function normalizeBatchName(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function normalizeBatchList(values: unknown, fallback?: unknown): string[] {
+  const parsed = Array.isArray(values)
+    ? values
+    : typeof values === 'string'
+      ? values.split(',')
+      : [];
+
+  const merged = [...parsed];
+  const fallbackBatch = normalizeBatchName(fallback);
+  if (fallbackBatch) {
+    merged.push(fallbackBatch);
+  }
+
+  return Array.from(
+    new Set(
+      merged
+        .map((value) => normalizeBatchName(value))
+        .filter(Boolean)
+    )
+  );
+}
+
+function getScheduleBatches(schedule: any): string[] {
+  const multi = Array.isArray(schedule?.batches)
+    ? schedule.batches
+    : [];
+
+  const normalizedMulti = multi
+    .map((value: unknown) => normalizeBatchName(value))
+    .filter(Boolean);
+
+  if (normalizedMulti.length > 0) {
+    return Array.from(new Set(normalizedMulti));
+  }
+
+  const single = normalizeBatchName(schedule?.batch);
+  return single ? [single] : [];
+}
+
+function applyBatchFilter(query: any, batchValue: unknown): void {
+  const normalizedBatch = normalizeBatchName(batchValue);
+  if (!normalizedBatch) return;
+
+  query.$or = [
+    { batch: normalizedBatch },
+    { batches: normalizedBatch },
+  ];
+}
+
+function buildStudentClassAudienceClause(classVariants: string[], userBatch: string) {
+  const normalizedBatch = normalizeBatchName(userBatch);
+  const classClause: any = {
+    classLevel: { $in: classVariants },
+  };
+
+  if (normalizedBatch) {
+    classClause.$or = [
+      { batch: { $in: [normalizedBatch, 'All Batches', 'All'] } },
+      { batches: normalizedBatch },
+      { batches: { $in: ['All Batches', 'All'] } },
+    ];
+    return classClause;
+  }
+
+  classClause.$or = [
+    { batch: { $in: ['', null] } },
+    { batch: { $exists: false } },
+    { batches: { $size: 0 } },
+    { batches: { $exists: false } },
+  ];
+
+  return classClause;
+}
+
+async function notifyScheduleAudienceByBatches(
+  title: string,
+  body: string,
+  classLevel: string,
+  batches: string[]
+) {
+  const targets = Array.from(
+    new Set(batches.map((batch) => normalizeBatchName(batch)).filter(Boolean))
+  );
+
+  if (targets.length === 0) {
+    await sendScheduleNotification(title, body, classLevel);
+    return;
+  }
+
+  await Promise.all(
+    targets.map((batch) => sendScheduleNotification(title, body, classLevel, batch))
+  );
+}
+
 /**
  * Sync a Firebase teacher to MongoDB Users collection
  * This ensures Firebase teachers can receive notifications
@@ -521,9 +619,9 @@ router.get('/teachers', authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
-// Get rooms (static list 1-10)
+// Get rooms (static list 1-11)
 router.get('/rooms', authMiddleware, async (_req: Request, res: Response) => {
-  const rooms = Array.from({ length: 10 }, (_, i) => ({
+  const rooms = Array.from({ length: 11 }, (_, i) => ({
     number: i + 1,
     name: `Room ${i + 1}`
   }));
@@ -546,7 +644,7 @@ router.get('/timetable', authMiddleware, async (req: Request, res: Response) => 
     
     const query: any = { scheduleType: 'regular', isActive: true };
     if (classLevel) query.classLevel = classLevel;
-    if (batch) query.batch = batch;
+    applyBatchFilter(query, batch);
     if (dayOfWeek !== undefined) query.dayOfWeek = Number(dayOfWeek);
     
     const schedules = await Schedule.find(query)
@@ -571,7 +669,8 @@ router.get('/timetable', authMiddleware, async (req: Request, res: Response) => 
           subject: schedule.subject,
           roomNumber: schedule.roomNumber,
           teacherName: schedule.teacherName || (schedule.teacherId as any)?.name,
-          batch: schedule.batch,
+          batch: normalizeBatchName((schedule as any).batch),
+          batches: getScheduleBatches(schedule),
           classLevel: schedule.classLevel
         };
       }
@@ -627,23 +726,7 @@ router.get('/institute-view', authMiddleware, async (req: Request, res: Response
       .lean();
     
     // Combine and format all schedules
-    const allSchedules = [...regularSchedules, ...customSchedules].map((schedule: any) => ({
-      _id: schedule._id,
-      title: schedule.title,
-      scheduleType: schedule.scheduleType,
-      type: schedule.type,
-      dayOfWeek: schedule.dayOfWeek,
-      startTimeSlot: schedule.startTimeSlot,
-      endTimeSlot: schedule.endTimeSlot,
-      date: schedule.date,
-      subject: schedule.subject,
-      classLevel: schedule.classLevel,
-      batch: schedule.batch,
-      roomNumber: schedule.roomNumber,
-      teacherId: schedule.teacherId?._id || schedule.teacherId,
-      teacherName: schedule.teacherName || schedule.teacherId?.name,
-      students: schedule.students || []
-    }));
+    const allSchedules = [...regularSchedules, ...customSchedules].map(formatScheduleResponse);
     
     res.json(allSchedules);
   } catch (error: any) {
@@ -680,14 +763,13 @@ router.get('/live', authMiddleware, cacheMiddleware({ ttl: 3600, keyFn: (req) =>
     const baseQuery: any = { isActive: true };
     
     if (user.role === 'student') {
-      // Match schedules by classLevel (normalized) OR specific student targeting
+      const classAudience = buildStudentClassAudienceClause(
+        [userClassLevel, `Class ${userClassLevel}`, user.classLevel].filter(Boolean) as string[],
+        userBatch
+      );
+
       baseQuery.$or = [
-        { 
-          classLevel: { $in: [userClassLevel, `Class ${userClassLevel}`, user.classLevel] },
-          // If user has a batch, match that batch OR 'All Batches' OR 'All'
-          // If user has no batch, match ANY batch (logic: empty batch matches all)
-          ...(userBatch ? { batch: { $in: [userBatch, 'All Batches', 'All', 'Advanced', 'Basic'] } } : {}) 
-        },
+        classAudience,
         { students: user.id },
         { students: user.firebaseUid }
       ];
@@ -834,18 +916,24 @@ function formatScheduleResponse(schedule: any) {
     status = 'ongoing';
   }
   
+  const batches = getScheduleBatches(schedule);
+
   return {
     _id: schedule._id,
     title: schedule.title,
+    type: schedule.type,
     subject: schedule.subject,
     scheduleType: schedule.scheduleType,
     startTimeSlot: startTime,
     endTimeSlot: endTime,
     roomNumber: schedule.roomNumber,
     classLevel: schedule.classLevel,
-    batch: schedule.batch,
+    batch: normalizeBatchName(schedule.batch),
+    batches,
+    batchLabel: batches.length > 0 ? batches.join(', ') : 'No Batch',
     teacherName: schedule.teacherName || 'TBA',
     teacherId: schedule.teacherId,
+    students: schedule.students || [],
     dayOfWeek: schedule.dayOfWeek,
     date: schedule.date,
     status // 'past', 'ongoing', 'upcoming'
@@ -888,13 +976,13 @@ router.get('/day-view', authMiddleware, async (req: Request, res: Response) => {
     const baseQuery: any = { isActive: true };
     
     if (user.role === 'student') {
-      // Match schedules by classLevel (normalized) OR specific student targeting
+      const classAudience = buildStudentClassAudienceClause(
+        [userClassLevel, `Class ${userClassLevel}`, user.classLevel].filter(Boolean) as string[],
+        userBatch
+      );
+
       baseQuery.$or = [
-        { 
-          classLevel: { $in: [userClassLevel, `Class ${userClassLevel}`, user.classLevel] },
-          // Match user's batch OR 'All Batches' OR 'All'
-          ...(userBatch ? { batch: { $in: [userBatch, 'All Batches', 'All'] } } : {}) 
-        },
+        classAudience,
         { students: user.id },
         { students: user.firebaseUid }
       ];
@@ -978,7 +1066,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
     
     if (scheduleType) query.scheduleType = scheduleType;
     if (classLevel) query.classLevel = classLevel;
-    if (batch) query.batch = batch;
+    applyBatchFilter(query, batch);
     
     // Date range for custom schedules
     if (startDate && endDate) {
@@ -990,8 +1078,20 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
     
     // Filter for students
     if (user.role === 'student') {
+      const normalizedUserBatch = normalizeBatchName(user.batch);
       query.$or = [
-        { classLevel: user.classLevel, batch: user.batch },
+        {
+          classLevel: user.classLevel,
+          $or: normalizedUserBatch
+            ? [
+                { batch: normalizedUserBatch },
+                { batches: normalizedUserBatch },
+              ]
+            : [
+                { batch: { $in: ['', null] } },
+                { batches: { $size: 0 } },
+              ]
+        },
         { students: user.id }
       ];
     } else if (user.role === 'teacher') {
@@ -1037,8 +1137,20 @@ router.get('/day-view', authMiddleware, async (req: Request, res: Response) => {
     const baseQuery: any = { isActive: true };
     
     if (user.role === 'student') {
+      const normalizedUserBatch = normalizeBatchName(user.batch);
       baseQuery.$or = [
-        { classLevel: user.classLevel, batch: user.batch },
+        {
+          classLevel: user.classLevel,
+          $or: normalizedUserBatch
+            ? [
+                { batch: normalizedUserBatch },
+                { batches: normalizedUserBatch },
+              ]
+            : [
+                { batch: { $in: ['', null] } },
+                { batches: { $size: 0 } },
+              ]
+        },
         { students: user.id },
         { students: user.firebaseUid }
       ];
@@ -1127,7 +1239,9 @@ router.post('/', authMiddleware, invalidateCacheOn(['schedule']), async (req: Re
       return res.status(403).json({ error: 'Not authorized' });
     }
     
-    const { teacherId, ...scheduleData } = req.body;
+    const { teacherId, batches: rawBatches, ...scheduleData } = req.body;
+    const normalizedBatches = normalizeBatchList(rawBatches, scheduleData.batch);
+    const primaryBatch = normalizedBatches[0] || '';
     
     // Get teacher name for denormalization (try MongoDB first, then Firebase)
     let teacherName = '';
@@ -1159,14 +1273,16 @@ router.post('/', authMiddleware, invalidateCacheOn(['schedule']), async (req: Re
       return res.status(400).json({ error: `Room ${scheduleData.roomNumber} is already booked for this time slot` });
     }
     
-    // Check teacher conflict
-    const teacherConflict = await Schedule.findOne({
-      ...conflictQuery,
-      teacherId
-    });
-    
-    if (teacherConflict) {
-      return res.status(400).json({ error: 'Teacher is already assigned to another class at this time' });
+    // Check teacher conflict only when a teacher is explicitly selected
+    if (teacherId && String(teacherId).trim()) {
+      const teacherConflict = await Schedule.findOne({
+        ...conflictQuery,
+        teacherId
+      });
+      
+      if (teacherConflict) {
+        return res.status(400).json({ error: 'Teacher is already assigned to another class at this time' });
+      }
     }
     
     // Check if teacher is on leave for the scheduled date
@@ -1194,6 +1310,8 @@ router.post('/', authMiddleware, invalidateCacheOn(['schedule']), async (req: Re
     
     const schedule = new Schedule({
       ...scheduleData,
+      batch: primaryBatch,
+      batches: normalizedBatches,
       teacherId,
       teacherName,
       createdBy: user.id
@@ -1211,11 +1329,11 @@ router.post('/', authMiddleware, invalidateCacheOn(['schedule']), async (req: Re
       : `${schedule.subject} class on ${new Date(schedule.date!).toLocaleDateString()} at ${timeLabel} in Room ${schedule.roomNumber}`;
     
     // Notify students
-    sendScheduleNotification(
+    notifyScheduleAudienceByBatches(
       notificationTitle,
       notificationBody,
       schedule.classLevel,
-      schedule.batch
+      getScheduleBatches(schedule)
     ).catch(err => console.error('Schedule notification failed:', err));
     
     // Notify teacher
@@ -1241,7 +1359,13 @@ router.put('/:scheduleId', authMiddleware, invalidateCacheOn(['schedule']), asyn
       return res.status(403).json({ error: 'Not authorized' });
     }
     
-    const { teacherId, ...updateData } = req.body;
+    const { teacherId, batches: rawBatches, ...updateData } = req.body;
+
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'batches') || Object.prototype.hasOwnProperty.call(req.body || {}, 'batch')) {
+      const normalizedBatches = normalizeBatchList(rawBatches, updateData.batch);
+      updateData.batches = normalizedBatches;
+      updateData.batch = normalizedBatches[0] || '';
+    }
     
     // Get teacher name if changed
     if (teacherId) {
@@ -1261,11 +1385,11 @@ router.put('/:scheduleId', authMiddleware, invalidateCacheOn(['schedule']), asyn
     }
     
     // Send update notification
-    sendScheduleNotification(
+    notifyScheduleAudienceByBatches(
       `Schedule Updated: ${schedule.subject}`,
       'Class schedule has been updated. Please check the timetable for details.',
       schedule.classLevel,
-      schedule.batch
+      getScheduleBatches(schedule)
     ).catch(err => console.error('Update notification failed:', err));
     
     res.json(schedule);
@@ -1367,11 +1491,11 @@ router.delete('/:scheduleId', authMiddleware, invalidateCacheOn(['schedule']), a
     await Schedule.findByIdAndDelete(req.params.scheduleId);
     
     // Notify about cancellation
-    sendScheduleNotification(
+    notifyScheduleAudienceByBatches(
       `Class Cancelled: ${schedule.subject}`,
       `The ${schedule.subject} class has been cancelled.`,
       schedule.classLevel,
-      schedule.batch
+      getScheduleBatches(schedule)
     ).catch(err => console.error('Cancel notification failed:', err));
     
     res.json({ success: true });

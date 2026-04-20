@@ -50,7 +50,10 @@ const processingStatsSchema = new mongoose.Schema<IProcessingStats>({
     class: String,
     board: String
   }
-}, { timestamps: true });
+}, {
+  timestamps: true,
+  suppressReservedKeysWarning: true,
+});
 
 // Properly type the model to avoid union type issues
 const ProcessingStats: Model<IProcessingStats> = (mongoose.models.ProcessingStats as Model<IProcessingStats>) || 
