@@ -10,6 +10,44 @@ function isValidObjectId(id: string): boolean {
   return /^[0-9a-fA-F]{24}$/.test(id);
 }
 
+function normalizeNotificationData(type: string, data?: any): Record<string, any> {
+  const normalized = { ...(data || {}) };
+  const resolvedType =
+    typeof normalized.type === 'string' && normalized.type.trim().length > 0
+      ? normalized.type.trim()
+      : type;
+
+  if (resolvedType === 'doubt' || resolvedType === 'doubt_message') {
+    normalized.type = 'doubt_message';
+
+    if (normalized.doubtId != null) {
+      normalized.doubtId = String(normalized.doubtId);
+    }
+
+    const role =
+      typeof normalized.role === 'string' && normalized.role.trim().length > 0
+        ? normalized.role.trim().toLowerCase()
+        : 'student';
+
+    normalized.role = role;
+
+    if (typeof normalized.screen !== 'string' || !normalized.screen.trim()) {
+      normalized.screen =
+        role === 'teacher' || role === 'admin'
+          ? '/(teacher)/doubts'
+          : '/(student)/doubts';
+    }
+
+    return normalized;
+  }
+
+  if (typeof normalized.type !== 'string' || !normalized.type.trim()) {
+    normalized.type = type;
+  }
+
+  return normalized;
+}
+
 /**
  * Process push tickets and handle errors:
  * - DeviceNotRegistered → clear the stale push token from the DB
@@ -233,6 +271,7 @@ export async function sendStudentNotifications(
     if (allStudents.length === 0) return;
 
     const notifType = (type || 'general') as any;
+    const normalizedData = normalizeNotificationData(notifType, data);
 
     // ── Persist all notifications to MongoDB ─────────────────────────────────
     await Notification.insertMany(
@@ -241,7 +280,7 @@ export async function sendStudentNotifications(
         type: notifType,
         title,
         message: body,
-        data: data || {},
+        data: normalizedData,
         priority: 'medium',
         read: false,
       }))
@@ -261,7 +300,7 @@ export async function sendStudentNotifications(
       priority: 'high',
       channelId: 'default',
       body,
-      data: data || { type: notifType },
+      data: normalizedData,
     }));
     
     const chunks = expo.chunkPushNotifications(messages);
@@ -297,6 +336,7 @@ export async function createAndSendNotification(payload: {
   try {
     const { userId, title, body, data, type } = payload;
     const notifType = (type || 'general') as any;
+    const normalizedData = normalizeNotificationData(notifType, data);
 
     // ── 1. Resolve MongoDB user ID ──────────────────────────────────────────
     let mongoUser: any = null;
@@ -317,7 +357,7 @@ export async function createAndSendNotification(payload: {
       type: notifType,
       title,
       message: body,
-      data: data || {},
+      data: normalizedData,
       priority: 'medium',
       read: false,
     });
@@ -330,7 +370,7 @@ export async function createAndSendNotification(payload: {
           sound: 'default',
           title,
           body,
-          data: data || { type: notifType },
+          data: normalizedData,
           priority: 'high',
           channelId: 'default',
         }]);

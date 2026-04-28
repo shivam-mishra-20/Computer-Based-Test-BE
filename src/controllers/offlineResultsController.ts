@@ -25,7 +25,7 @@ export const createTest = async (req: Request, res: Response) => {
 
     await newTest.save();
     console.log(`[TestResults] Created test: ${testName} for ${className}`);
-    
+
     res.status(201).json(newTest);
   } catch (error: any) {
     console.error('[TestResults] Create error:', error);
@@ -36,9 +36,11 @@ export const createTest = async (req: Request, res: Response) => {
 // Get all tests (with optional filters)
 export const getAllTests = async (req: Request, res: Response) => {
   try {
+    const authUser = (req as any).user;
     const { class: className, batch, subject } = req.query;
-    
+
     const query: any = {};
+    if (authUser?.role === 'teacher') query.createdBy = authUser.id;
     if (className) query.class = className;
     if (batch) query.batch = batch;
     if (subject) query.subject = subject;
