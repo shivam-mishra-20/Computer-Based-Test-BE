@@ -11,6 +11,7 @@ import {
   deleteTest,
   getStudentResults,
   getLeaderboard,
+  updateTestProperties,
 } from '../../controllers/offlineResultsController';
 
 const router = Router();
@@ -19,6 +20,7 @@ const router = Router();
 router.post('/tests', authMiddleware, createTest);
 router.get('/tests', authMiddleware, getAllTests);
 router.get('/tests/:id', authMiddleware, getTestById);
+router.put('/tests/:id', authMiddleware, updateTestProperties);
 router.put('/tests/:id/results', authMiddleware, updateTestResults);
 router.delete('/tests/:id', authMiddleware, deleteTest);
 

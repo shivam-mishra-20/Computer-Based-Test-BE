@@ -3,6 +3,7 @@ import Schedule from '../../models/Schedule';
 import Batch from '../../models/Batch';
 import User from '../../models/User';
 import Leave from '../../models/Leave';
+import AppSetting from '../../models/AppSetting';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import { sendScheduleNotification, sendTeacherNotification } from '../../services/notificationService';
 import { initFirebaseAdmin } from '../../services/firebaseService';
@@ -26,7 +27,7 @@ function getFirebaseAdmin() {
 
 const router = Router();
 
-const MORNING_TIME_SLOTS = [
+let MORNING_TIME_SLOTS = [
   { start: '10:30', end: '11:30', label: '10:30 AM - 11:30 AM' },
   { start: '11:30', end: '12:30', label: '11:30 AM - 12:30 PM' },
   { start: '12:30', end: '13:30', label: '12:30 PM - 1:30 PM' },
@@ -34,7 +35,7 @@ const MORNING_TIME_SLOTS = [
   { start: '14:30', end: '15:30', label: '2:30 PM - 3:30 PM' },
 ];
 
-const EVENING_TIME_SLOTS = [
+let EVENING_TIME_SLOTS = [
   { start: '15:30', end: '16:30', label: '3:30 PM - 4:30 PM' },
   { start: '16:30', end: '17:30', label: '4:30 PM - 5:30 PM' },
   { start: '17:30', end: '18:30', label: '5:30 PM - 6:30 PM' },
@@ -45,7 +46,33 @@ const EVENING_TIME_SLOTS = [
 ];
 
 // All regular slots are used for live schedule, timetable grid defaults, and labels.
-const TIME_SLOTS = [...MORNING_TIME_SLOTS, ...EVENING_TIME_SLOTS];
+let TIME_SLOTS = [...MORNING_TIME_SLOTS, ...EVENING_TIME_SLOTS];
+
+// Load time slots from DB
+async function loadTimeSlots() {
+  try {
+    const morningSetting = await AppSetting.findOne({ key: 'MORNING_TIME_SLOTS' });
+    if (morningSetting && morningSetting.value && Array.isArray(morningSetting.value)) {
+      MORNING_TIME_SLOTS = morningSetting.value;
+    } else if (!morningSetting) {
+      await AppSetting.create({ key: 'MORNING_TIME_SLOTS', value: MORNING_TIME_SLOTS });
+    }
+
+    const eveningSetting = await AppSetting.findOne({ key: 'EVENING_TIME_SLOTS' });
+    if (eveningSetting && eveningSetting.value && Array.isArray(eveningSetting.value)) {
+      EVENING_TIME_SLOTS = eveningSetting.value;
+    } else if (!eveningSetting) {
+      await AppSetting.create({ key: 'EVENING_TIME_SLOTS', value: EVENING_TIME_SLOTS });
+    }
+
+    TIME_SLOTS = [...MORNING_TIME_SLOTS, ...EVENING_TIME_SLOTS];
+  } catch (error) {
+    console.error('Failed to load time slots from DB:', error);
+  }
+}
+
+// Call on startup
+loadTimeSlots();
 
 const DAYS_OF_WEEK = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -629,8 +656,49 @@ router.get('/rooms', authMiddleware, async (_req: Request, res: Response) => {
 });
 
 // Get time slots
-router.get('/timeslots', authMiddleware, async (_req: Request, res: Response) => {
-  res.json(EVENING_TIME_SLOTS);
+router.get('/timeslots', authMiddleware, async (req: Request, res: Response) => {
+  await loadTimeSlots(); // ensure latest
+  const { view } = req.query;
+  if (view === 'morning') {
+    return res.json(MORNING_TIME_SLOTS);
+  } else if (view === 'all') {
+    return res.json(TIME_SLOTS);
+  }
+  res.json(EVENING_TIME_SLOTS); // Default
+});
+
+// Update time slots
+router.put('/timeslots', authMiddleware, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (user.role !== 'admin') {
+      return res.status(403).json({ error: 'Only admins can update time slots' });
+    }
+
+    const { morningSlots, eveningSlots } = req.body;
+    
+    if (morningSlots && Array.isArray(morningSlots)) {
+      await AppSetting.findOneAndUpdate(
+        { key: 'MORNING_TIME_SLOTS' },
+        { value: morningSlots },
+        { upsert: true, new: true }
+      );
+    }
+    
+    if (eveningSlots && Array.isArray(eveningSlots)) {
+      await AppSetting.findOneAndUpdate(
+        { key: 'EVENING_TIME_SLOTS' },
+        { value: eveningSlots },
+        { upsert: true, new: true }
+      );
+    }
+    
+    await loadTimeSlots(); // refresh cache
+    
+    res.json({ success: true, morningSlots: MORNING_TIME_SLOTS, eveningSlots: EVENING_TIME_SLOTS });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // ========================
@@ -676,6 +744,7 @@ router.get('/timetable', authMiddleware, async (req: Request, res: Response) => 
       }
     });
     
+    await loadTimeSlots(); // Ensure latest timeslots
     res.json({
       grid,
       timeSlots: TIME_SLOTS,
@@ -748,6 +817,7 @@ router.get('/live', authMiddleware, cacheMiddleware({ ttl: 3600, keyFn: (req) =>
     
     const today = new Date();
     const dayOfWeek = today.getDay();
+    await loadTimeSlots();
     const { currentSlot, nextSlot } = getCurrentTimeSlot();
     
     let currentClass = null;

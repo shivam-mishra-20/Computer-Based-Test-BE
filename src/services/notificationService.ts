@@ -45,6 +45,14 @@ function normalizeNotificationData(type: string, data?: any): Record<string, any
     normalized.type = type;
   }
 
+  // Safety: strip any screen value that isn't a valid route path.
+  // Invalid values like 'Attendance' (no leading '/') can cause deep-link
+  // misroutes (e.g. abhigyangurukulapp:///) when the OS processes the
+  // notification before the JS handler runs.
+  if (typeof normalized.screen === 'string' && !normalized.screen.startsWith('/')) {
+    delete normalized.screen;
+  }
+
   return normalized;
 }
 

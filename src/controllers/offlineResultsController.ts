@@ -99,6 +99,60 @@ export const updateTestResults = async (req: Request, res: Response) => {
   }
 };
 
+// Update test properties (name, date, maxMarks, class, subject)
+export const updateTestProperties = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { testName, testDate, class: className, batch, subject, maxMarks } = req.body;
+
+    if (!testName || !testDate || !className || !subject || !maxMarks) {
+      return res.status(400).json({ message: 'Missing required fields' });
+    }
+
+    const test = await TestResult.findById(id);
+    if (!test) {
+      return res.status(404).json({ message: 'Test not found' });
+    }
+
+    // If maxMarks changed, we should recalculate percentages for existing students
+    const maxMarksChanged = test.maxMarks !== maxMarks;
+
+    test.testName = testName;
+    test.testDate = testDate;
+    test.class = className;
+    test.batch = batch;
+    test.subject = subject;
+    test.maxMarks = maxMarks;
+
+    if (maxMarksChanged && test.studentResults && test.studentResults.length > 0) {
+      test.studentResults = test.studentResults.map((result) => {
+        const percentage = Math.round((result.marksObtained / maxMarks) * 100);
+        let grade = 'F';
+        if (percentage >= 90) grade = 'A+';
+        else if (percentage >= 80) grade = 'A';
+        else if (percentage >= 70) grade = 'B+';
+        else if (percentage >= 60) grade = 'B';
+        else if (percentage >= 50) grade = 'C';
+        else if (percentage >= 40) grade = 'D';
+
+        return {
+          ...result,
+          percentage,
+          grade
+        };
+      });
+    }
+
+    await test.save();
+
+    console.log(`[TestResults] Updated properties for test: ${test.testName}`);
+    res.json(test);
+  } catch (error: any) {
+    console.error('[TestResults] Update properties error:', error);
+    res.status(500).json({ message: 'Failed to update test properties', error: error.message });
+  }
+};
+
 // Delete a test
 export const deleteTest = async (req: Request, res: Response) => {
   try {

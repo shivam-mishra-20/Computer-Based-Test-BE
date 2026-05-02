@@ -89,8 +89,9 @@ export class AttendanceCron {
               userId,
               title: 'Attendance Updated',
               body: 'Your attendance has been synced. Check your attendance records for the latest updates.',
-              type: 'attendance_sync',
-              read: false
+              type: 'attendance',
+              read: false,
+              data: { type: 'attendance', role: 'student', screen: '/(student)/modules/attendance' },
             })
           );
           await Promise.all(notificationPromises);
@@ -99,8 +100,8 @@ export class AttendanceCron {
           await broadcastNotification(result.updatedUserIds, {
             title: 'Attendance Updated',
             body: 'Your attendance has been synced. Check your attendance records for the latest updates.',
-            type: 'attendance_sync',
-            data: { screen: 'Attendance' }
+            type: 'attendance',
+            data: { type: 'attendance', role: 'student', screen: '/(student)/modules/attendance' }
           });
           
           notified = result.updatedUserIds.length;
@@ -159,8 +160,9 @@ export class AttendanceCron {
               userId,
               title: 'Attendance Updated',
               body: 'Your attendance has been synced. Check your attendance records for the latest updates.',
-              type: 'attendance_sync',
-              read: false
+              type: 'attendance',
+              read: false,
+              data: { type: 'attendance', role: 'student', screen: '/(student)/modules/attendance' },
             })
           );
           await Promise.all(notificationPromises);
@@ -169,8 +171,8 @@ export class AttendanceCron {
           await broadcastNotification(result.updatedUserIds, {
             title: 'Attendance Updated',
             body: 'Your attendance has been synced. Check your attendance records for the latest updates.',
-            type: 'attendance_sync',
-            data: { screen: 'Attendance' }
+            type: 'attendance',
+            data: { type: 'attendance', role: 'student', screen: '/(student)/modules/attendance' }
           });
           
           notified = result.updatedUserIds.length;
