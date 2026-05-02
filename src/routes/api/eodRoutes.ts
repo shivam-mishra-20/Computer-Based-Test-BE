@@ -582,4 +582,24 @@ router.put('/admin/:eodId/status', authMiddleware, async (req: AuthRequest, res:
   }
 });
 
+// DELETE - Delete EOD (Admin only)
+router.delete('/admin/:eodId', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (req.user?.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+
+    const eod = await EOD.findById(req.params.eodId);
+    if (!eod) {
+      return res.status(404).json({ error: 'EOD not found' });
+    }
+
+    await EOD.findByIdAndDelete(req.params.eodId);
+    res.json({ message: 'EOD deleted successfully' });
+  } catch (error: any) {
+    console.error('Error deleting EOD:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;

@@ -4,7 +4,7 @@ export interface IClassReport {
   scheduleId?: mongoose.Types.ObjectId;
   subject: string;
   classLevel: string;
-  batch: string;
+  batch?: string;
   startTime: string;
   endTime: string;
   wasHeld: boolean;
@@ -48,7 +48,7 @@ const classReportSchema = new Schema<IClassReport>({
   scheduleId: { type: Schema.Types.ObjectId, ref: 'Schedule' },
   subject: { type: String, required: true },
   classLevel: { type: String, required: true },
-  batch: { type: String, required: true },
+  batch: { type: String },
   startTime: { type: String, required: true },
   endTime: { type: String, required: true },
   wasHeld: { type: Boolean, required: true },
