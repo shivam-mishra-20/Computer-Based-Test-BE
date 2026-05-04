@@ -35,6 +35,13 @@ let MORNING_TIME_SLOTS = [
   { start: '14:30', end: '15:30', label: '2:30 PM - 3:30 PM' },
 ];
 
+let MORNING2_TIME_SLOTS = [
+  { start: '09:00', end: '10:00', label: '9:00 AM - 10:00 AM' },
+  { start: '10:00', end: '11:00', label: '10:00 AM - 11:00 AM' },
+  { start: '11:00', end: '12:00', label: '11:00 AM - 12:00 PM' },
+  { start: '12:00', end: '13:00', label: '12:00 PM - 1:00 PM' },
+];
+
 let EVENING_TIME_SLOTS = [
   { start: '15:30', end: '16:30', label: '3:30 PM - 4:30 PM' },
   { start: '16:30', end: '17:30', label: '4:30 PM - 5:30 PM' },
@@ -46,7 +53,13 @@ let EVENING_TIME_SLOTS = [
 ];
 
 // All regular slots are used for live schedule, timetable grid defaults, and labels.
-let TIME_SLOTS = [...MORNING_TIME_SLOTS, ...EVENING_TIME_SLOTS];
+function buildCombinedTimeSlots() {
+  return [...MORNING2_TIME_SLOTS, ...MORNING_TIME_SLOTS, ...EVENING_TIME_SLOTS]
+    .filter((slot) => slot?.start && slot?.end)
+    .sort((a, b) => parseTimeToMinutes(a.start) - parseTimeToMinutes(b.start));
+}
+
+let TIME_SLOTS = buildCombinedTimeSlots();
 
 // Load time slots from DB
 async function loadTimeSlots() {
@@ -58,6 +71,13 @@ async function loadTimeSlots() {
       await AppSetting.create({ key: 'MORNING_TIME_SLOTS', value: MORNING_TIME_SLOTS });
     }
 
+    const morning2Setting = await AppSetting.findOne({ key: 'MORNING2_TIME_SLOTS' });
+    if (morning2Setting && morning2Setting.value && Array.isArray(morning2Setting.value)) {
+      MORNING2_TIME_SLOTS = morning2Setting.value;
+    } else if (!morning2Setting) {
+      await AppSetting.create({ key: 'MORNING2_TIME_SLOTS', value: MORNING2_TIME_SLOTS });
+    }
+
     const eveningSetting = await AppSetting.findOne({ key: 'EVENING_TIME_SLOTS' });
     if (eveningSetting && eveningSetting.value && Array.isArray(eveningSetting.value)) {
       EVENING_TIME_SLOTS = eveningSetting.value;
@@ -65,7 +85,7 @@ async function loadTimeSlots() {
       await AppSetting.create({ key: 'EVENING_TIME_SLOTS', value: EVENING_TIME_SLOTS });
     }
 
-    TIME_SLOTS = [...MORNING_TIME_SLOTS, ...EVENING_TIME_SLOTS];
+    TIME_SLOTS = buildCombinedTimeSlots();
   } catch (error) {
     console.error('Failed to load time slots from DB:', error);
   }
@@ -661,6 +681,8 @@ router.get('/timeslots', authMiddleware, async (req: Request, res: Response) => 
   const { view } = req.query;
   if (view === 'morning') {
     return res.json(MORNING_TIME_SLOTS);
+  } else if (view === 'morning2') {
+    return res.json(MORNING2_TIME_SLOTS);
   } else if (view === 'all') {
     return res.json(TIME_SLOTS);
   }
@@ -675,12 +697,20 @@ router.put('/timeslots', authMiddleware, async (req: Request, res: Response) => 
       return res.status(403).json({ error: 'Only admins can update time slots' });
     }
 
-    const { morningSlots, eveningSlots } = req.body;
+    const { morningSlots, morning2Slots, eveningSlots } = req.body;
     
     if (morningSlots && Array.isArray(morningSlots)) {
       await AppSetting.findOneAndUpdate(
         { key: 'MORNING_TIME_SLOTS' },
         { value: morningSlots },
+        { upsert: true, new: true }
+      );
+    }
+
+    if (morning2Slots && Array.isArray(morning2Slots)) {
+      await AppSetting.findOneAndUpdate(
+        { key: 'MORNING2_TIME_SLOTS' },
+        { value: morning2Slots },
         { upsert: true, new: true }
       );
     }
@@ -695,7 +725,12 @@ router.put('/timeslots', authMiddleware, async (req: Request, res: Response) => 
     
     await loadTimeSlots(); // refresh cache
     
-    res.json({ success: true, morningSlots: MORNING_TIME_SLOTS, eveningSlots: EVENING_TIME_SLOTS });
+    res.json({
+      success: true,
+      morningSlots: MORNING_TIME_SLOTS,
+      morning2Slots: MORNING2_TIME_SLOTS,
+      eveningSlots: EVENING_TIME_SLOTS
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -804,8 +839,8 @@ router.get('/institute-view', authMiddleware, async (req: Request, res: Response
   }
 });
 
-// Get current and next class for a user - Cached per user for 1 hour
-router.get('/live', authMiddleware, cacheMiddleware({ ttl: 3600, keyFn: (req) => `schedule-live:user:${(req as any).user.id}` }), async (req: Request, res: Response) => {
+// Get current and next class for a user - Cached per user for 1 minute (keep status fresh)
+router.get('/live', authMiddleware, cacheMiddleware({ ttl: 60, keyFn: (req) => `schedule-live:user:${(req as any).user.id}` }), async (req: Request, res: Response) => {
   try {
     const authUser = (req as any).user;
     // Fetch full user details from DB to get classLevel and batch
@@ -818,7 +853,7 @@ router.get('/live', authMiddleware, cacheMiddleware({ ttl: 3600, keyFn: (req) =>
     const today = new Date();
     const dayOfWeek = today.getDay();
     await loadTimeSlots();
-    const { currentSlot, nextSlot } = getCurrentTimeSlot();
+    let { currentSlot, nextSlot } = getCurrentTimeSlot();
     
     let currentClass = null;
     let nextClass = null;
@@ -930,6 +965,29 @@ router.get('/live', authMiddleware, cacheMiddleware({ ttl: 3600, keyFn: (req) =>
         scheduleType: 'regular',
         dayOfWeek
       }).lean();
+    }
+
+    const nowMinutes = today.getHours() * 60 + today.getMinutes();
+    const getScheduleStartMinutes = (s: any) => parseTimeToMinutes(s.startTimeSlot || s.startTimeslot || '00:00');
+    const getScheduleEndMinutes = (s: any) => parseTimeToMinutes(s.endTimeSlot || s.endTimeslot || '23:59');
+    const sortedRegular = [...todayRegular].sort(
+      (a, b) => getScheduleStartMinutes(a) - getScheduleStartMinutes(b)
+    );
+
+    if (!currentClass) {
+      currentClass = sortedRegular.find(
+        (s) => nowMinutes >= getScheduleStartMinutes(s) && nowMinutes < getScheduleEndMinutes(s)
+      ) || null;
+      if (currentClass) {
+        currentSlot = currentClass.startTimeSlot || currentClass.startTimeslot || currentSlot;
+      }
+    }
+
+    if (!nextClass) {
+      nextClass = sortedRegular.find((s) => getScheduleStartMinutes(s) > nowMinutes) || null;
+      if (nextClass) {
+        nextSlot = nextClass.startTimeSlot || nextClass.startTimeslot || nextSlot;
+      }
     }
     
     // Merge and sort in memory to handle field casing issues safely

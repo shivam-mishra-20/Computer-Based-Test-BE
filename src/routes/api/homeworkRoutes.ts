@@ -23,21 +23,72 @@ const upload = multer({
     }
   }
 });
+const normalizeClassValue = (value: unknown): string =>
+  typeof value === 'string'
+    ? value.replace(/Class\s*/i, '').trim()
+    : '';
+
+const buildClassVariants = (values: unknown): string[] => {
+  const list = Array.isArray(values) ? values : [values];
+  const variants = new Set<string>();
+
+  list.forEach((value) => {
+    if (value === null || value === undefined) return;
+    const raw = String(value).trim();
+    if (!raw) return;
+
+    const normalized = normalizeClassValue(raw);
+    if (normalized) {
+      variants.add(normalized);
+      variants.add(`Class ${normalized}`);
+    }
+    variants.add(raw);
+  });
+
+  return Array.from(variants);
+};
+
+const normalizeBatchList = (values: unknown): string[] => {
+  const list = Array.isArray(values)
+    ? values
+    : typeof values === 'string'
+      ? values.split(',')
+      : [];
+
+  return list
+    .map((value) => String(value || '').trim())
+    .filter(Boolean);
+};
+
 // Helper to get assigned student IDs based on homework assignment type
 async function getAssignedStudentIds(homework: any): Promise<string[]> {
   if (homework.assignmentType === 'students') {
-    return homework.assignedStudents.map((id: any) => id.toString());
+    return (homework.assignedStudents || []).map((id: any) => id.toString());
   }
-  
+
   const query: any = { role: 'student' };
-  
+  const classScope = buildClassVariants(
+    homework.assignmentType === 'class'
+      ? homework.assignedClasses
+      : [homework.classLevel, ...(homework.assignedClasses || [])]
+  );
+
   if (homework.assignmentType === 'class') {
-    query.classLevel = { $in: homework.assignedClasses };
+    if (classScope.length === 0) return [];
+    query.classLevel = { $in: classScope };
   } else if (homework.assignmentType === 'batch') {
-    query.batch = { $in: homework.assignedBatches };
+    const batchScope = normalizeBatchList(homework.assignedBatches);
+    if (batchScope.length === 0) return [];
+    if (classScope.length > 0) {
+      query.classLevel = { $in: classScope };
+    }
+    query.batch = { $in: batchScope };
+  } else {
+    // 'all' should still be scoped to the homework's class level
+    if (classScope.length === 0) return [];
+    query.classLevel = { $in: classScope };
   }
-  // For 'all', no filter needed - gets all students
-  
+
   const students = await User.find(query).select('_id').lean();
   return students.map(s => s._id.toString());
 }
