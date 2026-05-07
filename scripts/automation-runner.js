@@ -3,7 +3,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const EPUBParser = require('./epub-parser');
 const PDFParser = require('./pdf-parser');
-const AIEnhancer = require('./ai-enhancer');
+const { createEnhancer } = require('./ai-enhancer');
 
 function parseSelectedFiles(rawValue) {
   if (!rawValue) return [];
@@ -39,7 +39,7 @@ class AutomationRunner {
   constructor() {
     this.epubParser = new EPUBParser();
     this.pdfParser = new PDFParser();
-    this.aiEnhancer = new AIEnhancer();
+    this.aiEnhancer = createEnhancer(process.env.AI_PROVIDER || 'ollama');
     this.stats = {
       booksProcessed: 0,
       booksSucceeded: 0,

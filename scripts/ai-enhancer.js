@@ -1,407 +1,229 @@
-const { GoogleGenerativeAI } = require('@google/generative-ai');
-const Groq = require('groq-sdk');
-
-// Initialize Gemini API
-let genAI = null;
-
-function getGenAI() {
-  if (!genAI) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error('GEMINI_API_KEY is not set in environment variables');
-    }
-    genAI = new GoogleGenerativeAI(apiKey);
-  }
-  return genAI;
-}
-
-// Initialize Groq API (fallback)
-let groqClient = null;
-
-function getGroq() {
-  if (!groqClient) {
-    const apiKey = process.env.GROQ_API_KEY;
-    if (!apiKey) {
-      throw new Error('GROQ_API_KEY is not set — cannot use Groq fallback');
-    }
-    groqClient = new Groq({ apiKey });
-  }
-  return groqClient;
-}
-
 /**
- * Enhance extracted questions using Vertex AI Gemini
- * Splits multi-question blobs, adds LaTeX, identifies metadata
+ * AI Enhancer — Ollama Qwen3:8b (local)
+ * Replaces Google Gemini / Groq for question structuring.
+ * Optimized: JSON mode, concurrency=1, ~1200-char chunks, low VRAM.
  */
+
+const { Ollama } = require('ollama');
+
+const OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://localhost:11434';
+const MODEL = process.env.AI_ENHANCER_MODEL || 'qwen3:8b';
+const CHUNK_SIZE = parseInt(process.env.AI_ENHANCER_CHUNK_SIZE || '1200', 10);
+
+const ollama = new Ollama({ host: OLLAMA_HOST });
+
 class AIEnhancer {
   constructor() {
-    this.model = process.env.AI_ENHANCER_MODEL || 'gemini-2.5-flash';
-    this.concurrentBatches = Math.max(1, parseInt(process.env.AI_ENHANCER_CONCURRENCY || '4', 10));
-    this.batchSize = Math.max(1, parseInt(process.env.AI_ENHANCER_BATCH_SIZE || '1', 10));
+    this.model = MODEL;
+    // Always 1 — Ollama local inference, keep VRAM stable
+    this.concurrentBatches = 1;
   }
 
   /**
-   * Process questions in batches with AI enhancement (PARALLEL PROCESSING)
-   * @param {Array} rawQuestions - Questions extracted from EPUB (may be multi-question blobs)
-   * @param {Object} bookMetadata - Book metadata from EPUB
-   * @returns {Promise<Array>} Enhanced, properly split questions
+   * Build compact JSON-mode prompt for Ollama.
    */
-  async enhanceQuestions(rawQuestions, bookMetadata) {
-    console.log(`\n🤖 AI Enhancement Started (Parallel Processing)`);
-    console.log(`   Model: ${this.model}`);
-    console.log(`   Input: ${rawQuestions.length} extracted items`);
-    console.log(`   Batch size: ${this.batchSize}`);
-    console.log(`   Concurrency: ${this.concurrentBatches} parallel batches`);
+  buildPrompt(inputText, bookMetadata) {
+    const subject = bookMetadata.subject || 'Unknown';
+    const chapter = bookMetadata.chapter || bookMetadata.title || 'General';
+    const cls = bookMetadata.class || 'Unknown';
+    const board = bookMetadata.board || 'CBSE';
 
-    const enhancedQuestions = [];
-    const totalBatches = Math.ceil(rawQuestions.length / this.batchSize);
+    return `Extract ALL exam questions from the text below. Return ONLY valid JSON.
 
-    // Create all batches
-    const batches = [];
-    for (let i = 0; i < rawQuestions.length; i += this.batchSize) {
-      batches.push({
-        index: Math.floor(i / this.batchSize),
-        questions: rawQuestions.slice(i, i + this.batchSize)
-      });
-    }
+JSON schema:
+{"questions":[{"question":"string","options":["a","b","c","d"],"answer":"string","question_type":"mcq|truefalse|fill|short|long|assertionreason|integer","subject":"${subject}","topic_name":"string","chapter_name":"${chapter}","class":"${cls}","board":"${board}","difficulty":"easy|medium|hard","marks":1}]}
 
-    // Process batches in parallel with concurrency limit
-    let completed = 0;
-    for (let i = 0; i < batches.length; i += this.concurrentBatches) {
-      const chunk = batches.slice(i, i + this.concurrentBatches);
-      
-      // Process this chunk in parallel
-      const promises = chunk.map(async ({ index, questions }) => {
-        try {
-          const structured = await this.structureQuestionBatch(questions, bookMetadata);
-          return { success: true, index, questions: structured };
-        } catch (error) {
-          console.error(`   ❌ Batch ${index + 1} failed:`, error.message);
-          return { success: false, index, questions: [] };
-        }
-      });
+Rules:
+- options: array of strings for MCQ/TrueFalse, else []
+- answer: correct option text for MCQ, or answer text
+- question_type: mcq if 4 options, truefalse if 2, fill if blanks, short/long otherwise
+- marks: mcq/truefalse/fill=1, short=2, long=5, integer=2
+- Extract subject/topic/chapter from headings in text when visible
+- Keep question wording exact
+- Deduplicate: skip repeated questions
+- MATH FORMATTING (CRITICAL): ALL math expressions MUST be wrapped in $ delimiters
+  - Inline math: $expression$ (e.g., $x^2 + y^2 = z^2$)
+  - Display math: $$expression$$ for standalone equations
+  - Matrices: $\begin{bmatrix} a & b \\ c & d \end{bmatrix}$
+  - Never output bare LaTeX commands outside $ delimiters
+  - Convert Unicode: × → $\times$, ² → $^{2}$, √ → $\sqrt{}$, ÷ → $\div$, ≠ → $\neq$, ≤ → $\leq$, ≥ → $\geq$, α → $\alpha$, β → $\beta$, π → $\pi$
+  - Fractions: $\frac{a}{b}$, integrals: $\int_a^b f(x)dx$
 
-      const results = await Promise.all(promises);
-      
-      // Add results in order and update progress
-      results.forEach(result => {
-        if (result.success) {
-          enhancedQuestions.push(...result.questions);
-        }
-        completed++;
-        console.log(`   Progress: ${completed}/${totalBatches} batches (${Math.round(completed/totalBatches*100)}%)`);
-      });
-    }
-
-    const uniqueQuestions = this.deduplicateQuestions(enhancedQuestions);
-    const removedDuplicates = enhancedQuestions.length - uniqueQuestions.length;
-
-    console.log(`   ✅ Enhanced: ${uniqueQuestions.length} questions`);
-    if (removedDuplicates > 0) {
-      console.log(`   ♻️  Removed ${removedDuplicates} duplicate question(s) after overlap parsing`);
-    }
-
-    return uniqueQuestions;
-  }
-
-  /**
-   * Send batch of questions to Gemini for structuring
-   */
-  async structureQuestionBatch(batch, bookMetadata) {
-    const generativeModel = getGenAI().getGenerativeModel({
-      model: this.model,
-      generationConfig: {
-        temperature: 0.0,
-        topP: 0.95,
-        topK: 40,
-        maxOutputTokens: 32768,
-      },
-    });
-
-    // Concatenate all chunks for batch processing
-    const inputText = batch.map((q, idx) => {
-      const label = q.exerciseLabel ? ` [${q.exerciseLabel}]` : '';
-      return `[Chunk ${idx + 1}${label}]\n${q.text}\n`;
-    }).join('\n---\n\n');
-
-    const prompt = `You are an expert academic question extractor for ${bookMetadata.subject || 'Unknown'} (${bookMetadata.class || 'Class 12'}, ${bookMetadata.board || 'CBSE'}).
-
-📚 Chapter Context:
-- Chapter: ${bookMetadata.chapter || bookMetadata.title || 'Unknown'}
-- Subject: ${bookMetadata.subject || 'Unknown'}
-- Class: ${bookMetadata.class || 'Class 12'}
-- Board: ${bookMetadata.board || 'CBSE'}
-
-🎯 Your Task:
-The input below is raw text from a PDF textbook chapter. Extract EVERY question and activity you can find. Your job is to:
-
-1. **FIND** every question — numbered exercises, in-text questions, "Try These", "Think About It", examples with sub-parts, fill-in-the-blanks, true/false, match the following, assertion-reason
-2. **SPLIT** any multi-question blobs into individual questions  
-3. **IDENTIFY** type: mcq, short, long, truefalse, fill, integer, assertionreason
-4. **EXTRACT** options if MCQ (with correct answer if present)
-5. **ADD** LaTeX to all mathematical expressions
-6. **CLEAN** text (remove page numbers, headers, footers)
-7. **PRESERVE** exact wording — do not paraphrase
-
-⚠️ QUESTION PATTERNS — look for ALL of these:
-- Numbered: "1.", "1)", "Q1.", "Q.1", "(i)", "(ii)"
-- MCQ with choices: "(a) ... (b) ... (c) ... (d) ..."
-- Fill in the blank: "________" or "......"
-- True / False statements to evaluate
-- "Match the following" items
-- "State whether ... True or False"
-- "Give reason why ...", "Explain ...", "Define ...", "Describe ..."
-- "Calculate / Find / Determine / Evaluate ..."
-- "Prove that ...", "Show that ..."
-- Any sentence ending with "?"
-- Examples asking students to solve something
-
-📝 Output Format — use EXACTLY this separator and field names for EACH question:
-------------------------------------
-QUESTION_NUMBER: <sequential number>
-QUESTION_TEXT: <clean question text with LaTeX>
-QUESTION_TYPE: mcq | short | long | truefalse | fill | integer | assertionreason
-
-OPTION_A: <option text or EMPTY>
-OPTION_B: <option text or EMPTY>
-OPTION_C: <option text or EMPTY>
-OPTION_D: <option text or EMPTY>
-
-CORRECT_OPTION: A | B | C | D | UNKNOWN
-CORRECT_ANSWER_TEXT: <answer text or EMPTY>
-
-SUBJECT: ${bookMetadata.subject || 'Unknown'}
-TOPIC: <infer from question content>
-CHAPTER: ${bookMetadata.chapter || bookMetadata.title || 'Unknown'}
-DIFFICULTY: easy | medium | hard
-MARKS: 1 | 2 | 4 | 5
-
-CONFIDENCE: <0.0 – 1.0>
-NEEDS_REVIEW: true | false
-------------------------------------
-
-🧮 LaTeX Rules:
-- Inline math: $x^2 + 5x + 6 = 0$
-- Display equations: $$E = mc^2$$
-- Convert: ² → $^2$, × → $\\times$, ∞ → $\\infty$, √x → $\\sqrt{x}$, fractions → $\\frac{a}{b}$
-- Do NOT double-escape backslashes
-
-📊 Type & Marks:
-- mcq → 1 mark | short → 2 marks | long → 5 marks | truefalse → 1 mark | fill → 1 mark | integer → 2 marks
-
-🚨 CRITICAL:
-- Extract EVERY question — if you find 20 questions, output 20 blocks
-- NEVER combine multiple questions into one block
-- NEVER skip a question
-- NEVER invent information
-- If a question is unclear, set NEEDS_REVIEW: true
-- If a chunk has no questions at all, output nothing (no blocks)
-
----
-
-INPUT TEXT:
+TEXT:
 ${inputText}
 
----
+JSON:`;
+  }
 
-Extract ALL questions now:`;
+  /**
+   * Call Ollama with JSON mode. Returns parsed question array.
+   */
+  async callOllama(inputText, bookMetadata) {
+    const prompt = this.buildPrompt(inputText, bookMetadata);
 
-    let responseText;
     try {
-      const result = await generativeModel.generateContent(prompt);
-      responseText = result.response.text();
-      console.log(`      → Gemini response received`);
-    } catch (geminiError) {
-      console.warn(`      ⚠️  Gemini failed: ${geminiError.message}`);
-      console.log(`      🔄 Falling back to Groq...`);
-      responseText = await this.callGroqFallback(prompt);
-    }
-
-    // Parse the structured response, passing original batch for diagram preservation
-    const structuredQuestions = this.parseGeminiResponse(responseText, bookMetadata, batch);
-
-    console.log(`      → Extracted ${structuredQuestions.length} questions from ${batch.length} inputs`);
-
-    return structuredQuestions;
-  }
-
-  /**
-   * Groq fallback — uses llama-3.3-70b-versatile for same structured output
-   */
-  async callGroqFallback(prompt) {
-    const completion = await getGroq().chat.completions.create({
-      model: 'llama-3.3-70b-versatile',
-      messages: [{ role: 'user', content: prompt }],
-      temperature: 0.0,
-      max_tokens: 16384,
-    });
-    return completion.choices[0].message.content;
-  }
-
-  /**
-   * Parse Gemini's structured response into question objects
-   * PRESERVES diagram metadata from original questions (Firebase Storage)
-   */
-  parseGeminiResponse(responseText, bookMetadata, originalBatch) {
-    const questions = [];
-    const blocks = this.extractQuestionBlocks(responseText);
-
-    for (let i = 0; i < blocks.length; i++) {
-      try {
-        // Preserve diagram metadata from original chunk (NOT base64, Firebase metadata)
-        const chunkIndex = originalBatch.length <= 1 ? 0 : Math.min(i, originalBatch.length - 1);
-        const originalQuestion = originalBatch[chunkIndex] || {};
-        const metadataWithDiagram = {
-          ...bookMetadata,
-          diagram: originalQuestion.diagram || null  // Firebase metadata object
-        };
-        
-        const question = this.parseQuestionBlock(blocks[i], metadataWithDiagram);
-        if (question) {
-          questions.push(question);
-        }
-      } catch (error) {
-        console.error('      ⚠️  Failed to parse question block:', error.message);
-      }
-    }
-
-    return questions;
-  }
-
-  extractQuestionBlocks(responseText) {
-    if (!responseText || typeof responseText !== 'string') return [];
-
-    const normalized = responseText.replace(/\r/g, '').trim();
-    if (!normalized) return [];
-
-    const separatorBlocks = normalized
-      .split('------------------------------------')
-      .map(block => block.trim())
-      .filter(block => /QUESTION_TEXT\s*:/i.test(block));
-
-    if (separatorBlocks.length > 0) {
-      return separatorBlocks;
-    }
-
-    const numberedBlocks = normalized.match(/QUESTION_NUMBER\s*:[\s\S]*?(?=\nQUESTION_NUMBER\s*:|$)/gi);
-    if (numberedBlocks && numberedBlocks.length > 0) {
-      return numberedBlocks.map(block => block.trim());
-    }
-
-    const questionTextBlocks = normalized.match(/QUESTION_TEXT\s*:[\s\S]*?(?=\nQUESTION_TEXT\s*:|$)/gi);
-    if (questionTextBlocks && questionTextBlocks.length > 0) {
-      return questionTextBlocks.map(block => block.trim());
-    }
-
-    return [];
-  }
-
-  /**
-   * Parse a single question block
-   */
-  parseQuestionBlock(block, bookMetadata) {
-    const lines = block.split('\n').map(l => l.trim()).filter(l => l);
-    const fields = {};
-    const knownFields = new Set([
-      'QUESTION_NUMBER',
-      'QUESTION_TEXT',
-      'QUESTION_TYPE',
-      'OPTION_A',
-      'OPTION_B',
-      'OPTION_C',
-      'OPTION_D',
-      'OPTION_E',
-      'OPTION_F',
-      'CORRECT_OPTION',
-      'CORRECT_ANSWER_TEXT',
-      'INTEGER_ANSWER',
-      'SUBJECT',
-      'TOPIC',
-      'CHAPTER',
-      'DIFFICULTY',
-      'MARKS',
-      'CONFIDENCE',
-      'NEEDS_REVIEW'
-    ]);
-    let currentKey = null;
-
-    for (const line of lines) {
-      const colonIndex = line.indexOf(':');
-      if (colonIndex !== -1) {
-        const key = line.substring(0, colonIndex).trim().toUpperCase().replace(/ /g, '_');
-        const value = line.substring(colonIndex + 1).trim();
-
-        if (knownFields.has(key)) {
-          fields[key] = value;
-          currentKey = key;
-          continue;
-        }
-      }
-
-      if (currentKey) {
-        const existing = fields[currentKey] ? `${fields[currentKey]} ` : '';
-        fields[currentKey] = `${existing}${line}`.trim();
-      }
-    }
-
-    // Validate required fields
-    if (!fields.QUESTION_TEXT || fields.QUESTION_TEXT === 'EMPTY') {
-      return null;
-    }
-
-    const normalizedType = String(fields.QUESTION_TYPE || 'short').toLowerCase().trim();
-    const allowedTypes = new Set(['mcq', 'short', 'long', 'truefalse', 'fill', 'integer', 'assertionreason']);
-    const questionType = allowedTypes.has(normalizedType) ? normalizedType : 'short';
-
-    // Build options array for MCQ
-    const options = [];
-    if (questionType === 'mcq') {
-      ['A', 'B', 'C', 'D', 'E', 'F'].forEach(letter => {
-        const optionText = fields[`OPTION_${letter}`];
-        if (optionText && optionText !== 'EMPTY') {
-          options.push({
-            text: optionText,
-            isCorrect: fields.CORRECT_OPTION === letter
-          });
-        }
+      const response = await ollama.generate({
+        model: this.model,
+        prompt,
+        format: 'json',       // JSON mode — forces valid JSON
+        stream: false,
+        options: {
+          temperature: 0,     // deterministic
+          num_ctx: 4096,
+          num_predict: 2048,
+          top_p: 0.9,
+          repeat_penalty: 1.1,
+        },
       });
+
+      const raw = response.response.trim();
+      let parsed;
+
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        const start = raw.indexOf('{');
+        const end = raw.lastIndexOf('}');
+        if (start !== -1 && end !== -1) {
+          parsed = JSON.parse(raw.slice(start, end + 1));
+        } else {
+          console.warn('[AIEnhancer] Could not parse JSON:', raw.slice(0, 200));
+          return [];
+        }
+      }
+
+      if (!Array.isArray(parsed.questions)) return [];
+      return parsed.questions.filter(q => q && typeof q.question === 'string' && q.question.trim());
+    } catch (error) {
+      console.error('[AIEnhancer] Ollama error:', error.message);
+      return [];
+    }
+  }
+
+  /**
+   * Map Ollama JSON question → internal DB shape.
+   */
+  mapQuestion(q, bookMetadata) {
+    const questionType = q.question_type || 'short';
+    const allowedTypes = new Set(['mcq', 'short', 'long', 'truefalse', 'fill', 'integer', 'assertionreason']);
+    const type = allowedTypes.has(questionType) ? questionType : 'short';
+
+    let options = [];
+    if ((type === 'mcq' || type === 'truefalse') && Array.isArray(q.options) && q.options.length > 0) {
+      options = q.options.map(opt => ({
+        text: this.normalizeMath(String(opt)),
+        isCorrect: String(opt).trim() === String(q.answer || '').trim(),
+      }));
+      // If no option matched as correct, flag first
+      if (options.length > 0 && options.every(o => !o.isCorrect)) {
+        options[0] = { ...options[0], isCorrect: true };
+      }
     }
 
-    // Build question object matching your DB schema
-    const question = {
-      text: fields.QUESTION_TEXT,
-      type: questionType,
-      subject: fields.SUBJECT || bookMetadata.subject || 'Unknown',
-      topic: fields.TOPIC || bookMetadata.topic || 'General',
-      chapter: fields.CHAPTER || bookMetadata.chapter || 'Unknown',
+    const marks = parseInt(q.marks) ||
+      (type === 'mcq' || type === 'truefalse' || type === 'fill' ? 1 :
+        type === 'long' ? 5 : 2);
+
+    return {
+      text: this.normalizeMath(String(q.question).trim()),
+      type,
+      subject: q.subject || bookMetadata.subject || 'Unknown',
+      topic: q.topic_name || bookMetadata.topic || 'General',
+      chapter: q.chapter_name || bookMetadata.chapter || 'Unknown',
       board: bookMetadata.board || 'CBSE',
-      class: bookMetadata.class || 'Unknown',
-      difficulty: fields.DIFFICULTY || 'medium',
-      marks: parseInt(fields.MARKS) || (questionType === 'mcq' ? 1 : 2),
+      class: q.class || bookMetadata.class || 'Unknown',
+      difficulty: ['easy', 'medium', 'hard'].includes(q.difficulty) ? q.difficulty : 'medium',
+      marks,
       source: 'Smart Import',
       isActive: true,
-      questionNumber: fields.QUESTION_NUMBER,
+      options: options.length > 0 ? options : undefined,
+      correctAnswerText: (type !== 'mcq' && type !== 'truefalse' && q.answer) ? this.normalizeMath(String(q.answer)) : undefined,
+      diagram: bookMetadata.diagram || null,
     };
+  }
 
-    // Add type-specific fields
-    if (options.length > 0) {
-      question.options = options;
+  /**
+   * Split raw text into ~CHUNK_SIZE character chunks for Ollama.
+   */
+  splitIntoChunks(rawQuestions) {
+    // rawQuestions is array of { text, topic, chapter, exerciseLabel, diagram? }
+    // Combine all text and chunk by CHUNK_SIZE chars
+    const chunks = [];
+    let buffer = '';
+    let bufferDiagram = null;
+
+    for (const q of rawQuestions) {
+      const block = q.text || '';
+      if (buffer.length + block.length > CHUNK_SIZE && buffer.length > 0) {
+        chunks.push({ text: buffer.trim(), diagram: bufferDiagram });
+        buffer = block;
+        bufferDiagram = q.diagram || null;
+      } else {
+        buffer += (buffer ? '\n\n' : '') + block;
+        if (!bufferDiagram && q.diagram) bufferDiagram = q.diagram;
+      }
+    }
+    if (buffer.trim()) {
+      chunks.push({ text: buffer.trim(), diagram: bufferDiagram });
     }
 
-    if (fields.CORRECT_ANSWER_TEXT && fields.CORRECT_ANSWER_TEXT !== 'EMPTY') {
-      question.correctAnswerText = fields.CORRECT_ANSWER_TEXT;
+    return chunks;
+  }
+
+  /**
+   * Enhance questions: chunk → Ollama → map → deduplicate.
+   * Concurrency = 1 for VRAM stability.
+   */
+  async enhanceQuestions(rawQuestions, bookMetadata) {
+    console.log(`\n[AIEnhancer] Ollama ${this.model} — ${rawQuestions.length} raw items`);
+
+    const chunks = this.splitIntoChunks(rawQuestions);
+    console.log(`[AIEnhancer] Split into ${chunks.length} chunk(s) (~${CHUNK_SIZE} chars each)`);
+
+    const allQuestions = [];
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      console.log(`[AIEnhancer] Chunk ${i + 1}/${chunks.length} (${chunk.text.length} chars)...`);
+
+      const metaWithDiagram = { ...bookMetadata, diagram: chunk.diagram || null };
+      const ollamaQuestions = await this.callOllama(chunk.text, metaWithDiagram);
+      const mapped = ollamaQuestions.map(q => this.mapQuestion(q, metaWithDiagram));
+
+      console.log(`[AIEnhancer] Chunk ${i + 1}: ${mapped.length} questions extracted`);
+      allQuestions.push(...mapped);
     }
 
-    if (questionType === 'integer' && fields.INTEGER_ANSWER) {
-      question.integerAnswer = parseInt(fields.INTEGER_ANSWER);
-    }
+    const unique = this.deduplicateQuestions(allQuestions);
+    const removed = allQuestions.length - unique.length;
+    console.log(`[AIEnhancer] Total: ${unique.length} unique questions (${removed} duplicates removed)`);
+    return unique;
+  }
 
-    // CRITICAL: Preserve diagram metadata from Firebase Storage (NOT base64 URL)
-    if (bookMetadata.diagram) {
-      question.diagram = bookMetadata.diagram;  // Contains { storage, path, url, width, height, hash }
-    }
-
-    return question;
+  /**
+   * Wrap bare LaTeX commands in $ delimiters if the model forgot.
+   * Only wraps sequences that look like LaTeX and aren't already inside $...$.
+   */
+  normalizeMath(text) {
+    if (!text) return text;
+    // Wrap \begin{...}...\end{...} blocks not already in $
+    text = text.replace(/(?<!\$)(\\begin\{[^}]+\}[\s\S]*?\\end\{[^}]+\})(?!\$)/g, '$$$1$$');
+    // Wrap isolated LaTeX commands like \frac, \sqrt, \int, \sum, \lim, \alpha etc.
+    text = text.replace(/(?<!\$)(\\(?:frac|sqrt|int|sum|prod|lim|alpha|beta|gamma|delta|pi|theta|lambda|mu|sigma|omega|times|div|pm|mp|leq|geq|neq|approx|infty|partial|nabla|cdot|ldots|forall|exists|in|notin|subset|cup|cap|mathbf|mathrm|text|overline|hat|vec|bar)\b[^$\n]*?)(?!\$)/g, '$$$1$$');
+    // Convert common Unicode math chars not inside $ delimiters
+    text = text.replace(/(?<!\$)×(?!\$)/g, ' $\\times$ ');
+    text = text.replace(/(?<!\$)÷(?!\$)/g, ' $\\div$ ');
+    text = text.replace(/(?<!\$)≠(?!\$)/g, ' $\\neq$ ');
+    text = text.replace(/(?<!\$)≤(?!\$)/g, ' $\\leq$ ');
+    text = text.replace(/(?<!\$)≥(?!\$)/g, ' $\\geq$ ');
+    text = text.replace(/(?<!\$)²(?!\$)/g, '$^{2}$');
+    text = text.replace(/(?<!\$)³(?!\$)/g, '$^{3}$');
+    text = text.replace(/(?<!\$)½(?!\$)/g, '$\\frac{1}{2}$');
+    text = text.replace(/(?<!\$)¼(?!\$)/g, '$\\frac{1}{4}$');
+    text = text.replace(/(?<!\$)¾(?!\$)/g, '$\\frac{3}{4}$');
+    // Clean up accidental double-wrapping $$$ → $$
+    text = text.replace(/\${3,}/g, '$$');
+    return text;
   }
 
   normalizeQuestionText(text) {
@@ -416,20 +238,100 @@ Extract ALL questions now:`;
   deduplicateQuestions(questions) {
     const seen = new Set();
     const unique = [];
-
-    for (const question of questions) {
-      const normalized = this.normalizeQuestionText(question?.text);
+    for (const q of questions) {
+      const normalized = this.normalizeQuestionText(q?.text);
       if (!normalized) continue;
-
-      const key = `${(question?.subject || '').toLowerCase()}::${normalized}`;
+      const key = `${(q?.subject || '').toLowerCase()}::${normalized}`;
       if (seen.has(key)) continue;
-
       seen.add(key);
-      unique.push(question);
+      unique.push(q);
     }
-
     return unique;
   }
 }
 
-module.exports = AIEnhancer;
+/**
+ * Gemini Enhancer — Google Gemini API (cloud)
+ * Same interface as AIEnhancer; override enhanceQuestions to use Gemini.
+ */
+class GeminiEnhancer extends AIEnhancer {
+  constructor() {
+    super();
+    const { GoogleGenerativeAI } = require('@google/generative-ai');
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) throw new Error('[GeminiEnhancer] GEMINI_API_KEY env var is required');
+    this.genAI = new GoogleGenerativeAI(apiKey);
+    this.geminiModel = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+    this.concurrentBatches = 1;
+  }
+
+  async callGemini(inputText, bookMetadata) {
+    const prompt = this.buildPrompt(inputText, bookMetadata);
+    try {
+      const model = this.genAI.getGenerativeModel({ model: this.geminiModel });
+      const result = await model.generateContent(prompt);
+      const raw = result.response.text().trim();
+
+      let parsed;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        // Try extracting from a markdown code block first
+        const mdMatch = raw.match(/```(?:json)?\s*([\s\S]+?)\s*```/);
+        if (mdMatch) {
+          try { parsed = JSON.parse(mdMatch[1]); } catch { /* fall through */ }
+        }
+        if (!parsed) {
+          const start = raw.indexOf('{');
+          const end = raw.lastIndexOf('}');
+          if (start !== -1 && end !== -1) {
+            try { parsed = JSON.parse(raw.slice(start, end + 1)); } catch { /* fall through */ }
+          }
+        }
+        if (!parsed) {
+          console.warn('[GeminiEnhancer] Could not parse JSON:', raw.slice(0, 200));
+          return [];
+        }
+      }
+
+      if (!Array.isArray(parsed.questions)) return [];
+      return parsed.questions.filter(q => q && typeof q.question === 'string' && q.question.trim());
+    } catch (error) {
+      console.error('[GeminiEnhancer] Gemini error:', error.message);
+      return [];
+    }
+  }
+
+  async enhanceQuestions(rawQuestions, bookMetadata) {
+    console.log(`\n[GeminiEnhancer] ${this.geminiModel} — ${rawQuestions.length} raw items`);
+    const chunks = this.splitIntoChunks(rawQuestions);
+    console.log(`[GeminiEnhancer] Split into ${chunks.length} chunk(s) (~${CHUNK_SIZE} chars each)`);
+
+    const allQuestions = [];
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      console.log(`[GeminiEnhancer] Chunk ${i + 1}/${chunks.length} (${chunk.text.length} chars)...`);
+      const meta = { ...bookMetadata, diagram: chunk.diagram || null };
+      const geminiQuestions = await this.callGemini(chunk.text, meta);
+      const mapped = geminiQuestions.map(q => this.mapQuestion(q, meta));
+      console.log(`[GeminiEnhancer] Chunk ${i + 1}: ${mapped.length} questions extracted`);
+      allQuestions.push(...mapped);
+    }
+
+    const unique = this.deduplicateQuestions(allQuestions);
+    const removed = allQuestions.length - unique.length;
+    console.log(`[GeminiEnhancer] Total: ${unique.length} unique questions (${removed} duplicates removed)`);
+    return unique;
+  }
+}
+
+/**
+ * Factory — pick enhancer based on AI_PROVIDER env var or argument.
+ * @param {'ollama'|'gemini'} provider
+ */
+function createEnhancer(provider) {
+  if (provider === 'gemini') return new GeminiEnhancer();
+  return new AIEnhancer();
+}
+
+module.exports = { AIEnhancer, GeminiEnhancer, createEnhancer };

@@ -11,7 +11,8 @@ import {
   triggerProcessing,
   stopAutomation,
   resetAutomationStatus,
-  getAvailableFolders
+  getAvailableFolders,
+  streamLogs,
 } from '../../controllers/automationController';
 
 const router = Router();
@@ -26,6 +27,8 @@ router.post('/trigger', authMiddleware, requireRole('admin'), triggerProcessing)
 router.post('/stop', authMiddleware, requireRole('admin'), stopAutomation);
 router.post('/status/reset', authMiddleware, resetAutomationStatus);
 router.get('/folders', authMiddleware, requireRole('admin'), getAvailableFolders);
+// SSE: EventSource can't send headers, so we accept token via query param
+router.get('/logs', streamLogs);
 
 // Statistics & Monitoring
 router.get('/stats', authMiddleware, requireRole('admin'), getProcessingStats);

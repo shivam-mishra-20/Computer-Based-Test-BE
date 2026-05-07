@@ -1,44 +1,15 @@
 import dotenv from 'dotenv';
-import type { VertexAI } from '@google-cloud/vertexai';
-import { getVertexClient, getVisionClient as createVisionClient } from '../lib/googleClients';
 import fs from 'fs';
 import path from 'path';
 import pdfParse from 'pdf-parse';
-import sharp from 'sharp';
 import { Types } from 'mongoose';
 import { ImportBatch, ImportedQuestion, IImportedQuestion } from '../models/ImportedQuestion';
-import { saveBatchValidatedQuestions, EnhancedQuestionData, saveValidatedQuestion } from './questionValidationService';
+import { EnhancedQuestionData, saveValidatedQuestion } from './questionValidationService';
 import { normalizeMathematicalExpressions } from './mathService';
 import { EnhancedPdfQuestionExtractor } from './enhancedPdfQuestionExtractor';
-import { EnhancedDiagramExtractor } from './enhancedDiagramExtractor';
+import { extractQuestionsFromChunk, mapOllamaToExtracted } from './ollamaService';
 
 dotenv.config();
-
-// Google Cloud configuration
-const GOOGLE_PROJECT = process.env.GOOGLE_CLOUD_PROJECT || 'cbt-vision-api';
-const GOOGLE_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
-
-// Initialize clients (lazy loading)
-let vertexAI: VertexAI | null = null;
-let visionClient: ReturnType<typeof createVisionClient> | null = null;
-
-/**
- * Get or initialize Vertex AI client for Gemini LLM
- * Uses the same service account credentials as Vision API
- */
-function getVertexAI(): VertexAI {
-  if (!vertexAI) vertexAI = getVertexClient();
-  return vertexAI;
-}
-
-/**
- * Get or initialize Vision API client for OCR
- * Uses the same service account credentials as Vertex AI
- */
-function getVisionClient(): ReturnType<typeof createVisionClient> {
-  if (!visionClient) visionClient = createVisionClient();
-  return visionClient;
-}
 
 export interface ExtractedQuestion {
   text: string;
@@ -87,38 +58,24 @@ export class QuestionImportService {
       chapter?: string;
       section?: string;
       marks?: number;
-      model?: 'gemini-2.5-flash' | 'gemini-2.5-pro' | 'gemini-2.0-flash-thinking-exp-01-21';
-      useEnhancedExtractor?: boolean; // New option to use enhanced extractor
+      useEnhancedExtractor?: boolean;
     } = {}
   ): Promise<ImportResult> {
     const startTime = Date.now();
     
     // Use enhanced extractor by default for PDFs
     const useEnhanced = options.useEnhancedExtractor !== false && fileType === 'pdf';
-    
+
     if (useEnhanced) {
-      console.log('[Import] Using ENHANCED PDF extractor (with deduplication & chunking)');
+      console.log('[Import] Using ENHANCED PDF extractor (Ollama qwen3:8b + chunking + deduplication)');
       return await this.importWithEnhancedExtractor(filePath, fileName, uploadedBy, options);
     }
-    
-    // Original implementation (fallback)
-    console.log('[Import] Using LEGACY extractor');
-    
-    // Default to Gemini 2.0 Flash Thinking for best math accuracy
-    let selectedModel = options.model || 'gemini-2.0-flash-thinking-exp-01-21';
-    
-    console.log(`[Import] DEBUG: Received model = "${selectedModel}"`);
-    
-    // Strip "publishers/google/models/" prefix if present (frontend may send full path)
-    if (selectedModel.includes('/')) {
-      const originalModel = selectedModel;
-      selectedModel = (selectedModel.split('/').pop() || 'gemini-2.0-flash-thinking-exp-01-21') as typeof selectedModel;
-      console.log(`[Import] DEBUG: Stripped "${originalModel}" → "${selectedModel}"`);
-    }
+
+    console.log('[Import] Using LEGACY extractor (Ollama qwen3:8b)');
     
     try {
       console.log(`[Import] Starting import for file: ${fileName}`);
-      console.log(`[Import] Pipeline: Google Cloud Vision API → Vertex AI ${selectedModel}`);
+      console.log(`[Import] Pipeline: pdf-parse → Ollama qwen3:8b (local)`);
       
       // Create import batch
       const fileStats = fs.statSync(filePath);
@@ -129,8 +86,8 @@ export class QuestionImportService {
         fileSize: fileStats.size,
         status: 'processing',
         processingStarted: new Date(),
-        ocrProvider: 'google-vision',
-        processingModel: `vertex-ai-${selectedModel}`,
+        ocrProvider: 'pdf-parse',
+        processingModel: 'ollama-qwen3:8b',
         uploadedBy
       });
       
@@ -140,22 +97,20 @@ export class QuestionImportService {
       let extractedText: string;
       let totalPages = 1;
 
-      // Step 1: Extract text using Google Cloud Vision API (highest accuracy OCR)
-      console.log(`[Import] Step 1: Extracting text using Google Cloud Vision API...`);
-      
+      // Step 1: Extract text using pdf-parse (local)
+      console.log(`[Import] Step 1: Extracting text with pdf-parse (local)...`);
+
       if (fileType === 'pdf') {
-        // For PDFs, convert pages to images and process with Vision API
-        const result = await this.extractTextFromPDFWithVision(filePath);
+        const result = await this.extractTextFromPDF(filePath);
         extractedText = result.text;
         totalPages = result.pages;
       } else {
-        // For images, use Vision API directly
-        extractedText = await this.extractTextFromImageWithVision(filePath);
+        // For images, fall back to empty text (Ollama can only handle text)
+        console.warn('[Import] Image files not supported in legacy path without Vision API');
+        extractedText = '';
       }
 
-      console.log(`[Import] Vision API extracted ${extractedText.length} characters from ${totalPages} page(s)`);
-      
-      // Log a preview of extracted text for debugging
+      console.log(`[Import] Extracted ${extractedText.length} characters from ${totalPages} page(s)`);
       const textPreview = extractedText.slice(0, 200).replace(/\n/g, ' ');
       console.log(`[Import] Text preview: ${textPreview}...`);
 
@@ -163,19 +118,14 @@ export class QuestionImportService {
       batch.totalPages = totalPages;
       await batch.save();
 
-      // Step 2: Structure questions using Vertex AI Gemini
-      console.log(`[Import] Step 2: Structuring questions with Vertex AI ${selectedModel}...`);
-      const questions = await this.structureQuestionsWithVertexAI(
+      // Step 2: Structure questions using local Ollama qwen3:8b
+      console.log(`[Import] Step 2: Structuring questions with Ollama qwen3:8b...`);
+      const questions = await this.structureQuestionsWithOllama(
         extractedText,
-        {
-          subject: options.subject,
-          topic: options.topic,
-          batchId: batch._id as Types.ObjectId,
-          model: selectedModel
-        }
+        { subject: options.subject, topic: options.topic }
       );
 
-      console.log(`[Import] Vertex AI ${selectedModel} structured ${questions.length} questions`);
+      console.log(`[Import] Ollama extracted ${questions.length} questions`);
 
       // Step 3: Normalize mathematical expressions in all questions
       console.log(`[Import] Step 3: Normalizing mathematical expressions...`);
@@ -300,8 +250,8 @@ export class QuestionImportService {
         fileSize: fileStats.size,
         status: 'processing',
         processingStarted: new Date(),
-        ocrProvider: 'google-vision',
-        processingModel: `vertex-ai-enhanced-${options.model || 'gemini-2.0-flash-thinking-exp-01-21'}`,
+        ocrProvider: 'pdf-parse',
+        processingModel: 'ollama-qwen3:8b-enhanced',
         uploadedBy
       });
       
@@ -322,7 +272,6 @@ export class QuestionImportService {
           class: options.class,
           board: options.board,
           chapter: options.chapter,
-          model: options.model
         }
       );
 
@@ -449,133 +398,95 @@ export class QuestionImportService {
   }
 
   /**
-   * Extract text from image using Google Cloud Vision API (highest accuracy)
+   * Extract text from PDF using pdf-parse (local, no cloud).
    */
-  private static async extractTextFromImageWithVision(filePath: string): Promise<string> {
+  private static async extractTextFromPDF(filePath: string): Promise<{ text: string; pages: number }> {
     try {
-      console.log(`[Vision API] Processing image: ${filePath}`);
-      
-      const client = getVisionClient();
-      
-      // Read image file
-      const imageBuffer = await fs.promises.readFile(filePath);
-      
-      // Perform document text detection (best for dense text like question papers)
-      const [result] = await client.documentTextDetection({
-        image: { content: imageBuffer }
-      });
-      
-      const fullText = result.fullTextAnnotation;
-      if (!fullText || !fullText.text) {
-        throw new Error('No text detected in image');
-      }
-      
-      console.log(`[Vision API] Extracted ${fullText.text.length} characters`);
-      return fullText.text;
-      
-    } catch (error) {
-      console.error('[Vision API] Error:', error);
-      throw new Error(`Vision API extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  }
-
-  /**
-   * Extract text from PDF using Google Cloud Vision API
-   * Uses Vision API's native PDF support via asyncBatchAnnotateFiles
-   */
-  private static async extractTextFromPDFWithVision(filePath: string): Promise<{ text: string; pages: number }> {
-    try {
-      console.log(`[Vision API PDF] Processing PDF: ${filePath}`);
-      
-      // Get page count
+      console.log(`[pdf-parse] Processing PDF: ${filePath}`);
       const dataBuffer = await fs.promises.readFile(filePath);
       const pdfData = await pdfParse(dataBuffer as any);
       const numPages = pdfData.numpages || 1;
-      
-      console.log(`[Vision API PDF] PDF has ${numPages} pages`);
 
-      const client = getVisionClient();
-      
-      // Read the PDF file
-      const pdfBuffer = await fs.promises.readFile(filePath);
+      const rawText = pdfData.text || '';
+      const pageBlocks = rawText.split(/\f/).filter((p: string) => p.trim());
 
-      console.log(`[Vision API PDF] Processing PDF with Vision API...`);
-
-      // Use batchAnnotateFiles for synchronous PDF processing
-      // Note: This processes all pages in one request
-      const request = {
-        requests: [
-          {
-            inputConfig: {
-              content: pdfBuffer,
-              mimeType: 'application/pdf',
-            },
-            features: [{ type: 'DOCUMENT_TEXT_DETECTION' as const }],
-            pages: Array.from({ length: numPages }, (_, i) => i + 1), // Process all pages
-          },
-        ],
-      };
-
-      const [response] = await client.batchAnnotateFiles(request);
-      
-      if (!response.responses || response.responses.length === 0) {
-        console.warn(`[Vision API PDF] No responses from Vision API`);
-        return { text: '', pages: numPages };
+      let combinedText: string;
+      if (pageBlocks.length > 1) {
+        combinedText = pageBlocks
+          .map((pg: string, idx: number) => `\n\n=== PAGE ${idx + 1} ===\n${pg}`)
+          .join('\n');
+      } else {
+        combinedText = `\n\n=== PAGE 1 ===\n${rawText}`;
       }
 
-      const pageTexts: string[] = [];
-      
-      // Extract text from each page response
-      for (const fileResponse of response.responses) {
-        if (fileResponse.responses) {
-          for (const pageResponse of fileResponse.responses) {
-            const fullText = pageResponse.fullTextAnnotation;
-            if (fullText && fullText.text) {
-              pageTexts.push(fullText.text);
-              console.log(`[Vision API PDF] Extracted ${fullText.text.length} chars from page`);
-            } else {
-              pageTexts.push('');
-            }
-          }
-        }
-      }
-
-      const combinedText = pageTexts
-        .map((text, idx) => `\n\n=== PAGE ${idx + 1} ===\n${text}`)
-        .join('\n');
-
-      console.log(`[Vision API PDF] Total extracted: ${combinedText.length} characters from ${pageTexts.length} pages`);
-
-      return {
-        text: combinedText,
-        pages: numPages
-      };
-      
+      console.log(`[pdf-parse] Extracted ${combinedText.length} chars from ${numPages} pages`);
+      return { text: combinedText, pages: numPages };
     } catch (error) {
-      console.error('[Vision API PDF] Fatal error:', error);
-      
-      // Fallback to text extraction with pdf-parse
-      console.log(`[Vision API PDF] Falling back to text extraction with pdf-parse...`);
-      try {
-        const dataBuffer = await fs.promises.readFile(filePath);
-        const pdfData = await pdfParse(dataBuffer as any);
-        
-        return {
-          text: pdfData.text || '',
-          pages: pdfData.numpages || 1
-        };
-      } catch (fallbackError) {
-        throw new Error(`Vision API PDF extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      }
+      throw new Error(`PDF extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
 
   /**
-   * Strict, order-preserving question parser (no paraphrasing)
-   * - Detects questions by numbering patterns (Q1., 1., 1), 3a, 3b, etc.)
-   * - Handles sub-questions (a, b, c, d, i, ii, iii, iv)
-   * - Captures options (a)/(b)/(c)/(d) formats when present
-   * - Uses exact substrings from the OCR text to ensure 1:1 fidelity
+   * Structure extracted text into questions using local Ollama qwen3:8b.
+   * Processes text in ~1200-char chunks sequentially (concurrency=1).
+   */
+  private static async structureQuestionsWithOllama(
+    extractedText: string,
+    options: { subject?: string; topic?: string }
+  ): Promise<ExtractedQuestion[]> {
+    const CHUNK_CHARS = 1200;
+    const allQuestions: ExtractedQuestion[] = [];
+
+    // Split into page blocks then chunk
+    const pageBlocks = extractedText.split(/=== PAGE \d+ ===/).filter(b => b.trim());
+    const chunks: string[] = [];
+    let buffer = '';
+
+    for (const page of pageBlocks) {
+      if (buffer.length + page.length > CHUNK_CHARS && buffer.length > 0) {
+        chunks.push(buffer);
+        buffer = page.trim();
+      } else {
+        buffer += (buffer ? '\n' : '') + page.trim();
+      }
+    }
+    if (buffer.trim()) chunks.push(buffer);
+
+    console.log(`[Ollama] Processing ${chunks.length} text chunks...`);
+
+    let questionIndex = 0;
+    for (let i = 0; i < chunks.length; i++) {
+      console.log(`[Ollama] Chunk ${i + 1}/${chunks.length} (${chunks[i].length} chars)...`);
+      const ollamaQuestions = await extractQuestionsFromChunk(chunks[i], {
+        subject: options.subject,
+        startPage: i + 1,
+      });
+
+      const mapped = ollamaQuestions.map((q, idx) => {
+        const m = mapOllamaToExtracted(q, questionIndex + idx, i + 1);
+        return {
+          text: m.text,
+          type: m.type,
+          options: m.options,
+          correctAnswerText: m.correctAnswerText,
+          questionNumber: m.questionNumber,
+          subject: m.subject,
+          topic: options.topic || m.topic,
+          difficulty: m.difficulty,
+          confidence: m.confidence,
+          needsReview: m.needsReview,
+        } as ExtractedQuestion;
+      });
+      questionIndex += ollamaQuestions.length;
+      allQuestions.push(...mapped);
+    }
+
+    console.log(`[Ollama] Total questions extracted: ${allQuestions.length}`);
+    return allQuestions;
+  }
+
+  /**
+   * Strict, order-preserving question parser (fallback, no AI)
    */
   private static structureQuestionsStrict(
     extractedText: string,
@@ -654,500 +565,10 @@ export class QuestionImportService {
 
 
 
-  /**
-   * Structure extracted text into questions using Vertex AI Gemini
-   * Production-grade implementation with single Google Cloud credentials
-   */
-  private static async structureQuestionsWithVertexAI(
-    extractedText: string,
-    options: {
-      subject?: string;
-      topic?: string;
-      batchId: Types.ObjectId;
-      model?: 'gemini-2.5-flash' | 'gemini-2.5-pro' | 'gemini-2.0-flash' | 'gemini-2.0-flash-thinking-exp-01-21' | 'gemini-3.0' | 'gemini-3.0-pro';
-    }
-  ): Promise<ExtractedQuestion[]> {
-    try {
-      const modelName = options.model || 'gemini-2.0-flash-thinking-exp-01-21';
-      console.log(`[Vertex AI] Using model: ${modelName}`);
-      
-      const vertexAI = getVertexAI();
-      const generativeModel = vertexAI.getGenerativeModel({
-        model: modelName,
-        generationConfig: {
-          temperature: 0.0, // Maximum consistency
-          topP: 0.95,
-          topK: 40,
-          maxOutputTokens: 16384, // Increased to handle more questions (up to ~20-30 questions)
-        },
-      });
+  // structureQuestionsWithVertexAI removed — use structureQuestionsWithOllama
 
-      const prompt = `You are a production-grade academic question extraction engine.
+  // parseTextBlockResponse removed — Ollama uses JSON mode
 
-Your task:
-Extract ALL questions from the OCR text below and return clean, structured content
-that can be safely stored, displayed, and reused for exams, PDFs, and question banks.
-
-🎯 CRITICAL REQUIREMENTS:
-- Extract EVERY SINGLE question from the source - DO NOT SKIP ANY
-- If the source has 10 questions, you MUST output exactly 10 question blocks
-- Preserve the original wording EXACTLY - no paraphrasing, no rewriting
-- Do NOT correct grammar or spelling errors
-- Do NOT output JSON, markdown, or any other format
-- ONLY add LaTeX markup around mathematical expressions using $...$
-- COMPLETE THE ENTIRE OUTPUT - do not stop until all questions are extracted
-
-📌 SUB-QUESTIONS / SUB-PARTS HANDLING (CRITICAL):
-When you encounter questions with sub-parts (e.g., question 3 with parts a, b, c), treat EACH sub-part as a SEPARATE question:
-
-Example Input:
-3. Find the perimeter of each of the following triangles whose sides are given by:
-   a. 2x + 3y + 3z, 4x − 4y + 2z, 6x + y − 2z
-   b. 7x² + 6x + 3, 8x² − 4x + 7, 6x² − 4x + 9
-
-CORRECT Output (2 separate question blocks):
-------------------------------------
-QUESTION_NUMBER: 3a
-QUESTION_TEXT: Find the perimeter of each of the following triangles whose sides are given by: $2x + 3y + 3z$, $4x - 4y + 2z$, $6x + y - 2z$
-QUESTION_TYPE: short
-...
-------------------------------------
-QUESTION_NUMBER: 3b
-QUESTION_TEXT: Find the perimeter of each of the following triangles whose sides are given by: $7x^2 + 6x + 3$, $8x^2 - 4x + 7$, $6x^2 - 4x + 9$
-QUESTION_TYPE: short
-...
-------------------------------------
-
-SUB-QUESTION RULES:
-1. Each sub-part (a, b, c, d, etc.) becomes a SEPARATE question block
-2. Combine the parent question text + specific sub-part into QUESTION_TEXT
-3. Use question numbers like "3a", "3b", "4a", "4b", "5i", "5ii" etc.
-4. Do NOT repeat just the parent question - include the SPECIFIC sub-part data
-5. If a question has 4 sub-parts (a, b, c, d), you MUST create 4 separate blocks
-
-Return output in the EXACT format below.
-Repeat the block for EACH AND EVERY question.
-
-------------------------------------
-QUESTION_NUMBER: <as in source or sequential>
-QUESTION_TEXT: <exact question text with LaTeX>
-QUESTION_TYPE: mcq | truefalse | fill | short | long | integer | assertionreason
-
-OPTION_A: <text or EMPTY>
-OPTION_B: <text or EMPTY>
-OPTION_C: <text or EMPTY>
-OPTION_D: <text or EMPTY>
-
-CORRECT_OPTION: A | B | C | D | UNKNOWN
-CORRECT_ANSWER_TEXT: <text or EMPTY>
-
-SUBJECT: ${options.subject || 'Unknown'}
-TOPIC: ${options.topic || 'General'}
-DIFFICULTY: easy | medium | hard
-
-CONFIDENCE: <0.0 – 1.0>
-NEEDS_REVIEW: true | false
-------------------------------------
-
-RULES (STRICT):
-- Each field must be on a SINGLE LINE
-- Preserve LaTeX exactly as-is using $...$
-- Do NOT escape LaTeX for JSON
-- Do NOT invent answers or options
-- If answer is unclear, set CORRECT_OPTION to UNKNOWN
-- If OCR text is unclear, set NEEDS_REVIEW to true
-- Every question must be in its own block
-- If an option doesn't exist, write EMPTY
-- EXTRACT ALL QUESTIONS - Count them in the source and match that count exactly
-- Do NOT stop generating until you've processed every question
-- For questions with sub-parts (3a, 3b, 4a, 4b), create SEPARATE blocks for EACH sub-part
-- ALWAYS combine parent question + sub-part text into complete QUESTION_TEXT
-- Question numbers can be: "1", "2a", "2b", "3i", "3ii", "4(a)", "4(b)" etc.
-
-LATEX FORMATTING:
-- Use $...$ for inline math (e.g., $x^2 + 5x + 6 = 0$)
-- Use $$...$$ for display equations
-- Common: $\frac{a}{b}$, $\sqrt{x}$, $x^2$, $x_1$, $\sum$, $\int$, $\lim$
-- Greek: $\alpha$, $\beta$, $\gamma$, $\theta$, $\pi$
-- Relations: $\leq$, $\geq$, $\neq$, $\approx$
-- Convert Unicode: ∞→$\infty$, ²→$^2$, ×→$\times$
-
-LATEX FORMATTING (STRICT · PRODUCTION · ENFORCED):
-
-GENERAL RULES:
-
-Use $...$ only for inline mathematical expressions
-Example: $x^2 + 5x + 6 = 0$
-
-Use 
-.
-.
-.
-... only for standalone, multi-line, or long equations
-(integrals, summations, limits, derivations)
-
-Do NOT wrap full sentences in LaTeX
-Wrap only the smallest valid mathematical expression
-
-Use inline math by default.
-Display math is an exception, not the default.
-
-STANDARD LATEX SYNTAX:
-
-Fractions: $\frac{a}{b}$
-
-Roots: $\sqrt{x}$
-
-Powers: $x^2$
-
-Subscripts: $x_1$
-
-Summation: $\sum$
-
-Integration: $\int$
-
-Limits: $\lim$
-
-GREEK LETTERS:
-
-Use lowercase unless explicitly required:
-$\alpha$, $\beta$, $\gamma$, $\theta$, $\pi$
-
-RELATIONS & OPERATORS:
-
-$\leq$, $\geq$, $\neq$, $\approx$
-
-$=$, $+$, $-$, $\times$, $\div$
-
-UNICODE → LATEX CONVERSION (MANDATORY):
-
-∞ → $\infty$
-
-² → $^2$, ³ → $^3$
-
-× → $\times$, ÷ → $\div$
-
-√ → $\sqrt{}$
-
-≤ → $\leq$, ≥ → $\geq$, ≠ → $\neq$
-
-π → $\pi$
-
-Unicode minus (−) → -
-
-DO NOT RULES (STRICT):
-
-Do NOT wrap entire sentences in $...$
-
-Do NOT mix $...$ and 
-.
-.
-.
-... for the same expression
-
-Do NOT invent, simplify, or rewrite expressions
-
-Do NOT escape LaTeX (no \, no JSON escaping)
-
-Do NOT output malformed LaTeX (unbalanced $, {}, or )
-
-Do NOT normalize text that already contains valid LaTeX
-
-BACKEND ENFORCEMENT RULES:
-
-$ count must be even
-
-Curly braces {} must be balanced
-
-Replace 
-.
-.
-.
-... with $...$ unless expression contains \int, \sum, or \lim, or is longer than 20 characters
-
-Reject any remaining Unicode math symbols
-
-Each LaTeX expression must remain on a single line
-
-If $ already exists in text, skip further normalization
-
-RENDERING & STORAGE GUARANTEES:
-
-Fully compatible with MathJax and KaTeX
-
-Safe for database storage and retrieval
-
-Safe for screen rendering and PDF generation
-
-Safe for question papers, exams, and downloads
-
-Safe for review workflows and exports (PDF / DOCX / HTML)
-
-PRESERVATION GUARANTEE:
-
-Preserve LaTeX exactly as written
-
-Do not modify, expand, or auto-correct expressions
-
-QUESTION TYPE DETECTION:
-- mcq: Has 4-5 options with (a)/(b)/(c)/(d) or A/B/C/D labels
-- truefalse: Explicitly asks "True or False" or has only 2 options
-- fill: Has blanks like "_____" or "fill in the blank"
-- short: Asks for brief answer, typically 2-3 marks
-- long: Asks for detailed explanation, typically 5+ marks
-- integer: Asks for numeric answer only
-- assertionreason: Has "Assertion:" and "Reason:" statements
-
-EXAMPLE OUTPUT:
-------------------------------------
-QUESTION_NUMBER: 1
-QUESTION_TEXT: If $f(x) = x^2 + 3x + 5$, find $\frac{dy}{dx}$.
-QUESTION_TYPE: mcq
-
-OPTION_A: $2x + 3$
-OPTION_B: $x^2 + 3$
-OPTION_C: $2x$
-OPTION_D: $3x + 5$
-
-CORRECT_OPTION: A
-CORRECT_ANSWER_TEXT: EMPTY
-
-SUBJECT: Mathematics
-TOPIC: Calculus
-DIFFICULTY: easy
-
-CONFIDENCE: 0.95
-NEEDS_REVIEW: false
-------------------------------------
-QUESTION_NUMBER: 5a
-QUESTION_TEXT: Simplify the following: $(-x^2) + (-x^2) + (-6x^2)$
-QUESTION_TYPE: short
-
-OPTION_A: EMPTY
-OPTION_B: EMPTY
-OPTION_C: EMPTY
-OPTION_D: EMPTY
-
-CORRECT_OPTION: UNKNOWN
-CORRECT_ANSWER_TEXT: $-8x^2$
-
-SUBJECT: Mathematics
-TOPIC: Algebra
-DIFFICULTY: easy
-
-CONFIDENCE: 0.9
-NEEDS_REVIEW: false
-------------------------------------
-
-OCR TEXT TO PROCESS:
-<<<BEGIN>>>
-${extractedText}
-<<<END>>>`;
-
-      console.log(`[Vertex AI] Sending ${extractedText.length} chars for structuring...`);
-      
-      const request = {
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      };
-      
-      const result = await generativeModel.generateContent(request);
-      const response = result.response;
-      const responseText = response.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      
-      console.log(`[Vertex AI] Received ${responseText.length} chars response`);
-      
-      // Log finish reason for debugging
-      const finishReason = response.candidates?.[0]?.finishReason;
-      if (finishReason) {
-        console.log(`[Vertex AI] Finish reason: ${finishReason}`);
-        if (finishReason === 'MAX_TOKENS' || finishReason === 'OTHER') {
-          console.warn('[Vertex AI] ⚠ Response may be truncated due to token limit');
-        }
-      }
-      
-      // Parse the text-based format instead of JSON
-      const questions = this.parseTextBlockResponse(responseText, options);
-      
-      if (!questions || questions.length === 0) {
-        throw new Error('Failed to parse any questions from Gemini response');
-      }
-      
-      console.log(`[Vertex AI] ✓ Successfully parsed ${questions.length} questions from text format`);
-      
-      // Warn if question count seems suspiciously low
-      if (questions.length < 5) {
-        console.warn(`[Vertex AI] ⚠️ Only ${questions.length} questions extracted - this may be incomplete!`);
-        console.warn(`[Vertex AI] Consider checking if the OCR text contains more questions.`);
-      }
-
-      // Validate and clean questions
-      return questions.map((q, index) => ({
-        text: q.text || `Question ${index + 1}`,
-        type: q.type || 'short',
-        options: q.options || undefined,
-        correctAnswerText: q.correctAnswerText || undefined,
-        integerAnswer: q.integerAnswer || undefined,
-        assertion: q.assertion || undefined,
-        reason: q.reason || undefined,
-        assertionIsTrue: q.assertionIsTrue || undefined,
-        reasonIsTrue: q.reasonIsTrue || undefined,
-        reasonExplainsAssertion: q.reasonExplainsAssertion || undefined,
-        questionNumber: q.questionNumber || `${index + 1}`,
-        subject: q.subject || options.subject || 'Unknown',
-        topic: q.topic || options.topic || 'General',
-        difficulty: q.difficulty || 'medium',
-        confidence: Math.min(Math.max(q.confidence || 0.5, 0), 1),
-        needsReview: q.needsReview || q.confidence < 0.7
-      }));
-
-    } catch (error) {
-      throw new Error(`Question structuring failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-    }
-  }
-
-  /**
-   * Parse the text-block format response from Gemini
-   * Format: Blocks separated by dashes, each field on its own line
-   */
-  private static parseTextBlockResponse(
-    responseText: string,
-    options: { subject?: string; topic?: string }
-  ): ExtractedQuestion[] {
-    const questions: ExtractedQuestion[] = [];
-    
-    // Log the raw response for debugging
-    console.log(`[TextParser] Raw response length: ${responseText.length} chars`);
-    console.log(`[TextParser] First 500 chars: ${responseText.slice(0, 500)}`);
-    
-    // Split by the separator line - be flexible with the pattern
-    // Match: newline, 4+ dashes, optional spaces, newline
-    let blocks = responseText.split(/\n\s*-{4,}\s*\n/).filter(block => block.trim());
-    
-    // If no blocks found with standard separator, try alternative patterns
-    if (blocks.length <= 1) {
-      console.log(`[TextParser] Standard separator not found, trying alternative patterns...`);
-      // Try without newline requirement
-      blocks = responseText.split(/-{10,}/).filter(block => block.trim() && block.includes('QUESTION_'));
-    }
-    
-    // Additional fallback: try to split by QUESTION_NUMBER: pattern if still no blocks
-    if (blocks.length <= 1 && responseText.includes('QUESTION_NUMBER:')) {
-      console.log(`[TextParser] Trying to split by QUESTION_NUMBER pattern...`);
-      const questionSplits = responseText.split(/(?=QUESTION_NUMBER:)/);
-      blocks = questionSplits.filter(block => block.trim() && block.includes('QUESTION_TEXT'));
-    }
-    
-    console.log(`[TextParser] Found ${blocks.length} potential question blocks`);
-    
-    if (blocks.length === 0) {
-      console.error(`[TextParser] No question blocks found! Response preview:\n${responseText.slice(0, 1000)}`);
-      return [];
-    }
-    
-    for (let i = 0; i < blocks.length; i++) {
-      const block = blocks[i];
-      console.log(`[TextParser] Processing block ${i + 1}/${blocks.length}...`);
-      
-      try {
-        const lines = block.split('\n').map(l => l.trim()).filter(l => l);
-        
-        // Extract fields using regex - case insensitive for robustness
-        const getValue = (key: string): string => {
-          const line = lines.find(l => l.toUpperCase().startsWith(`${key.toUpperCase()}:`));
-          if (!line) return '';
-          const colonIndex = line.indexOf(':');
-          return line.substring(colonIndex + 1).trim();
-        };
-        
-        const questionNumber = getValue('QUESTION_NUMBER');
-        const questionText = getValue('QUESTION_TEXT');
-        const questionType = getValue('QUESTION_TYPE').toLowerCase() as ExtractedQuestion['type'];
-        
-        // Skip if no question text found
-        if (!questionText) {
-          console.warn(`[TextParser] Block ${i + 1} skipped - no question text found`);
-          console.log(`[TextParser] Block preview: ${block.slice(0, 200)}`);
-          continue;
-        }
-        
-        const optionA = getValue('OPTION_A');
-        const optionB = getValue('OPTION_B');
-        const optionC = getValue('OPTION_C');
-        const optionD = getValue('OPTION_D');
-        
-        const correctOption = getValue('CORRECT_OPTION').toUpperCase();
-        const correctAnswerText = getValue('CORRECT_ANSWER_TEXT');
-        
-        const subject = getValue('SUBJECT') || options.subject || 'Unknown';
-        const topic = getValue('TOPIC') || options.topic || 'General';
-        const difficultyStr = (getValue('DIFFICULTY') || 'medium').toLowerCase();
-        const difficulty = (['easy', 'medium', 'hard'].includes(difficultyStr) ? difficultyStr : 'medium') as ExtractedQuestion['difficulty'];
-        
-        const confidenceStr = getValue('CONFIDENCE');
-        const confidence = confidenceStr ? parseFloat(confidenceStr) : 0.85;
-        
-        const needsReviewStr = getValue('NEEDS_REVIEW').toLowerCase();
-        const needsReview = needsReviewStr === 'true';
-        
-        // Build options array for MCQ
-        let questionOptions: ExtractedQuestion['options'] = undefined;
-        if (questionType === 'mcq' || questionType === 'truefalse') {
-          const opts: Array<{ text: string; isCorrect: boolean }> = [];
-          
-          if (optionA && optionA !== 'EMPTY') {
-            opts.push({ text: optionA, isCorrect: correctOption === 'A' });
-          }
-          if (optionB && optionB !== 'EMPTY') {
-            opts.push({ text: optionB, isCorrect: correctOption === 'B' });
-          }
-          if (optionC && optionC !== 'EMPTY') {
-            opts.push({ text: optionC, isCorrect: correctOption === 'C' });
-          }
-          if (optionD && optionD !== 'EMPTY') {
-            opts.push({ text: optionD, isCorrect: correctOption === 'D' });
-          }
-          
-          if (opts.length > 0) {
-            questionOptions = opts;
-          }
-        }
-        
-        const question: ExtractedQuestion = {
-          text: questionText,
-          type: questionType || 'short',
-          options: questionOptions,
-          correctAnswerText: (correctAnswerText && correctAnswerText !== 'EMPTY') ? correctAnswerText : undefined,
-          questionNumber: questionNumber || `${questions.length + 1}`,
-          subject,
-          topic,
-          difficulty,
-          confidence: Math.min(Math.max(confidence, 0), 1),
-          needsReview
-        };
-        
-        questions.push(question);
-        console.log(`[TextParser] ✓ Parsed question ${question.questionNumber}: ${question.type}`);
-        
-      } catch (parseError) {
-        console.warn(`[TextParser] Failed to parse block ${i + 1}:`, parseError);
-        console.log(`[TextParser] Failed block preview: ${block.slice(0, 300)}`);
-        // Continue to next block
-      }
-    }
-    
-    console.log(`[TextParser] ===== PARSING SUMMARY =====`);
-    console.log(`[TextParser] Total blocks found: ${blocks.length}`);
-    console.log(`[TextParser] Successfully parsed: ${questions.length}`);
-    console.log(`[TextParser] Failed to parse: ${blocks.length - questions.length}`);
-    
-    if (questions.length < 5 && blocks.length <= 3) {
-      console.warn(`[TextParser] ⚠️ WARNING: Only ${questions.length} questions extracted!`);
-      console.warn(`[TextParser] This may indicate the LLM response was incomplete or incorrectly formatted.`);
-      console.warn(`[TextParser] Full response for debugging:\n${responseText}`);
-    }
-    
-    return questions;
-  }
 
   /**
    * Save structured questions to database with validation

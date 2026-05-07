@@ -16,123 +16,34 @@ class PDFParser {
   }
 
   /**
-   * Extract text using OCR for scanned PDFs
-   * Uses Google Cloud Vision API (same as Smart Import)
-   * Processes in batches of 5 pages (Vision API limit)
-   * @param {Buffer} pdfBuffer - PDF buffer
-   * @param {number} totalPages - Total number of pages
-   * @returns {Promise<string>} - Extracted text from all pages
+   * Fallback for scanned PDFs: re-attempt with pdf-parse using different options.
+   * Note: pdf-parse cannot OCR true image-only PDFs. For scanned docs the text
+   * extracted will still be sparse — Ollama handles low-text chunks gracefully.
    */
   async extractTextWithOCR(pdfBuffer, totalPages) {
-    console.log('[PDF Parser] Using Google Cloud Vision API for scanned PDF...');
-    
+    console.log('[PDF Parser] Scanned PDF detected — using pdf-parse (local, no cloud OCR).');
+    console.log('[PDF Parser] Tip: For image-only PDFs, convert to text-based PDF first for best results.');
+
+    // pdf-parse already ran; return what it got (sparse text is ok — Ollama handles it)
+    // This method is only reached when avgCharsPerPage < threshold.
+    // Re-run pdf-parse with raw extraction to capture any remaining text.
     try {
-      const { ImageAnnotatorClient } = require('@google-cloud/vision');
-      const KEY_FILE = path.resolve(
-        process.env.GOOGLE_APPLICATION_CREDENTIALS || path.join(__dirname, '..', 'vision-key.json')
-      );
-      console.log('[PDF Parser] Using credentials:', KEY_FILE);
-      const client = new ImageAnnotatorClient({ keyFilename: KEY_FILE });
-      
-      const maxPagesPerBatch = 5; // Vision API limit
-      const configuredMaxPages = Number(process.env.OCR_MAX_PAGES || totalPages);
-      const safeMaxPages = Number.isFinite(configuredMaxPages) && configuredMaxPages > 0
-        ? configuredMaxPages
-        : totalPages;
-      const pagesToProcess = Math.min(totalPages, safeMaxPages);
-      const pageTexts = [];
-
-      if (pagesToProcess < totalPages) {
-        console.warn(`[PDF Parser] OCR page limit active: processing ${pagesToProcess}/${totalPages} pages`);
+      const pdfData = await pdfParse(pdfBuffer);
+      const rawText = pdfData.text || '';
+      const pageBlocks = rawText.split(/\f/).filter(p => p.trim());
+      let combinedText;
+      if (pageBlocks.length > 1) {
+        combinedText = pageBlocks
+          .map((pg, idx) => `\n\n=== PAGE ${idx + 1} ===\n${pg}`)
+          .join('\n');
+      } else {
+        combinedText = `\n\n=== PAGE 1 ===\n${rawText}`;
       }
-      
-      console.log(`[PDF Parser] Processing ${pagesToProcess} pages in batches of ${maxPagesPerBatch}...`);
-      
-      // Process pages in batches of 5
-      for (let startPage = 1; startPage <= pagesToProcess; startPage += maxPagesPerBatch) {
-        const endPage = Math.min(startPage + maxPagesPerBatch - 1, pagesToProcess);
-        const batchPages = Array.from(
-          { length: endPage - startPage + 1 },
-          (_, i) => startPage + i
-        );
-        
-        console.log(`[PDF Parser] Processing pages ${startPage}-${endPage}...`);
-        
-        // Use batchAnnotateFiles for this batch
-        const request = {
-          requests: [
-            {
-              inputConfig: {
-                content: pdfBuffer,
-                mimeType: 'application/pdf',
-              },
-              features: [{ type: 'DOCUMENT_TEXT_DETECTION' }],
-              pages: batchPages,
-            },
-          ],
-        };
-        
-        try {
-          const [response] = await client.batchAnnotateFiles(request);
-          
-          if (!response.responses || response.responses.length === 0) {
-            console.warn(`[PDF Parser] No responses for batch ${startPage}-${endPage}`);
-            continue;
-          }
-          
-          // Extract text from each page in this batch
-          for (const fileResponse of response.responses) {
-            if (fileResponse.responses) {
-              for (const pageResponse of fileResponse.responses) {
-                const fullText = pageResponse.fullTextAnnotation;
-                if (fullText && fullText.text) {
-                  pageTexts.push(fullText.text);
-                  console.log(`[PDF Parser] Page ${pageTexts.length}: Extracted ${fullText.text.length} characters`);
-                } else {
-                  pageTexts.push('');
-                  console.log(`[PDF Parser] Page ${pageTexts.length + 1}: No text detected`);
-                }
-              }
-            }
-          }
-        } catch (batchError) {
-          console.error(`[PDF Parser] Error processing batch ${startPage}-${endPage}:`, batchError.message);
-          // Add empty strings for failed pages
-          for (let i = 0; i < batchPages.length; i++) {
-            pageTexts.push('');
-          }
-        }
-      }
-      
-      const combinedText = pageTexts
-        .map((text, idx) => `\n\n=== PAGE ${idx + 1} ===\n${text}`)
-        .join('\n');
-      
-      console.log(`[PDF Parser] âœ… Total extracted: ${combinedText.length} characters from ${pageTexts.length} pages`);
-      
-      if (combinedText.length < 100) {
-        throw new Error('Insufficient text extracted from PDF via Vision API');
-      }
-      
+      console.log(`[PDF Parser] pdf-parse extracted ${combinedText.length} characters`);
       return combinedText;
-      
-    } catch (error) {
-      console.error('[PDF Parser] Vision API OCR failed:', error.message);
-      
-      // Provide helpful error message
-      const errorMsg = `Failed to extract text from scanned PDF using Google Cloud Vision API.
-
-Error: ${error.message}
-
-Troubleshooting:
-1. Ensure GOOGLE_APPLICATION_CREDENTIALS is set in your .env file
-2. Verify the credentials file exists: ${process.env.GOOGLE_APPLICATION_CREDENTIALS || './vision-key.json'}
-3. Check that Vision API is enabled in your Google Cloud project: https://console.cloud.google.com/apis/library/vision.googleapis.com
-4. Ensure the service account has Vision API permissions
-
-Current credentials path: ${process.env.GOOGLE_APPLICATION_CREDENTIALS || 'NOT SET'}`;
-      
-      throw new Error(errorMsg);
+    } catch (err) {
+      console.warn('[PDF Parser] pdf-parse re-run failed:', err.message);
+      return '';
     }
   }
 

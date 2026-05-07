@@ -3,7 +3,7 @@ import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
 import { parseAnyFiles } from '../../middlewares/formData';
 import { evaluateSubjective, generateFromPdf, generateFromText, generatePaper, refineQuestion, generatePaperFromPdf, generateFromImage, createGuidance, listGuidance, updateGuidance, deleteGuidance, generatePaperFromImage, aiGenerateFromPDF, aiGenerateFromImage, aiGenerateFromText } from '../../controllers/aiController';
 import { upload } from '../../middlewares/upload';
-import { saveValidatedQuestionsCtrl, getClassQuestionsCtrl, getClassQuestionFiltersCtrl, updateClassQuestionCtrl, deleteClassQuestionCtrl, solveClassQuestionCtrl, solveBatchQuestionsCtrl } from '../../controllers/questionController';
+import { saveValidatedQuestionsCtrl, getClassQuestionsCtrl, getClassQuestionFiltersCtrl, updateClassQuestionCtrl, deleteClassQuestionCtrl, solveClassQuestionCtrl, solveBatchQuestionsCtrl, bulkUpdateMetaCtrl } from '../../controllers/questionController';
 import { aiLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
 
 const router = Router();
@@ -29,8 +29,9 @@ router.post('/save-questions', authMiddleware, requireRole('teacher', 'admin'), 
 router.get('/questions/class/:class', authMiddleware, requireRole('teacher', 'admin'), getClassQuestionsCtrl);
 router.get('/questions/class/:class/filters', authMiddleware, requireRole('teacher', 'admin'), getClassQuestionFiltersCtrl);
 
-// Update and delete class-wise questions (bulk-update MUST come before :id routes)
+// Update and delete class-wise questions (static routes MUST come before :id routes)
 router.put('/questions/class/:class/bulk-update', authMiddleware, requireRole('teacher', 'admin'), require('../../controllers/questionController').bulkUpdateClassQuestionsCtrl);
+router.put('/questions/class/:class/bulk-update-meta', authMiddleware, requireRole('teacher', 'admin'), bulkUpdateMetaCtrl);
 router.put('/questions/class/:class/:id', authMiddleware, requireRole('teacher', 'admin'), updateClassQuestionCtrl);
 router.delete('/questions/class/:class/:id', authMiddleware, requireRole('teacher', 'admin'), deleteClassQuestionCtrl);
 

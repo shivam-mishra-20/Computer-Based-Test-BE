@@ -104,80 +104,59 @@ export const getClassQuestionsCtrl = async (req: Request, res: Response) => {
     const { getClassQuestionModel } = await import('../models/ClassQuestion');
     const ClassQuestionModel = getClassQuestionModel(className as string);
 
-    // Build filter
-    const filter: any = { isActive: true };
+    // Build filter — all conditions go into $and to prevent $or/$and key collisions
+    // isActive: use $ne: false to also match docs where isActive is missing/undefined
+    const andClauses: any[] = [{ isActive: { $ne: false } }];
 
     // Text Search
     if (query) {
       const q = (query as string).trim();
       const regex = { $regex: q, $options: 'i' };
-      filter.$or = [
-        { text: regex },
-        { subject: regex },
-        { topic: regex },
-        { explanation: regex },
-        // Also search in nested tags as fallback
-        { 'tags.subject': regex },
-        { 'tags.topic': regex }
-      ];
+      andClauses.push({
+        $or: [
+          { text: regex },
+          { subject: regex },
+          { topic: regex },
+          { explanation: regex },
+        ]
+      });
     }
 
-    // Exact Filters
-    if (subject) filter.subject = subject;
-    if (chapter) filter.chapter = { $regex: chapter, $options: 'i' };
-    if (topic) filter.topic = { $regex: topic, $options: 'i' };
-    if (board) filter.board = { $regex: `^${String(board).trim()}$`, $options: 'i' };
-    if (section) filter.section = section;
-    if (difficulty) filter.difficulty = difficulty;
-    
-    // Type Filter
-    if (type) filter.type = type;
-
-    // Source Filter
-    if (source) {
-       // Handle both "manual" and null/undefined as "Manual" if specifically requested, 
-       // but typically source is a direct match. The frontend might send "manual".
-       // Our model stores "Manual", "Smart Import", etc. or "manual", "imported". 
-       // We'll trust the frontend sends the correct value, or use regex if needed.
-       // For exact matching:
-       filter.source = source;
-    }
+    // Case-insensitive string filters (prevents case mismatch between stored values and dropdown)
+    if (subject) andClauses.push({ subject: { $regex: `^${String(subject).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' } });
+    if (chapter) andClauses.push({ chapter: { $regex: String(chapter).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } });
+    if (topic) andClauses.push({ topic: { $regex: String(topic).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' } });
+    if (board) andClauses.push({ board: { $regex: `^${String(board).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' } });
+    if (section) andClauses.push({ section: String(section) });
+    if (difficulty) andClauses.push({ difficulty: { $regex: `^${String(difficulty).trim()}$`, $options: 'i' } });
+    if (type) andClauses.push({ type: { $regex: `^${String(type).trim()}$`, $options: 'i' } });
+    if (source) andClauses.push({ source: { $regex: `^${String(source).trim()}$`, $options: 'i' } });
 
     // Has Correct Answer Filter
     if (hasCorrectAnswer === 'yes') {
-      filter.$or = [
-         { 'options.isCorrect': true },
-         { correctAnswerText: { $exists: true, $ne: '' } }
-      ];
+      andClauses.push({ $or: [{ 'options.isCorrect': true }, { correctAnswerText: { $exists: true, $ne: '' } }] });
     } else if (hasCorrectAnswer === 'no') {
-      filter.$and = [
-         { 'options.isCorrect': { $ne: true } },
-         { $or: [{ correctAnswerText: { $exists: false } }, { correctAnswerText: '' }] }
-      ];
+      andClauses.push({ 'options.isCorrect': { $ne: true } });
+      andClauses.push({ $or: [{ correctAnswerText: { $exists: false } }, { correctAnswerText: '' }] });
     }
 
     // Has Image Filter
     if (hasImage === 'yes') {
-      filter.diagramUrl = { $exists: true, $ne: '' };
+      andClauses.push({ diagramUrl: { $exists: true, $ne: '' } });
     } else if (hasImage === 'no') {
-      filter.$or = [
-        { diagramUrl: { $exists: false } },
-        { diagramUrl: '' }
-      ];
+      andClauses.push({ $or: [{ diagramUrl: { $exists: false } }, { diagramUrl: '' }] });
     }
 
     // Has Explanation Filter
     if (hasExplanation === 'yes') {
-       filter.$or = [
-          { explanation: { $exists: true, $ne: '' } },
-          { solutionText: { $exists: true, $ne: '' } }
-       ];
+      andClauses.push({ $or: [{ explanation: { $exists: true, $ne: '' } }, { solutionText: { $exists: true, $ne: '' } }] });
     } else if (hasExplanation === 'no') {
-       filter.$and = [
-          { $or: [ { explanation: { $exists: false } }, { explanation: '' } ] },
-          { $or: [ { solutionText: { $exists: false } }, { solutionText: '' } ] }
-       ];
+      andClauses.push({ $or: [{ explanation: { $exists: false } }, { explanation: '' }] });
+      andClauses.push({ $or: [{ solutionText: { $exists: false } }, { solutionText: '' }] });
     }
+
+    const filter: any = andClauses.length === 1 ? andClauses[0] : { $and: andClauses };
+    console.log(`[Get Questions] class=${className} filter=${JSON.stringify(filter)} page=${page} limit=${limit}`);
 
     // Pagination Calculation
     const pageNum = Math.max(1, parseInt(page as string, 10));
@@ -233,17 +212,20 @@ export const getClassQuestionFiltersCtrl = async (req: Request, res: Response) =
     const { getClassQuestionModel } = await import('../models/ClassQuestion');
     const ClassQuestionModel = getClassQuestionModel(className as string);
 
-    // Base filter
-    const baseFilter: any = { isActive: true };
-    if (subject) baseFilter.subject = subject;
+    // Base filter — use $ne: false to match docs where isActive is missing too
+    const baseFilter: any = { isActive: { $ne: false } };
+    if (subject) baseFilter.subject = { $regex: `^${String(subject).trim()}$`, $options: 'i' };
 
-    // Get distinct values
-    const [subjects, chapters, topics, sections, boards] = await Promise.all([
-      ClassQuestionModel.distinct('subject', { isActive: true }),
+    // Get distinct values — all use $ne:false so missing-isActive docs are included
+    const activeFilter = { isActive: { $ne: false } };
+    const [subjects, chapters, topics, sections, boards, sources, types] = await Promise.all([
+      ClassQuestionModel.distinct('subject', activeFilter),
       ClassQuestionModel.distinct('chapter', baseFilter),
       ClassQuestionModel.distinct('topic', baseFilter),
       ClassQuestionModel.distinct('section', baseFilter),
-      ClassQuestionModel.distinct('board', { isActive: true })
+      ClassQuestionModel.distinct('board', activeFilter),
+      ClassQuestionModel.distinct('source', activeFilter),
+      ClassQuestionModel.distinct('type', activeFilter),
     ]);
 
     return res.status(200).json({
@@ -253,7 +235,9 @@ export const getClassQuestionFiltersCtrl = async (req: Request, res: Response) =
         chapters: chapters.filter(Boolean).sort(),
         topics: topics.filter(Boolean).sort(),
         sections: sections.filter(Boolean).sort(),
-        boards: boards.filter(Boolean).sort()
+        boards: boards.filter(Boolean).sort(),
+        sources: sources.filter(Boolean).sort(),
+        types: types.filter(Boolean).sort(),
       }
     });
   } catch (error) {
@@ -606,6 +590,42 @@ export const solveBatchQuestionsCtrl = async (req: Request, res: Response) => {
       message: 'Failed to solve questions',
       error: error instanceof Error ? error.message : 'Unknown error'
     });
+  }
+};
+
+/**
+ * Bulk update metadata for all questions matching a filter value
+ * PUT /api/ai/questions/class/:class/bulk-update-meta
+ * Body: { field, fromValue, toValue }
+ * e.g. { field: "subject", fromValue: "Unknown", toValue: "Mathematics" }
+ */
+export const bulkUpdateMetaCtrl = async (req: Request, res: Response) => {
+  try {
+    const { class: className } = req.params;
+    const { field, fromValue, toValue } = req.body;
+
+    const allowedFields = ['subject', 'topic', 'chapter', 'difficulty', 'board', 'source'];
+    if (!className) return res.status(400).json({ success: false, message: 'Class required' });
+    if (!allowedFields.includes(field)) return res.status(400).json({ success: false, message: `Field must be one of: ${allowedFields.join(', ')}` });
+    if (!toValue || !toValue.toString().trim()) return res.status(400).json({ success: false, message: 'toValue is required' });
+
+    const { getClassQuestionModel } = await import('../models/ClassQuestion');
+    const ClassQuestionModel = getClassQuestionModel(className as string);
+
+    const matchFilter: any = { isActive: true };
+    if (fromValue !== undefined && fromValue !== null && fromValue !== '') {
+      matchFilter[field] = fromValue;
+    } else {
+      // Match missing/empty/null
+      matchFilter.$or = [{ [field]: { $exists: false } }, { [field]: '' }, { [field]: null }];
+    }
+
+    const result = await ClassQuestionModel.updateMany(matchFilter, { $set: { [field]: toValue.toString().trim(), updatedAt: new Date() } });
+
+    return res.status(200).json({ success: true, data: { updated: result.modifiedCount } });
+  } catch (error) {
+    console.error('[Bulk Update Meta] Error:', error);
+    return res.status(500).json({ success: false, message: 'Failed to bulk update metadata', error: error instanceof Error ? error.message : 'Unknown error' });
   }
 };
 

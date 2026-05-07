@@ -60,7 +60,7 @@ const upload = multer({
  */
 router.post('/import-paper', authMiddleware, uploadLimiter, upload.single('questionPaper'), async (req, res) => {
   try {
-  const { subject, topic, ocrProvider = 'tesseract', mode, model = 'gemini-2.5-flash', class: className, board, chapter, section, marks } = req.body;
+  const { subject, topic, ocrProvider = 'pdf-parse', mode, class: className, board, chapter, section, marks } = req.body;
     const userId = (req as any).user.id;
     
     if (!req.file) {
@@ -70,7 +70,7 @@ router.post('/import-paper', authMiddleware, uploadLimiter, upload.single('quest
     // Validate file type
     const fileType = req.file.mimetype.startsWith('image/') ? 'image' : 'pdf';
     
-    // Start processing asynchronously with Vision API + Gemini pipeline
+    // Start processing asynchronously with pdf-parse + Ollama qwen3:8b pipeline
     const importPromise = QuestionImportService.importQuestionPaper(
       req.file.path,
       req.file.originalname,
@@ -84,7 +84,6 @@ router.post('/import-paper', authMiddleware, uploadLimiter, upload.single('quest
         chapter,
         section,
         marks: marks ? parseInt(marks) : undefined,
-        model
       }
     );
 

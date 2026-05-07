@@ -1,33 +1,18 @@
 /**
  * Enhanced PDF Question Extractor
- * 
- * Fixes:
+ *
  * - ✅ Extracts ALL questions (chunked processing)
  * - ✅ Deduplicates repeated questions
  * - ✅ Proper chapter/topic detection
  * - ✅ Figure extraction integrated
  * - ✅ Complete validation
+ * - ✅ Local Ollama qwen3:8b AI (no cloud AI dependency)
  */
 
 import pdfParse from 'pdf-parse';
-import { getVertexClient, getVisionClient as createVisionClient } from '../lib/googleClients';
 import { Types } from 'mongoose';
-import type { VertexAI } from '@google-cloud/vertexai';
 import crypto from 'crypto';
-
-// Initialize clients (lazy loading)
-let vertexAI: VertexAI | null = null;
-let visionClient: ReturnType<typeof createVisionClient> | null = null;
-
-function getVertexAI(): VertexAI {
-  if (!vertexAI) vertexAI = getVertexClient();
-  return vertexAI;
-}
-
-function getVisionClient(): ReturnType<typeof createVisionClient> {
-  if (!visionClient) visionClient = createVisionClient();
-  return visionClient;
-}
+import { extractQuestionsFromChunk, mapOllamaToExtracted } from './ollamaService';
 
 export interface ExtractedQuestion {
   text: string;
@@ -70,14 +55,13 @@ export class EnhancedPdfQuestionExtractor {
     class?: string;
     board?: string;
     chapter?: string;
-    model?: 'gemini-2.5-flash' | 'gemini-2.5-pro' | 'gemini-2.0-flash-thinking-exp-01-21';
   };
 
   constructor(
     pdfBuffer: Buffer,
     fileName: string,
     uploadedBy: Types.ObjectId,
-    options: typeof EnhancedPdfQuestionExtractor.prototype.options = {}
+    options: Omit<typeof EnhancedPdfQuestionExtractor.prototype.options, never> = {}
   ) {
     this.pdfBuffer = pdfBuffer;
     this.fileName = fileName;
@@ -133,83 +117,53 @@ export class EnhancedPdfQuestionExtractor {
   }
 
   /**
-   * Extract text using Google Cloud Vision API
-   * Handles both scanned and text-based PDFs
+   * Extract text from PDF using pdf-parse (local, no cloud dependency).
+   * Produces page-separated text compatible with the existing chunking pipeline.
    */
   private async extractTextWithVision(): Promise<{ text: string; pages: number }> {
     try {
-      console.log('[Enhanced PDF] Extracting text with Vision API...');
+      console.log('[Enhanced PDF] Extracting text with pdf-parse (local)...');
 
-      // Get page count
-      const pdfData = await pdfParse(this.pdfBuffer as any);
-      const numPages = pdfData.numpages || 1;
-
-      const client = getVisionClient();
-
-      // Process in batches of 5 pages (Vision API limit)
-      const maxPagesPerBatch = 5;
-      const pageTexts: string[] = [];
-
-      for (let startPage = 1; startPage <= numPages; startPage += maxPagesPerBatch) {
-        const endPage = Math.min(startPage + maxPagesPerBatch - 1, numPages);
-        const batchPages = Array.from(
-          { length: endPage - startPage + 1 },
-          (_, i) => startPage + i
-        );
-
-        console.log(`[Enhanced PDF] Processing pages ${startPage}-${endPage}...`);
-
-        const request = {
-          requests: [
-            {
-              inputConfig: {
-                content: this.pdfBuffer,
-                mimeType: 'application/pdf',
-              },
-              features: [{ type: 'DOCUMENT_TEXT_DETECTION' as const }],
-              pages: batchPages,
-            },
-          ],
-        };
-
-        try {
-          const [response] = await client.batchAnnotateFiles(request);
-
-          if (response.responses && response.responses.length > 0) {
-            for (const fileResponse of response.responses) {
-              if (fileResponse.responses) {
-                for (const pageResponse of fileResponse.responses) {
-                  const fullText = pageResponse.fullTextAnnotation;
-                  if (fullText && fullText.text) {
-                    pageTexts.push(fullText.text);
-                  } else {
-                    pageTexts.push('');
-                  }
-                }
+      const pdfData = await pdfParse(this.pdfBuffer as any, {
+        // Preserve page breaks
+        pagerender: (pageData: any) => {
+          return pageData.getTextContent().then((textContent: any) => {
+            let text = '';
+            let lastY: number | null = null;
+            for (const item of textContent.items) {
+              if (lastY !== null && Math.abs(item.transform[5] - lastY) > 5) {
+                text += '\n';
               }
+              text += item.str;
+              lastY = item.transform[5];
             }
-          }
-        } catch (batchError) {
-          console.error(`[Enhanced PDF] Error processing batch ${startPage}-${endPage}:`, batchError);
-          // Add empty strings for failed pages
-          for (let i = 0; i < batchPages.length; i++) {
-            pageTexts.push('');
-          }
-        }
+            return text;
+          });
+        },
+      });
+
+      const numPages = pdfData.numpages || 1;
+      // pdf-parse returns all text concatenated; split heuristically by page markers or use as single block
+      const rawText = pdfData.text || '';
+
+      // Try to split by form-feed (common page separator in pdf-parse output)
+      const pageBlocks = rawText.split(/\f/).filter((p: string) => p.trim());
+
+      let combinedText: string;
+      if (pageBlocks.length > 1) {
+        combinedText = pageBlocks
+          .map((pg: string, idx: number) => `\n\n=== PAGE ${idx + 1} ===\n${pg}`)
+          .join('\n');
+      } else {
+        // No form-feed; treat as single chunk
+        combinedText = `\n\n=== PAGE 1 ===\n${rawText}`;
       }
 
-      const combinedText = pageTexts
-        .map((text, idx) => `\n\n=== PAGE ${idx + 1} ===\n${text}`)
-        .join('\n');
+      console.log(`[Enhanced PDF] ✓ Extracted ${combinedText.length} chars from ${numPages} pages`);
 
-      console.log(`[Enhanced PDF] ✓ Extracted ${combinedText.length} chars from ${pageTexts.length} pages`);
-
-      return {
-        text: combinedText,
-        pages: numPages
-      };
+      return { text: combinedText, pages: numPages };
     } catch (error) {
-      console.error('[Enhanced PDF] Vision API failed:', error);
+      console.error('[Enhanced PDF] pdf-parse failed:', error);
       throw new Error(`Text extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   }
@@ -284,244 +238,93 @@ export class EnhancedPdfQuestionExtractor {
   }
 
   /**
-   * Extract questions using chunked processing to handle large PDFs
-   * This prevents token limit truncation
+   * Extract questions using chunked processing (concurrency=1, ~1200 char chunks).
+   * Uses local Ollama qwen3:8b - no cloud AI calls.
    */
   private async extractQuestionsChunked(
     text: string,
     structure: DocumentStructure
   ): Promise<ExtractedQuestion[]> {
-    console.log('[Enhanced PDF] Extracting questions with chunking...');
+    console.log('[Enhanced PDF] Extracting questions with Ollama (local)...');
 
     const allQuestions: ExtractedQuestion[] = [];
-    
-    // Split text into chunks by pages (ensure each chunk is processable)
-    const pageChunks = text.split(/=== PAGE \d+ ===/);
-    const chunkSize = 10; // Process 10 pages at a time
+    const CHUNK_CHARS = 1200;
 
-    for (let i = 0; i < pageChunks.length; i += chunkSize) {
-      const chunk = pageChunks.slice(i, i + chunkSize).join('\n');
-      const startPage = i + 1;
-      const endPage = Math.min(i + chunkSize, pageChunks.length);
+    // Split by page markers first, then further chunk by char limit
+    const pageBlocks = text.split(/=== PAGE \d+ ===/).filter(b => b.trim());
 
-      console.log(`[Enhanced PDF] Processing chunk: pages ${startPage}-${endPage}...`);
+    // Accumulate pages into ~1200-char chunks
+    const chunks: Array<{ text: string; startPage: number; chapter: string }> = [];
+    let buffer = '';
+    let bufferStartPage = 1;
 
-      // Determine current chapter based on page number
-      const currentChapter = structure.chapters.find(
-        ch => ch.startPage <= startPage
-      ) || structure.chapters[structure.chapters.length - 1];
+    for (let i = 0; i < pageBlocks.length; i++) {
+      const pageText = pageBlocks[i].trim();
+      const pageNum = i + 1;
 
-      // Extract questions from this chunk
-      const chunkQuestions = await this.extractQuestionsFromChunk(
-        chunk,
-        {
-          subject: structure.subject,
-          chapter: currentChapter?.name,
-          startPage
-        }
+      if (buffer.length + pageText.length > CHUNK_CHARS && buffer.length > 0) {
+        const chapter = this.getChapterForPage(bufferStartPage, structure);
+        chunks.push({ text: buffer, startPage: bufferStartPage, chapter });
+        buffer = pageText;
+        bufferStartPage = pageNum;
+      } else {
+        buffer += (buffer ? '\n' : '') + pageText;
+      }
+    }
+    if (buffer.trim()) {
+      const chapter = this.getChapterForPage(bufferStartPage, structure);
+      chunks.push({ text: buffer, startPage: bufferStartPage, chapter });
+    }
+
+    console.log(`[Enhanced PDF] Processing ${chunks.length} chunks sequentially...`);
+
+    // concurrency = 1: process sequentially for VRAM stability
+    let questionIndex = 0;
+    for (const chunk of chunks) {
+      console.log(`[Enhanced PDF] Chunk page ${chunk.startPage}, ${chunk.text.length} chars...`);
+
+      const ollamaQuestions = await extractQuestionsFromChunk(chunk.text, {
+        subject: structure.subject,
+        chapter: chunk.chapter,
+        class: structure.className,
+        board: structure.board,
+        startPage: chunk.startPage,
+      });
+
+      const mapped = ollamaQuestions.map((q, idx) =>
+        mapOllamaToExtracted(q, questionIndex + idx, chunk.startPage)
       );
+      questionIndex += ollamaQuestions.length;
 
-      console.log(`[Enhanced PDF] Chunk extracted ${chunkQuestions.length} questions`);
-      allQuestions.push(...chunkQuestions);
+      // Convert to ExtractedQuestion shape
+      const extracted: ExtractedQuestion[] = mapped.map(m => ({
+        text: m.text,
+        type: m.type,
+        options: m.options,
+        correctAnswerText: m.correctAnswerText,
+        questionNumber: m.questionNumber,
+        subject: m.subject,
+        topic: m.topic,
+        chapter: m.chapter,
+        difficulty: m.difficulty,
+        confidence: m.confidence,
+        needsReview: m.needsReview,
+        pageNumber: m.pageNumber,
+      }));
+
+      console.log(`[Enhanced PDF] Chunk yielded ${extracted.length} questions`);
+      allQuestions.push(...extracted);
     }
 
     return allQuestions;
   }
 
-  /**
-   * Extract questions from a single chunk using Gemini
-   */
-  private async extractQuestionsFromChunk(
-    chunk: string,
-    context: {
-      subject?: string;
-      chapter?: string;
-      startPage: number;
-    }
-  ): Promise<ExtractedQuestion[]> {
-    const modelName = this.options.model || 'gemini-2.0-flash-thinking-exp-01-21';
-    
-    const vertexAI = getVertexAI();
-    const generativeModel = vertexAI.getGenerativeModel({
-      model: modelName,
-      generationConfig: {
-        temperature: 0.0,
-        topP: 0.95,
-        topK: 40,
-        maxOutputTokens: 16384,
-      },
-    });
-
-    const prompt = `You are an expert question extraction system.
-
-Extract ALL questions from this text chunk. DO NOT skip any questions.
-
-CRITICAL RULES:
-1. Extract EVERY question - if you see 10 questions, output exactly 10 blocks
-2. Use exact original wording - NO paraphrasing or grammar fixes
-3. For sub-questions (3a, 3b, 4i, 4ii), create SEPARATE blocks
-4. Add LaTeX around math using $...$
-5. DO NOT truncate - complete the entire extraction
-
-OUTPUT FORMAT (repeat for each question):
-------------------------------------
-QUESTION_NUMBER: <number or number+letter like 3a, 5ii>
-QUESTION_TEXT: <exact text with LaTeX>
-QUESTION_TYPE: mcq | short | long | integer | truefalse | fill | assertionreason
-
-OPTION_A: <text or EMPTY>
-OPTION_B: <text or EMPTY>
-OPTION_C: <text or EMPTY>
-OPTION_D: <text or EMPTY>
-
-CORRECT_OPTION: A | B | C | D | UNKNOWN
-CORRECT_ANSWER_TEXT: <answer or EMPTY>
-
-SUBJECT: ${context.subject || 'Unknown'}
-CHAPTER: ${context.chapter || 'General'}
-DIFFICULTY: easy | medium | hard
-
-CONFIDENCE: <0.0-1.0>
-NEEDS_REVIEW: true | false
-------------------------------------
-
-QUESTION TYPE RULES:
-- mcq: 4-5 options labeled (a)/(b)/(c)/(d) or A/B/C/D
-- truefalse: "True or False" or only 2 options
-- fill: Has blanks "_____" or "fill in the blank"
-- short: Brief answer (2-5 marks)
-- long: Detailed explanation (5+ marks)
-- integer: Numeric answer only
-- assertionreason: Has "Assertion:" and "Reason:"
-
-LATEX RULES:
-- Inline math: $x^2 + 5$
-- Display math: $$\int_0^1 x^2 dx$$
-- Fractions: $\frac{a}{b}$
-- Roots: $\sqrt{x}$
-- Greek: $\alpha$, $\beta$, $\pi$
-- Convert Unicode: ² → $^2$, × → $\times$
-
-TEXT TO PROCESS:
-<<<BEGIN>>>
-${chunk}
-<<<END>>>
-
-Extract ALL questions now:`;
-
-    try {
-      const result = await generativeModel.generateContent({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      });
-
-      const responseText = result.response.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      
-      // Parse response
-      const questions = this.parseTextBlockResponse(responseText, context);
-      return questions;
-    } catch (error) {
-      console.error('[Enhanced PDF] Chunk extraction failed:', error);
-      return [];
-    }
-  }
-
-  /**
-   * Parse text block format from Gemini
-   */
-  private parseTextBlockResponse(
-    responseText: string,
-    context: { subject?: string; chapter?: string; startPage: number }
-  ): ExtractedQuestion[] {
-    const questions: ExtractedQuestion[] = [];
-
-    // Split by separator
-    let blocks = responseText.split(/\n\s*-{4,}\s*\n/).filter(b => b.trim());
-
-    if (blocks.length <= 1) {
-      blocks = responseText.split(/(?=QUESTION_NUMBER:)/).filter(b => b.includes('QUESTION_TEXT'));
-    }
-
-    for (const block of blocks) {
-      try {
-        const lines = block.split('\n').map(l => l.trim()).filter(l => l);
-
-        const getValue = (key: string): string => {
-          const line = lines.find(l => l.toUpperCase().startsWith(`${key.toUpperCase()}:`));
-          if (!line) return '';
-          const colonIndex = line.indexOf(':');
-          return line.substring(colonIndex + 1).trim();
-        };
-
-        const questionNumber = getValue('QUESTION_NUMBER');
-        const questionText = getValue('QUESTION_TEXT');
-        const questionType = getValue('QUESTION_TYPE').toLowerCase() as ExtractedQuestion['type'];
-
-        if (!questionText) continue;
-
-        const optionA = getValue('OPTION_A');
-        const optionB = getValue('OPTION_B');
-        const optionC = getValue('OPTION_C');
-        const optionD = getValue('OPTION_D');
-
-        const correctOption = getValue('CORRECT_OPTION').toUpperCase();
-        const correctAnswerText = getValue('CORRECT_ANSWER_TEXT');
-
-        const subject = getValue('SUBJECT') || context.subject || 'Unknown';
-        const chapter = getValue('CHAPTER') || context.chapter || 'General';
-        const difficultyStr = (getValue('DIFFICULTY') || 'medium').toLowerCase();
-        const difficulty = (['easy', 'medium', 'hard'].includes(difficultyStr) ? difficultyStr : 'medium') as ExtractedQuestion['difficulty'];
-
-        const confidenceStr = getValue('CONFIDENCE');
-        const confidence = confidenceStr ? parseFloat(confidenceStr) : 0.85;
-
-        const needsReviewStr = getValue('NEEDS_REVIEW').toLowerCase();
-        const needsReview = needsReviewStr === 'true';
-
-        // Build options for MCQ
-        let questionOptions: ExtractedQuestion['options'] = undefined;
-        if (questionType === 'mcq' || questionType === 'truefalse') {
-          const opts: Array<{ text: string; isCorrect: boolean }> = [];
-
-          if (optionA && optionA !== 'EMPTY') {
-            opts.push({ text: optionA, isCorrect: correctOption === 'A' });
-          }
-          if (optionB && optionB !== 'EMPTY') {
-            opts.push({ text: optionB, isCorrect: correctOption === 'B' });
-          }
-          if (optionC && optionC !== 'EMPTY') {
-            opts.push({ text: optionC, isCorrect: correctOption === 'C' });
-          }
-          if (optionD && optionD !== 'EMPTY') {
-            opts.push({ text: optionD, isCorrect: correctOption === 'D' });
-          }
-
-          if (opts.length > 0) {
-            questionOptions = opts;
-          }
-        }
-
-        const question: ExtractedQuestion = {
-          text: questionText,
-          type: questionType || 'short',
-          options: questionOptions,
-          correctAnswerText: (correctAnswerText && correctAnswerText !== 'EMPTY') ? correctAnswerText : undefined,
-          questionNumber: questionNumber || `${questions.length + 1}`,
-          subject,
-          chapter,
-          topic: chapter, // Can be refined later
-          difficulty,
-          confidence: Math.min(Math.max(confidence, 0), 1),
-          needsReview,
-          pageNumber: context.startPage
-        };
-
-        questions.push(question);
-      } catch (parseError) {
-        console.warn('[Enhanced PDF] Failed to parse block:', parseError);
-      }
-    }
-
-    return questions;
+  private getChapterForPage(page: number, structure: DocumentStructure): string {
+    const chapter = structure.chapters
+      .slice()
+      .reverse()
+      .find(ch => ch.startPage <= page);
+    return chapter?.name || structure.chapters[0]?.name || 'General';
   }
 
   /**

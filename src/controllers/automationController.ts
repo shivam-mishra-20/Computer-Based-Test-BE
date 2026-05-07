@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import jwt from 'jsonwebtoken';
 import { saveBatchValidatedQuestions, EnhancedQuestionData } from '../services/questionValidationService';
 import { Types, Model } from 'mongoose';
 import mongoose from 'mongoose';
@@ -7,6 +8,21 @@ import { ChildProcess } from 'child_process';
 
 // Track the current running process
 let currentProcess: ChildProcess | null = null;
+
+// In-memory log ring buffer (last 500 lines) + SSE subscribers
+const MAX_LOG_LINES = 500;
+const logBuffer: string[] = [];
+const logSubscribers = new Set<Response>();
+
+function pushLog(line: string) {
+  const ts = new Date().toLocaleTimeString();
+  const entry = `[${ts}] ${line}`;
+  if (logBuffer.length >= MAX_LOG_LINES) logBuffer.shift();
+  logBuffer.push(entry);
+  for (const res of logSubscribers) {
+    try { res.write(`data: ${JSON.stringify(entry)}\n\n`); } catch { logSubscribers.delete(res); }
+  }
+}
 
 // Processing Stats Schema
 interface IProcessingStats {
@@ -381,7 +397,7 @@ export const updateProcessingRecord = async (req: Request, res: Response) => {
  */
 export const triggerProcessing = async (req: Request, res: Response) => {
   try {
-    const { folder = 'class_12', selectedFiles } = req.body;
+    const { folder = 'class_12', selectedFiles, aiProvider = 'ollama' } = req.body;
 
     const normalizedSelectedFiles = Array.isArray(selectedFiles)
       ? Array.from(
@@ -457,23 +473,47 @@ export const triggerProcessing = async (req: Request, res: Response) => {
       console.log(`[Manual Trigger] Selected files (${normalizedSelectedFiles.length}): ${normalizedSelectedFiles.join(', ')}`);
     }
 
-    // Spawn the automation runner script
+    // Clear old logs when a new run starts
+    logBuffer.length = 0;
+    pushLog(`Starting automation for folder: ${folder}`);
+    if (normalizedSelectedFiles.length > 0) {
+      pushLog(`Selected files: ${normalizedSelectedFiles.join(', ')}`);
+    }
+    if (aiProvider === 'gemini') {
+      const geminiModel = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+      pushLog(`AI: Google Gemini ${geminiModel} (cloud · JSON mode · 1200-char chunks)`);
+    } else {
+      pushLog('AI: Ollama Qwen3:8b (local · JSON mode · 1200-char chunks)');
+    }
+
+    // Spawn the automation runner script with piped stdio for real-time log capture
     const child = spawn('node', [scriptPath], {
       env: {
         ...process.env,
         TARGET_FOLDER: folder,
         SELECTED_FILES: JSON.stringify(normalizedSelectedFiles),
         EPUB_BASE_PATH: process.cwd(),
-        BACKEND_API_KEY: token, // Pass the admin token
+        BACKEND_API_KEY: token,
         BACKEND_API_URL: process.env.BACKEND_URL || 'http://localhost:5000',
-        // Resolve to absolute path so child processes can locate the key file regardless of cwd
-        GOOGLE_APPLICATION_CREDENTIALS: path.resolve(
-          process.env.GOOGLE_APPLICATION_CREDENTIALS || './vision-key.json'
-        ),
+        OLLAMA_HOST: process.env.OLLAMA_HOST || 'http://localhost:11434',
+        AI_PROVIDER: aiProvider === 'gemini' ? 'gemini' : 'ollama',
+        GEMINI_API_KEY: process.env.GEMINI_API_KEY || '',
+        GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
       },
       detached: false,
-      stdio: 'inherit' // Show logs in terminal
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
+
+    // Stream stdout/stderr into logBuffer + SSE
+    const forwardLine = (data: Buffer) => {
+      const lines = data.toString().split('\n');
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed) { console.log(trimmed); pushLog(trimmed); }
+      }
+    };
+    child.stdout?.on('data', forwardLine);
+    child.stderr?.on('data', forwardLine);
 
     // Track the current process globally
     currentProcess = child;
@@ -662,6 +702,44 @@ export const getAvailableFolders = async (req: Request, res: Response) => {
   }
 };
 
-// Schedule management removed as it's manual only now
+/**
+ * GET /api/automation/logs — SSE stream of real-time automation logs.
+ * Sends the last N buffered lines on connect, then streams new lines live.
+ */
+export const streamLogs = (req: Request, res: Response) => {
+  // EventSource can't set headers — accept token as query param
+  const token = (req.query.token as string) ||
+    (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  try {
+    jwt.verify(token, process.env.JWT_SECRET as string);
+  } catch {
+    res.status(401).end('Unauthorized');
+    return;
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  // Send buffered history
+  for (const line of logBuffer) {
+    res.write(`data: ${JSON.stringify(line)}\n\n`);
+  }
+
+  // Register for new lines
+  logSubscribers.add(res);
+
+  // Heartbeat every 15s to keep connection alive
+  const heartbeat = setInterval(() => {
+    try { res.write(': ping\n\n'); } catch { clearInterval(heartbeat); }
+  }, 15000);
+
+  req.on('close', () => {
+    logSubscribers.delete(res);
+    clearInterval(heartbeat);
+  });
+};
 
 export { AutomationStatus, ProcessingStats };
