@@ -19,9 +19,29 @@ export interface EnhancedQuestionData {
   reasonIsTrue?: boolean;
   reasonExplainsAssertion?: boolean;
   
-  // Diagram/media
+  // Diagram/media — legacy flat fields
   diagramUrl?: string;
   diagramAlt?: string;
+
+  // Rich diagram (vector SVG or raster)
+  diagram?: {
+    url?: string;
+    svgInline?: string;
+    alt?: string;
+    kind?: 'image' | 'vector';
+    width?: number;
+    height?: number;
+    pageNumber?: number;
+  };
+
+  // Structured table
+  tableData?: {
+    headers: string[];
+    rows: string[][];
+    html: string;
+    caption?: string;
+    pageNumber?: number;
+  };
   
   // Enhanced metadata for paper creation
   class?: string;          // e.g., "Class 10", "Class 11"
@@ -469,6 +489,8 @@ export async function saveValidatedQuestion(
     reasonExplainsAssertion: sanitized.reasonExplainsAssertion,
     diagramUrl: sanitized.diagramUrl,
     diagramAlt: sanitized.diagramAlt,
+    diagram:    sanitized.diagram,
+    tableData:  sanitized.tableData,
     explanation: sanitized.explanation || sanitized.solutionText,
     createdBy: sanitized.createdBy!,
     isActive: sanitized.isActive !== false,

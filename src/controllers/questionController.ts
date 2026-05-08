@@ -43,6 +43,8 @@ export const saveValidatedQuestionsCtrl = async (req: Request, res: Response) =>
       explanation: q.explanation || q.solutionText,
       diagramUrl: q.diagramUrl,
       diagramAlt: q.diagramAlt,
+      diagram:    q.diagram,
+      tableData:  q.tableData,
     }));
 
     // Save with validation

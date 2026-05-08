@@ -31,9 +31,29 @@ export interface IClassQuestion extends Document {
   reasonIsTrue?: boolean;
   reasonExplainsAssertion?: boolean;
 
-  // Media
+  // Media — legacy flat fields (kept for backward compat)
   diagramUrl?: string;
   diagramAlt?: string;
+
+  // Rich diagram (vector SVG or raster URL)
+  diagram?: {
+    url?: string;        // Firebase/cloud URL for raster PNG/JPEG
+    svgInline?: string;  // Inline SVG string for vector diagrams
+    alt?: string;
+    kind?: 'image' | 'vector';
+    width?: number;
+    height?: number;
+    pageNumber?: number;
+  };
+
+  // Structured table data
+  tableData?: {
+    headers: string[];
+    rows: string[][];
+    html: string;
+    caption?: string;
+    pageNumber?: number;
+  };
 
   // Flat metadata (no nested tags/metadata)
   subject: string;      // e.g., Physics, Mathematics
@@ -80,6 +100,12 @@ export const classQuestionSchema = new Schema<IClassQuestion>(
 
     diagramUrl: { type: String },
     diagramAlt: { type: String },
+
+    // Rich diagram — stored as Mixed to support both vector SVG and raster URL
+    diagram: { type: mongoose.Schema.Types.Mixed, default: undefined },
+
+    // Structured table — Mixed supports 2D rows array natively
+    tableData: { type: mongoose.Schema.Types.Mixed, default: undefined },
 
     subject: { type: String, index: true, required: true },
     board: { type: String, index: true },

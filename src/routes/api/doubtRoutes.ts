@@ -47,16 +47,25 @@ router.delete('/files/:fileId', authMiddleware, deleteDoubtFile);
 // POST - Save Firebase Storage file metadata
 router.post('/save-file-metadata', authMiddleware, uploadLimiter, async (req: AuthRequest, res: Response) => {
   try {
-    const { url, fileName, fileType, fileSize, doubtId, storagePath } = req.body;
+    const { fileName, fileType, fileSize, doubtId, storagePath } = req.body;
 
-    if (!url || !fileName || !fileType || !doubtId || !storagePath) {
+    if (!fileName || !fileType || !doubtId || !storagePath) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
+    // Make the file publicly accessible so the public URL works
+    try {
+      await bucket.file(storagePath).makePublic();
+    } catch (err) {
+      console.warn('[save-file-metadata] Could not make file public, will use signed URL:', err);
+    }
+
+    const publicUrl = `https://storage.googleapis.com/${bucket.name}/${storagePath}`;
+
     // Save metadata to MongoDB
     const fileMetadata = new FileMetadata({
-      url, // This might be the signed URL or a public URL
-      storagePath, 
+      url: publicUrl,
+      storagePath,
       fileName,
       fileType,
       fileSize: fileSize || 0,
@@ -70,7 +79,7 @@ router.post('/save-file-metadata', authMiddleware, uploadLimiter, async (req: Au
       success: true,
       file: {
         id: fileMetadata._id,
-        url,
+        url: publicUrl,
         fileName,
         fileType,
         fileSize: fileSize || 0,
@@ -699,6 +708,98 @@ router.delete('/:id/permanent', authMiddleware, async (req: AuthRequest, res: Re
   } catch (error) {
     console.error('Error permanently deleting doubt:', error);
     return res.status(500).json({ error: 'Failed to permanently delete doubt chat' });
+  }
+});
+
+// DELETE - Delete a specific message (sender can delete their own messages)
+router.delete('/:doubtId/messages/:messageId', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    const { doubtId, messageId } = req.params;
+    const userId = (req.user?._id || req.user?.id)?.toString();
+
+    const doubt = await Doubt.findById(doubtId);
+    if (!doubt) {
+      return res.status(404).json({ error: 'Doubt not found' });
+    }
+
+    const messageIndex = doubt.messages.findIndex(
+      (m) => m._id?.toString() === messageId
+    );
+    if (messageIndex === -1) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+
+    const message = doubt.messages[messageIndex];
+
+    // Only sender or admin can delete
+    if (message.sender.toString() !== userId && req.user?.role !== 'admin') {
+      return res.status(403).json({ error: 'You can only delete your own messages' });
+    }
+
+    // Collect attachment paths for cleanup
+    const storagePaths: string[] = [];
+    if (message.attachments?.length) {
+      for (const att of message.attachments) {
+        if (att.storagePath) storagePaths.push(att.storagePath);
+      }
+    }
+
+    // Remove the message
+    doubt.messages.splice(messageIndex, 1);
+    await doubt.save();
+
+    // Best-effort storage cleanup
+    await Promise.all(
+      storagePaths.map(async (path) => {
+        try {
+          await bucket.file(path).delete({ ignoreNotFound: true });
+        } catch (err) {
+          console.error('[DeleteMessage] Failed to delete storage object:', path, err);
+        }
+      })
+    );
+    if (storagePaths.length > 0) {
+      await FileMetadata.deleteMany({
+        relatedDoubtId: doubt._id,
+        storagePath: { $in: storagePaths },
+      });
+    }
+
+    // Populate and emit updated doubt
+    const populated = await Doubt.findById(doubt._id)
+      .populate('student', 'name email classLevel batch profileImage')
+      .populate('teacher', 'name email profileImage')
+      .populate('messages.sender', 'name email role profileImage')
+      .lean();
+
+    // Fix attachment URLs
+    if (populated && (populated as any).messages) {
+      for (const msg of (populated as any).messages) {
+        if (msg.attachments?.length) {
+          for (const att of msg.attachments) {
+            if (att.storagePath && (!att.url || !att.url.startsWith('https://storage.googleapis.com'))) {
+              att.url = `https://storage.googleapis.com/${bucket.name}/${att.storagePath}`;
+            }
+          }
+        }
+      }
+    }
+
+    const studentId = doubt.student.toString();
+    const teacherIdStr = doubt.teacher ? doubt.teacher.toString() : null;
+
+    SocketService.emitDoubtUpdate(
+      doubt._id.toString(),
+      studentId,
+      teacherIdStr,
+      'new_message',
+      populated
+    );
+
+    return res.json({ success: true, message: 'Message deleted' });
+  } catch (error) {
+    console.error('Error deleting message:', error);
+    return res.status(500).json({ error: 'Failed to delete message' });
   }
 });
 

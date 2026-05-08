@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import mongoose from 'mongoose';
 import TestResult, { ITestResult, IStudentResult } from '../models/TestResult';
 import User from '../models/User';
 
@@ -37,19 +38,46 @@ export const createTest = async (req: Request, res: Response) => {
 export const getAllTests = async (req: Request, res: Response) => {
   try {
     const authUser = (req as any).user;
-    const { class: className, batch, subject } = req.query;
+    const { class: className, batch, subject, search } = req.query;
 
     const query: any = {};
     if (authUser?.role === 'teacher') query.createdBy = authUser.id;
     if (className) query.class = className;
     if (batch) query.batch = batch;
     if (subject) query.subject = subject;
+    if (search) query.testName = { $regex: search, $options: 'i' };
 
     const tests = await TestResult.find(query)
       .sort({ testDate: -1, createdAt: -1 })
       .lean();
 
-    res.json(tests);
+    // Enrich with creator name — convert string IDs to ObjectId for the lookup
+    const creatorIdStrings = [...new Set(tests.map((t: any) => t.createdBy).filter(Boolean))];
+    const creatorObjectIds = creatorIdStrings
+      .filter(id => mongoose.Types.ObjectId.isValid(id))
+      .map(id => new mongoose.Types.ObjectId(id));
+    const creators = await User.find({ _id: { $in: creatorObjectIds } }, 'name role').lean();
+    const creatorMap: Record<string, { name: string; role: string }> = {};
+    creators.forEach((c: any) => { creatorMap[String(c._id)] = { name: c.name, role: c.role }; });
+
+    const enriched = tests.map((t: any) => ({
+      ...t,
+      createdByName: creatorMap[t.createdBy]?.name || 'Unknown',
+      createdByRole: creatorMap[t.createdBy]?.role || 'teacher',
+      studentCount: Array.isArray(t.studentResults) ? t.studentResults.length : 0,
+      classAverage: (() => {
+        const results = t.studentResults || [];
+        if (!results.length || !t.maxMarks) return 0;
+        const avg = results.reduce((s: number, r: any) => s + (r.marksObtained || 0), 0) / results.length;
+        return Math.round((avg / t.maxMarks) * 100);
+      })(),
+      passCount: (() => {
+        const results = t.studentResults || [];
+        return results.filter((r: any) => (r.percentage || 0) >= 40).length;
+      })(),
+    }));
+
+    res.json(enriched);
   } catch (error: any) {
     console.error('[TestResults] Get all error:', error);
     res.status(500).json({ message: 'Failed to fetch tests', error: error.message });

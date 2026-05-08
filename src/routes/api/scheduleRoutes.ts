@@ -100,6 +100,15 @@ const DAYS_OF_WEEK = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'F
 // UTILITY FUNCTIONS
 // ========================
 
+function to12HourLabelBE(hhmm: string): string {
+  const [hStr, mStr] = hhmm.split(':');
+  const h = Number(hStr);
+  const m = Number(mStr);
+  const period = h >= 12 ? 'PM' : 'AM';
+  const h12 = h % 12 === 0 ? 12 : h % 12;
+  return `${h12}:${String(m).padStart(2, '0')} ${period}`;
+}
+
 function parseTimeToMinutes(time: string): number {
   const [hours, minutes] = time.split(':').map(Number);
   return hours * 60 + minutes;
@@ -743,46 +752,88 @@ router.put('/timeslots', authMiddleware, async (req: Request, res: Response) => 
 // Get timetable grid for a class/batch
 router.get('/timetable', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // Always refresh slots first so grid keys and response are consistent
+    await loadTimeSlots();
+
     const { classLevel, batch, dayOfWeek } = req.query;
-    
+
+    // Accept both "11" and "Class 11" formats so nothing is missed
+    const rawClass = classLevel as string | undefined;
+    const classVariants = rawClass
+      ? Array.from(new Set([
+          rawClass.trim(),
+          `Class ${rawClass.trim().replace(/^Class\s*/i, '')}`,
+          rawClass.trim().replace(/^Class\s*/i, ''),
+        ])).filter(Boolean)
+      : [];
+
     const query: any = { scheduleType: 'regular', isActive: true };
-    if (classLevel) query.classLevel = classLevel;
-    applyBatchFilter(query, batch);
+    if (classVariants.length > 0) query.classLevel = { $in: classVariants };
     if (dayOfWeek !== undefined) query.dayOfWeek = Number(dayOfWeek);
-    
+
+    // Batch filter: include exact batch + "All Batches" / no-batch schedules
+    if (batch) {
+      const nb = normalizeBatchName(batch as string);
+      if (nb) {
+        query.$or = [
+          { batch: nb },
+          { batches: nb },
+          { batch: { $in: ['All Batches', 'All', '', null] } },
+          { batches: { $in: ['All Batches', 'All'] } },
+          { batches: { $size: 0 } },
+          { batch: { $exists: false } },
+        ];
+      }
+    }
+
     const schedules = await Schedule.find(query)
       .populate('teacherId', 'name')
       .sort({ dayOfWeek: 1, startTimeSlot: 1 });
-    
-    // Build grid structure
+
+    console.log(`[Timetable] query classVariants=${JSON.stringify(classVariants)} batch=${batch} → ${schedules.length} schedules`);
+
+    // Build grid: initialise all day×slot cells to null, then fill with schedule data
     const grid: any = {};
-    
-    DAYS_OF_WEEK.forEach((day, index) => {
+    DAYS_OF_WEEK.forEach((_day, index) => {
       grid[index] = {};
-      TIME_SLOTS.forEach(slot => {
-        grid[index][slot.start] = null;
-      });
+      TIME_SLOTS.forEach(slot => { grid[index][slot.start] = null; });
     });
-    
+
     schedules.forEach(schedule => {
-      if (schedule.dayOfWeek !== undefined) {
-        grid[schedule.dayOfWeek][schedule.startTimeSlot] = {
-          _id: schedule._id,
-          title: schedule.title,
-          subject: schedule.subject,
-          roomNumber: schedule.roomNumber,
-          teacherName: schedule.teacherName || (schedule.teacherId as any)?.name,
-          batch: normalizeBatchName((schedule as any).batch),
-          batches: getScheduleBatches(schedule),
-          classLevel: schedule.classLevel
-        };
-      }
+      if (schedule.dayOfWeek === undefined) return;
+      // Ensure the cell exists even if the slot wasn't in TIME_SLOTS
+      if (!grid[schedule.dayOfWeek]) grid[schedule.dayOfWeek] = {};
+      grid[schedule.dayOfWeek][schedule.startTimeSlot] = {
+        _id: schedule._id,
+        title: schedule.title,
+        subject: schedule.subject,
+        scheduleType: schedule.scheduleType,
+        type: schedule.type,
+        dayOfWeek: schedule.dayOfWeek,
+        startTimeSlot: schedule.startTimeSlot,
+        endTimeSlot: schedule.endTimeSlot,
+        roomNumber: schedule.roomNumber,
+        teacherName: schedule.teacherName || (schedule.teacherId as any)?.name,
+        teacherId: typeof schedule.teacherId === 'object' && schedule.teacherId !== null
+          ? (schedule.teacherId as any)._id?.toString() || (schedule.teacherId as any).id?.toString()
+          : schedule.teacherId,
+        batch: normalizeBatchName((schedule as any).batch),
+        batches: getScheduleBatches(schedule),
+        batchLabel: getScheduleBatches(schedule).join(', ') || normalizeBatchName((schedule as any).batch) || '',
+        classLevel: schedule.classLevel,
+        students: schedule.students || [],
+      };
     });
-    
-    await loadTimeSlots(); // Ensure latest timeslots
+
+    // Build schedule-derived time slots so the frontend can always render occupied columns
+    const scheduleTimeSlots = schedules
+      .filter(s => s.startTimeSlot && s.endTimeSlot)
+      .map(s => ({ start: s.startTimeSlot, end: s.endTimeSlot, label: `${to12HourLabelBE(s.startTimeSlot)} - ${to12HourLabelBE(s.endTimeSlot)}` }));
+
     res.json({
       grid,
       timeSlots: TIME_SLOTS,
+      scheduleTimeSlots,   // extra: actual slots used by schedules
       days: DAYS_OF_WEEK
     });
   } catch (error: any) {
@@ -945,23 +996,30 @@ router.get('/live', authMiddleware, cacheMiddleware({ ttl: 60, keyFn: (req) => `
       dayOfWeek
     }).lean(); 
     
-    // FALLBACK: If strict match returns nothing, try ignoring batch if user is student
+    // FALLBACK: If strict match returns nothing, try relaxed batch match but still enforce batch
     if (todayRegular.length === 0 && user.role === 'student') {
-      console.log('[Schedule Live] Strict match failed, trying loose batch match...');
-      const looseQuery = { isActive: true };
-      const classLevelQuery = { 
-        classLevel: { $in: [userClassLevel, `Class ${userClassLevel}`, user.classLevel] } 
+      console.log('[Schedule Live] Strict match failed, trying relaxed batch match (still batch-restricted)...');
+      const classLevels = [userClassLevel, `Class ${userClassLevel}`, user.classLevel].filter(Boolean);
+      const batchValues = userBatch
+        ? [userBatch, 'All Batches', 'All', '', null]
+        : ['All Batches', 'All', '', null];
+
+      const fallbackQuery: any = {
+        isActive: true,
+        classLevel: { $in: classLevels },
+        $or: [
+          { batch: { $in: batchValues } },
+          { batch: { $exists: false } },
+          { batches: { $in: userBatch ? [userBatch, 'All Batches', 'All'] : ['All Batches', 'All'] } },
+          { batches: { $size: 0 } },
+          { batches: { $exists: false } },
+          { students: user.id },
+          { students: user.firebaseUid }
+        ]
       };
-      
-      // OR specific student targeting (always allowed)
-      (looseQuery as any).$or = [
-        classLevelQuery,
-        { students: user.id },
-        { students: user.firebaseUid }
-      ];
-      
+
       todayRegular = await Schedule.find({
-        ...looseQuery,
+        ...fallbackQuery,
         scheduleType: 'regular',
         dayOfWeek
       }).lean();
@@ -1135,20 +1193,31 @@ router.get('/day-view', authMiddleware, async (req: Request, res: Response) => {
       dayOfWeek
     }).lean();
     
-    // FALLBACK for students: If strict match returns nothing, try without batch restriction
-    if (regularSchedules.length === 0 && user.role === 'student' && userBatch) {
-      console.log('[Day View] Strict match failed, trying loose batch match...');
-      const looseQuery: any = { 
+    // FALLBACK for students: If strict match returns nothing, try with relaxed batch matching
+    // but still enforce that the schedule is either for the student's batch, all batches, or no batch
+    if (regularSchedules.length === 0 && user.role === 'student') {
+      console.log('[Day View] Strict match failed, trying relaxed batch match (still batch-restricted)...');
+      const classLevels = [userClassLevel, `Class ${userClassLevel}`, user.classLevel].filter(Boolean);
+      const batchValues = userBatch
+        ? [userBatch, 'All Batches', 'All', '', null]
+        : ['All Batches', 'All', '', null];
+
+      const fallbackQuery: any = {
         isActive: true,
+        classLevel: { $in: classLevels },
         $or: [
-          { classLevel: { $in: [userClassLevel, `Class ${userClassLevel}`, user.classLevel] } },
+          { batch: { $in: batchValues } },
+          { batch: { $exists: false } },
+          { batches: { $in: userBatch ? [userBatch, 'All Batches', 'All'] : ['All Batches', 'All'] } },
+          { batches: { $size: 0 } },
+          { batches: { $exists: false } },
           { students: user.id },
           { students: user.firebaseUid }
         ]
       };
-      
+
       regularSchedules = await Schedule.find({
-        ...looseQuery,
+        ...fallbackQuery,
         scheduleType: 'regular',
         dayOfWeek
       }).lean();
@@ -1191,9 +1260,16 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
     const { scheduleType, classLevel, batch, startDate, endDate } = req.query;
     
     const query: any = { isActive: true };
-    
+
     if (scheduleType) query.scheduleType = scheduleType;
-    if (classLevel) query.classLevel = classLevel;
+
+    // Accept both "11" and "Class 11" formats
+    if (classLevel) {
+      const raw = (classLevel as string).trim();
+      const stripped = raw.replace(/^Class\s*/i, '');
+      query.classLevel = { $in: Array.from(new Set([raw, `Class ${stripped}`, stripped])) };
+    }
+
     applyBatchFilter(query, batch);
     
     // Date range for custom schedules
@@ -1413,6 +1489,46 @@ router.post('/', authMiddleware, invalidateCacheOn(['schedule']), async (req: Re
       }
     }
     
+    // For regular schedules: also check for clashes with future custom schedules on the same day of week
+    if (scheduleData.scheduleType === 'regular') {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      // MongoDB $dayOfWeek: 1=Sunday, 2=Monday ... 7=Saturday; JS: 0=Sunday, 1=Monday
+      const mongoDay = (Number(scheduleData.dayOfWeek) % 7) + 1;
+
+      const customRoomConflict = await Schedule.findOne({
+        isActive: true,
+        scheduleType: 'custom',
+        startTimeSlot: scheduleData.startTimeSlot,
+        roomNumber: scheduleData.roomNumber,
+        date: { $gte: today },
+        $expr: { $eq: [{ $dayOfWeek: '$date' }, mongoDay] },
+      });
+      if (customRoomConflict) {
+        const d = new Date(customRoomConflict.date!).toLocaleDateString('en-IN');
+        return res.status(400).json({
+          error: `Room ${scheduleData.roomNumber} already has a custom class on ${d} at this time slot. Remove or reschedule that custom class first.`,
+        });
+      }
+
+      if (teacherId && String(teacherId).trim()) {
+        const customTeacherConflict = await Schedule.findOne({
+          isActive: true,
+          scheduleType: 'custom',
+          startTimeSlot: scheduleData.startTimeSlot,
+          teacherId,
+          date: { $gte: today },
+          $expr: { $eq: [{ $dayOfWeek: '$date' }, mongoDay] },
+        });
+        if (customTeacherConflict) {
+          const d = new Date(customTeacherConflict.date!).toLocaleDateString('en-IN');
+          return res.status(400).json({
+            error: `${teacherName || 'This teacher'} already has a custom class on ${d} at this time. Resolve that custom class first.`,
+          });
+        }
+      }
+    }
+
     // Check if teacher is on leave for the scheduled date
     if (teacherId && scheduleData.scheduleType === 'custom' && scheduleData.date) {
       const scheduleDate = new Date(scheduleData.date);
@@ -1494,20 +1610,63 @@ router.put('/:scheduleId', authMiddleware, invalidateCacheOn(['schedule']), asyn
       updateData.batches = normalizedBatches;
       updateData.batch = normalizedBatches[0] || '';
     }
-    
+
     // Get teacher name if changed
+    let resolvedTeacherName = '';
     if (teacherId) {
-      const name = await resolveTeacherNameAndSync(teacherId);
-      updateData.teacherName = name || '';
+      resolvedTeacherName = await resolveTeacherNameAndSync(teacherId);
+      updateData.teacherName = resolvedTeacherName || '';
       updateData.teacherId = teacherId;
     }
-    
+
+    // Fetch current document to fill in any fields not present in updateData
+    const existing = await Schedule.findById(req.params.scheduleId);
+    if (!existing) {
+      return res.status(404).json({ error: 'Schedule not found' });
+    }
+
+    const effectiveStart = updateData.startTimeSlot || existing.startTimeSlot;
+    const effectiveType: string = updateData.scheduleType || existing.scheduleType;
+    const effectiveDayOfWeek = updateData.dayOfWeek ?? existing.dayOfWeek;
+    const effectiveDate = updateData.date || existing.date;
+    const effectiveRoom = updateData.roomNumber ?? existing.roomNumber;
+    const effectiveTeacherId = teacherId || existing.teacherId;
+
+    // Conflict base — exclude self
+    const conflictBase: any = {
+      isActive: true,
+      startTimeSlot: effectiveStart,
+      _id: { $ne: req.params.scheduleId },
+    };
+
+    if (effectiveType === 'regular') {
+      conflictBase.scheduleType = 'regular';
+      conflictBase.dayOfWeek = effectiveDayOfWeek;
+    } else {
+      conflictBase.scheduleType = 'custom';
+      conflictBase.date = effectiveDate;
+    }
+
+    // Room conflict (same type)
+    const roomConflict = await Schedule.findOne({ ...conflictBase, roomNumber: effectiveRoom });
+    if (roomConflict) {
+      return res.status(400).json({ error: `Room ${effectiveRoom} is already booked at this time slot` });
+    }
+
+    // Teacher conflict (same type)
+    if (effectiveTeacherId && String(effectiveTeacherId).trim()) {
+      const teacherConflict = await Schedule.findOne({ ...conflictBase, teacherId: effectiveTeacherId });
+      if (teacherConflict) {
+        return res.status(400).json({ error: 'Teacher is already assigned to another class at this time' });
+      }
+    }
+
     const schedule = await Schedule.findByIdAndUpdate(
       req.params.scheduleId,
       updateData,
       { new: true }
     );
-    
+
     if (!schedule) {
       return res.status(404).json({ error: 'Schedule not found' });
     }

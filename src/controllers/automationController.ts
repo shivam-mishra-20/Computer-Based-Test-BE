@@ -107,7 +107,9 @@ export const bulkImportQuestions = async (req: Request, res: Response) => {
       reason: q.reason,
       diagramUrl: q.diagramUrl,
       diagramAlt: q.diagramAlt,
-      
+      diagram:    q.diagram,
+      tableData:  q.tableData,
+
       // Flat structure - all at root level
       subject: q.subject,
       topic: q.topic,
@@ -397,7 +399,7 @@ export const updateProcessingRecord = async (req: Request, res: Response) => {
  */
 export const triggerProcessing = async (req: Request, res: Response) => {
   try {
-    const { folder = 'class_12', selectedFiles, aiProvider = 'ollama' } = req.body;
+    const { folder = 'class_12', selectedFiles, aiProvider = 'ollama', geminiModel } = req.body;
 
     const normalizedSelectedFiles = Array.isArray(selectedFiles)
       ? Array.from(
@@ -480,8 +482,8 @@ export const triggerProcessing = async (req: Request, res: Response) => {
       pushLog(`Selected files: ${normalizedSelectedFiles.join(', ')}`);
     }
     if (aiProvider === 'gemini') {
-      const geminiModel = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
-      pushLog(`AI: Google Gemini ${geminiModel} (cloud · JSON mode · 1200-char chunks)`);
+      const resolvedGeminiModel = geminiModel || process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+      pushLog(`AI: Google Gemini ${resolvedGeminiModel} (cloud · JSON mode · 1200-char chunks)`);
     } else {
       pushLog('AI: Ollama Qwen3:8b (local · JSON mode · 1200-char chunks)');
     }
@@ -498,7 +500,7 @@ export const triggerProcessing = async (req: Request, res: Response) => {
         OLLAMA_HOST: process.env.OLLAMA_HOST || 'http://localhost:11434',
         AI_PROVIDER: aiProvider === 'gemini' ? 'gemini' : 'ollama',
         GEMINI_API_KEY: process.env.GEMINI_API_KEY || '',
-        GEMINI_MODEL: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
+        GEMINI_MODEL: geminiModel || process.env.GEMINI_MODEL || 'gemini-2.5-flash',
       },
       detached: false,
       stdio: ['ignore', 'pipe', 'pipe'],
