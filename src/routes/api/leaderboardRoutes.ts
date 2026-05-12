@@ -1,151 +1,170 @@
 import { Router, Request, Response } from 'express';
-import Attempt from '../../models/Attempt';
 import User from '../../models/User';
+import TestResult from '../../models/TestResult';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 
 const router = Router();
 
-// Get leaderboard
+// ── /filters ───────────────────────────────────────────────────────────────
+router.get('/filters', authMiddleware, async (_req: Request, res: Response) => {
+  try {
+    const [classes, subjects] = await Promise.all([
+      TestResult.distinct('class'),
+      TestResult.distinct('subject'),
+    ]);
+
+    res.json({
+      classes: classes.filter(Boolean).sort(),
+      subjects: subjects.filter(Boolean).sort(),
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ── GET / ───────────────────────────────────────────────────────────────────
+// Universal leaderboard built from TestResult (offline results uploaded by
+// teachers). Works for all users — students, teachers, admins.
 router.get('/', authMiddleware, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const { classLevel, batch, limit = 50, mode = 'online' } = req.query;
-    
-    // Get students by class/batch
-    const studentQuery: any = { role: 'student', status: 'approved' };
-    if (classLevel) studentQuery.classLevel = classLevel;
-    else if (user.classLevel) studentQuery.classLevel = user.classLevel;
-    if (batch) studentQuery.batch = batch;
-    
-    // Fetch users first
-    const students = await User.find(studentQuery).select('_id name email classLevel batch').lean();
-    const studentIds = students.map(s => s._id);
-    const studentMap = new Map(students.map(s => [s._id.toString(), s]));
-    
-    let result: any[] = [];
-    let matchStage: any = {
-      status: { $in: ['submitted', 'auto-submitted', 'graded'] },
-      userId: { $in: studentIds }
+    const { classLevel, subject, limit = 100 } = req.query;
+
+    // 1. Build the TestResult query
+    const testQuery: any = {};
+    if (classLevel) testQuery.class = classLevel as string;
+    if (subject) testQuery.subject = new RegExp(`^${subject}$`, 'i');
+
+    // 2. Load all matching tests in ONE query (only the fields we need)
+    const allTests = await TestResult.find(testQuery)
+      .select('class subject maxMarks studentResults')
+      .lean() as any[];
+
+    // 3. Walk every studentResult in every test and accumulate per-student scores.
+    //    We key by both studentId AND studentName so we can match later.
+    interface ScoreBucket {
+      totalScore: number;
+      maxPossibleScore: number;
+      examsTaken: number;
+      percentageSum: number;
+      studentName: string; // latest name we saw
+      studentId: string;   // latest id we saw
+    }
+
+    const byId   = new Map<string, ScoreBucket>();
+    const byName = new Map<string, ScoreBucket>();
+
+    const accumulate = (
+      map: Map<string, ScoreBucket>,
+      key: string,
+      marks: number,
+      maxMarks: number,
+      studentId: string,
+      studentName: string,
+    ) => {
+      if (!map.has(key)) {
+        map.set(key, {
+          totalScore: 0,
+          maxPossibleScore: 0,
+          examsTaken: 0,
+          percentageSum: 0,
+          studentName,
+          studentId,
+        });
+      }
+      const entry = map.get(key)!;
+      entry.totalScore += marks;
+      entry.maxPossibleScore += maxMarks;
+      entry.examsTaken += 1;
+      entry.percentageSum += maxMarks > 0 ? (marks / maxMarks) * 100 : 0;
+      if (studentName) entry.studentName = studentName;
+      if (studentId) entry.studentId = studentId;
     };
 
-    if (mode === 'online') {
-      // Aggregate attempts by user
-      const leaderboard = await Attempt.aggregate([
-        { $match: matchStage },
-        {
-          $group: {
-            _id: '$userId',
-            totalScore: { $sum: '$totalScore' },
-            maxPossibleScore: { $sum: '$maxScore' },
-            examsTaken: { $sum: 1 },
-            avgPercentage: {
-              $avg: {
-                $cond: [
-                  { $gt: ['$maxScore', 0] },
-                  { $multiply: [{ $divide: ['$totalScore', '$maxScore'] }, 100] },
-                  0
-                ]
-              }
-            }
-          }
-        },
-        { $sort: { avgPercentage: -1, examsTaken: -1 } },
-        { $limit: Number(limit) }
-      ]);
-      
-      result = leaderboard.map((entry: any, index: number) => {
-        const student = studentMap.get(entry._id.toString());
-        return {
-          rank: index + 1,
-          userId: entry._id,
-          name: student?.name || 'Unknown',
-          classLevel: student?.classLevel,
-          batch: student?.batch,
-          totalScore: entry.totalScore,
-          maxPossibleScore: entry.maxPossibleScore,
-          examsTaken: entry.examsTaken,
-          avgPercentage: Math.round(entry.avgPercentage || 0)
-        };
-      });
+    for (const test of allTests) {
+      for (const r of (test.studentResults || [])) {
+        const marks = r.marksObtained ?? 0;
+        const sid = r.studentId || '';
+        const sname = r.studentName || '';
 
-    } else {
-      // Offline implementation
-      // Since structure is Name-based, we have to iterate students and find their results
-      // This is less efficient but necessary given schemas
-      const OfflineResult = require('../../models/OfflineResult').default;
-      
-      const leaderboardData = [];
-      
-      for (const student of students) {
-        const emailUsername = student.email ? student.email.split('@')[0] : '';
-        const nameRegex = new RegExp(`^${student.name.trim()}$`, 'i');
-        const usernameRegex = new RegExp(`^${emailUsername}$`, 'i');
-
-        const query: any = {
-          class: student.classLevel,
-          $or: [
-            { name: nameRegex },
-            { name: usernameRegex },
-            { name: /^student$/i }
-          ]
-        };
-        // Optional: match batch if data quality is good
-         // if (student.batch) query.batch = student.batch;
-
-        const results = await OfflineResult.find(query).lean();
-        
-        if (results.length > 0) {
-          let totalScore = 0;
-          let maxPossibleScore = 0;
-          let percentageSum = 0;
-          
-          results.forEach((r: any) => {
-             totalScore += r.marks;
-             maxPossibleScore += r.outOf;
-             percentageSum += r.outOf > 0 ? (r.marks / r.outOf) * 100 : 0;
-          });
-          
-          const avgPercentage = percentageSum / results.length;
-          
-          leaderboardData.push({
-            userId: student._id,
-            name: student.name,
-            classLevel: student.classLevel,
-            batch: student.batch,
-            totalScore,
-            maxPossibleScore,
-            examsTaken: results.length,
-            avgPercentage: Math.round(avgPercentage),
-            rawAvg: avgPercentage
-          });
-        }
+        if (sid) accumulate(byId, sid, marks, test.maxMarks, sid, sname);
+        if (sname) accumulate(byName, sname.toLowerCase().trim(), marks, test.maxMarks, sid, sname);
       }
-      
-      // Sort in-memory
-      leaderboardData.sort((a, b) => {
-        if (b.avgPercentage !== a.avgPercentage) return b.avgPercentage - a.avgPercentage;
-        return b.examsTaken - a.examsTaken;
-      });
-      
-      // Slice
-      result = leaderboardData.slice(0, Number(limit)).map((entry, index) => ({
-        ...entry,
-        rank: index + 1
-      }));
     }
-    
-    // Find current user's rank
-    const myRank = result.find(r => r.userId.toString() === user.id);
-    let myRankData = null;
-    
-    // Fallback if not in top N (implement basic version for Offline if needed, skipping for brevity/complexity)
-    
-    res.json({
-      leaderboard: result,
-      myRank: myRank || myRankData,
-      totalParticipants: studentIds.length
+
+    // 4. Now fetch all approved students (optionally filtered by class)
+    const studentQuery: any = { role: 'student', status: 'approved' };
+    if (classLevel) {
+      // Match users whose classLevel matches the filter.
+      // classLevel in User could be "12" or "Class 12" while TestResult.class
+      // is whatever the teacher typed. We support both.
+      const raw = (classLevel as string).replace(/^Class\s*/i, '').trim();
+      studentQuery.$or = [
+        { classLevel: classLevel as string },
+        { classLevel: raw },
+        { classLevel: `Class ${raw}` },
+      ];
+    }
+
+    const students = await User.find(studentQuery)
+      .select('_id name classLevel batch')
+      .lean() as any[];
+
+    const totalParticipants = students.length;
+
+    // 5. For each student, find their score bucket.
+    //    Try by _id first, then by name.
+    const leaderboard: any[] = [];
+
+    for (const student of students) {
+      const sid = student._id.toString();
+      let bucket = byId.get(sid);
+      if (!bucket) {
+        bucket = byName.get(student.name.toLowerCase().trim());
+      }
+
+      const rawAvg = bucket && bucket.examsTaken > 0
+        ? bucket.percentageSum / bucket.examsTaken
+        : 0;
+
+      leaderboard.push({
+        userId: sid,
+        name: student.name,
+        classLevel: student.classLevel,
+        batch: student.batch,
+        totalScore: bucket?.totalScore || 0,
+        maxPossibleScore: bucket?.maxPossibleScore || 0,
+        examsTaken: bucket?.examsTaken || 0,
+        avgPercentage: bucket ? Math.round(rawAvg) : 0,
+        rawAvg,
+        hasData: !!bucket && bucket.examsTaken > 0,
+      });
+    }
+
+    // 6. Sort: students with data first (descending by avg%), then no-data students alphabetically
+    leaderboard.sort((a, b) => {
+      if (a.hasData !== b.hasData) return a.hasData ? -1 : 1;
+      if (a.hasData && b.hasData) {
+        if (b.rawAvg !== a.rawAvg) return b.rawAvg - a.rawAvg;
+        if (b.examsTaken !== a.examsTaken) return b.examsTaken - a.examsTaken;
+      }
+      return a.name.localeCompare(b.name);
     });
+
+    // 7. Assign ranks and cap
+    const limitNum = Math.min(Number(limit) || 100, 500);
+    const result = leaderboard.slice(0, limitNum).map((entry, idx) => ({
+      ...entry,
+      rank: idx + 1,
+    }));
+
+    // 8. Find current user's rank
+    const myIdx = leaderboard.findIndex(r => r.userId === user.id);
+    const myRank = myIdx >= 0 ? { ...leaderboard[myIdx], rank: myIdx + 1 } : null;
+
+    res.json({ leaderboard: result, myRank, totalParticipants });
   } catch (error: any) {
+    console.error('[Leaderboard] Error:', error);
     res.status(500).json({ error: error.message });
   }
 });
