@@ -13,6 +13,7 @@ router.get('/filters', authMiddleware, async (_req: Request, res: Response) => {
       TestResult.distinct('subject'),
     ]);
 
+    res.setHeader('Cache-Control', 'no-store');
     res.json({
       classes: classes.filter(Boolean).sort(),
       subjects: subjects.filter(Boolean).sort(),
@@ -162,6 +163,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
     const myIdx = leaderboard.findIndex(r => r.userId === user.id);
     const myRank = myIdx >= 0 ? { ...leaderboard[myIdx], rank: myIdx + 1 } : null;
 
+    res.setHeader('Cache-Control', 'no-store');
     res.json({ leaderboard: result, myRank, totalParticipants });
   } catch (error: any) {
     console.error('[Leaderboard] Error:', error);
