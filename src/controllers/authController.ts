@@ -400,6 +400,34 @@ export const updateProfile = async (req: Request, res: Response) => {
   }
 };
 
+// Permanently delete the authenticated user's account
+export const deleteAccount = async (req: Request, res: Response) => {
+  try {
+    const current = (req as any).user as { id: string; role?: string } | undefined;
+    if (!current) return res.status(401).json({ message: 'Unauthorized' });
+
+    const user = await User.findById(current.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    const firebaseUid: string | undefined = (user as any).firebaseUid;
+
+    // Delete MongoDB document first
+    await User.findByIdAndDelete(current.id);
+
+    // Best-effort Firebase Auth cleanup (non-fatal)
+    if (firebaseUid) {
+      const { deleteFirebaseAuthUser } = await import('../services/firebaseService');
+      await deleteFirebaseAuthUser(firebaseUid);
+    }
+
+    console.log(`[DeleteAccount] Account permanently deleted: ${user.email} (id: ${current.id})`);
+    res.json({ message: 'Account permanently deleted' });
+  } catch (err) {
+    console.error('Delete account error:', err);
+    res.status(500).json({ message: 'Server error while deleting account' });
+  }
+};
+
 // Upload profile image to Firebase Storage
 export const uploadProfileImage = async (req: Request, res: Response) => {
   try {

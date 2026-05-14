@@ -234,6 +234,21 @@ export async function getFirestoreUserByEmailAny(email: string) {
 }
 
 /**
+ * Deletes a Firebase Auth user by UID (non-fatal — used during account deletion)
+ */
+export async function deleteFirebaseAuthUser(uid: string): Promise<boolean> {
+  try {
+    initFirebaseAdmin();
+    if (!initialized || !admin) return false;
+    await admin.auth().deleteUser(uid);
+    return true;
+  } catch (err) {
+    console.warn('[Firebase] deleteFirebaseAuthUser failed:', err);
+    return false;
+  }
+}
+
+/**
  * Uploads a file buffer to Firebase Storage and returns the public URL
  * @param buffer File buffer to upload
  * @param fileName Destination file path in storage (e.g., 'diagrams/image.jpg')

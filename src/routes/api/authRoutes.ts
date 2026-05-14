@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { register, login, me, publicRegister, publicTeacherRegister, changePassword, updateProfile, uploadProfileImage, publicStudentBatchConfig } from '../../controllers/authController';
+import { register, login, me, publicRegister, publicTeacherRegister, changePassword, updateProfile, uploadProfileImage, publicStudentBatchConfig, deleteAccount } from '../../controllers/authController';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import { authLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
 import multer from 'multer';
@@ -31,6 +31,7 @@ router.get('/me', authMiddleware, me);
 router.post('/change-password', authMiddleware, changePassword);
 router.patch('/profile', authMiddleware, updateProfile);
 router.post('/profile/image', authMiddleware, uploadLimiter, upload.single('image'), uploadProfileImage);
+router.delete('/account', authMiddleware, deleteAccount);
 
 // Provide helpful responses for accidental browser GETs (avoid 404 spam)
 router.get('/register', (_req, res) => {
