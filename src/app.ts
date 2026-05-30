@@ -39,6 +39,7 @@ import syllabusRoutes from './routes/api/syllabusRoutes';
 import automationRoutes from './routes/api/automation';
 import resourceRoutes from './routes/api/resourceRoutes';
 import eodRoutes from './routes/api/eodRoutes';
+import playlistRoutes from './routes/api/playlistRoutes';
 import scholarshipRoutes from './routes/api/scholarshipRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import { globalLimiter } from './middlewares/rateLimiter';
@@ -248,6 +249,8 @@ app.use('/api/syllabus', syllabusRoutes);
 app.use('/api/resources', resourceRoutes);
 // EOD (End of Day) reports
 app.use('/api/eod', eodRoutes);
+// YouTube playlist import & sync
+app.use('/api/playlist', playlistRoutes);
 
 // Scholarship test routes
 app.use('/api/scholarship', scholarshipRoutes);
