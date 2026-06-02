@@ -4,14 +4,21 @@
  * Two prompt strategies:
  *   1. STRUCTURED (preferred): when input chunks have blockType set by the
  *      structure analyzer. One API call per semantic block. AI receives the
- *      pre-parsed table as a markdown table, the block label, and strict rules
- *      to extract exactly one question per Example/numbered item.
+ *      block label and strict rules to extract exactly one question per
+ *      Example/numbered item.
  *
  *   2. FALLBACK: original character-chunked approach when no structure is
  *      detected. AI receives raw text and must find all questions itself.
+ *
+ * NOTE: Table and image/diagram extraction is intentionally excluded from this
+ * pipeline. Questions are text-only. Graphical content will be added manually.
  */
 
 const { Ollama } = require('ollama');
+const { normalizeLatex } = require('./latex-normalizer');
+const { stripSolutionContent, shouldImport } = require('./content-classifier');
+const { buildEmbeddedText } = require('./sub-question-grouper');
+const { passesQualityGate } = require('./quality-score');
 
 const OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://localhost:11434';
 const MODEL       = process.env.AI_ENHANCER_MODEL || 'qwen3:8b';
@@ -19,34 +26,27 @@ const CHUNK_SIZE  = parseInt(process.env.AI_ENHANCER_CHUNK_SIZE || '1200', 10);
 
 const ollama = new Ollama({ host: OLLAMA_HOST });
 
-// Block types that represent a single extractable question/example
-const QUESTION_BLOCK_TYPES = new Set(['example', 'question', 'sub_question', 'theorem']);
-// Block types that are section containers — pass through to children via context
+// Block types that represent ONE extractable question/example (one API call → one question).
+const QUESTION_BLOCK_TYPES = new Set(['example', 'question', 'sub_question']);
+// Block types that contain MANY questions (one API call → extract all).
+const MULTI_QUESTION_BLOCK_TYPES = new Set(['question_group', 'exercise_header', 'section_header']);
+// Block types that are section containers — pass through to children via context.
 const HEADER_BLOCK_TYPES   = new Set(['exercise_header', 'section_header', 'chapter_header']);
-
-// ── Markdown table formatter ──────────────────────────────────────────────────
-
-function tableToMarkdown(tableData) {
-  if (!tableData || !tableData.headers || !tableData.rows) return '';
-  const sep  = tableData.headers.map(() => '---').join(' | ');
-  const head = tableData.headers.join(' | ');
-  const rows = tableData.rows.map(r => r.join(' | ')).join('\n');
-  return `${head}\n${sep}\n${rows}`;
-}
 
 // ── Shared JSON schema string ─────────────────────────────────────────────────
 
 function jsonSchema(subject, chapter, cls, board) {
-  return `{"questions":[{"question":"string","options":["a","b","c","d"],"answer":"string","question_type":"mcq|truefalse|fill|short|long|assertionreason|integer","subject":"${subject}","topic_name":"string","chapter_name":"${chapter}","class":"${cls}","board":"${board}","difficulty":"easy|medium|hard","marks":1}]}`;
+  return `{"questions":[{"question":"string","instructions":"string (the lead-in like 'Simplify the following', else empty)","sub_questions":["(i) ...","(ii) ..."],"options":["a","b","c","d"],"answer":"string","question_type":"mcq|truefalse|fill|short|long|assertionreason|integer","subject":"${subject}","topic_name":"string","sub_topic":"string","chapter_name":"${chapter}","class":"${cls}","board":"${board}","difficulty":"easy|medium|hard","marks":1}]}`;
 }
 
 // ── Math formatting rules (shared) ───────────────────────────────────────────
 
 const MATH_RULES = `MATH FORMATTING (CRITICAL):
 - Wrap ALL math in $ delimiters: inline $expr$, display $$expr$$
+- Use braces on every script: x^{2} not x^2, H_{2}O not H_2O
 - Matrices: $\\begin{bmatrix} a & b \\\\ c & d \\end{bmatrix}$
-- Never output bare LaTeX outside $ delimiters
-- Unicode: × → $\\times$, ² → $^{2}$, √ → $\\sqrt{}$, ÷ → $\\div$, ≠ → $\\neq$, ≤ → $\\leq$, ≥ → $\\geq$, α → $\\alpha$, β → $\\beta$, π → $\\pi$
+- Never output bare LaTeX outside $ delimiters; never emit empty \\frac{}{} or \\sqrt{}
+- Unicode: × → $\\times$, ² → $^{2}$, √2 → $\\sqrt{2}$, ÷ → $\\div$, ≠ → $\\neq$, ≤ → $\\leq$, ≥ → $\\geq$, α → $\\alpha$, β → $\\beta$, π → $\\pi$
 - Fractions: $\\frac{a}{b}$, integrals: $\\int_a^b f(x)dx$`;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -73,18 +73,13 @@ class AIEnhancer {
     const blockLabel = chunk.blockLabel || '';
     const parent     = chunk.parentLabel ? `\nPARENT SECTION: ${chunk.parentLabel}` : '';
 
-    const tableMd = tableToMarkdown(chunk.tableData);
-    const tableSection = tableMd
-      ? `\nEXACT TABLE DATA (pre-extracted — use this verbatim, do NOT re-read from text):\n${tableMd}\n`
-      : '';
-
-    const isMultiQ = blockType === 'exercise_header' || blockType === 'section_header';
+    const isMultiQ = MULTI_QUESTION_BLOCK_TYPES.has(blockType);
 
     const extractionRule = isMultiQ
-      ? '- Extract ALL numbered questions/sub-questions found in the text'
-      : '- Extract EXACTLY ONE question from this block. Do not split it.';
+      ? '- Extract EVERY distinct numbered question in the text as a separate JSON item. Do NOT merge two questions into one.'
+      : '- Extract EXACTLY ONE question from this block. Do not split it into multiple.';
 
-    return `You are extracting exam questions from an Indian NCERT/CBSE textbook. Return ONLY valid JSON.
+    return `You are extracting exam questions from an Indian NCERT/CBSE/JEE/NEET textbook. Return ONLY valid JSON.
 
 BLOCK TYPE: ${blockType}
 BLOCK LABEL: ${blockLabel}${parent}
@@ -92,23 +87,32 @@ BLOCK LABEL: ${blockLabel}${parent}
 JSON schema:
 ${jsonSchema(subject, chapter, cls, board)}
 
-Rules:
+Extraction rules:
 ${extractionRule}
-- question text must be self-contained and include all necessary context
-- SKIP: Solution:, Proof:, Given:, Note:, Remark:, Therefore, Hence, Step N:
-- SKIP explanatory paragraphs that do not contain a task/imperative verb
-- options: string array for mcq/truefalse, else []
-- answer: correct option text for mcq, or brief answer for others
-- question_type: mcq (4 opts), truefalse (2 opts), fill (blanks), short (≤2 lines answer), long (>2 lines), integer
+- Each question must be self-contained and include all context needed to answer it.
+- A valid question has a clear task: Find, Calculate, Prove, Show, Explain, State, Define, Describe, Choose, Match, What, Which, How, Why, or ends with "?".
+
+SUB-QUESTIONS (IMPORTANT):
+- If a stem like "Simplify the following:" is followed by parts (i)(ii)(iii) or (a)(b)(c), keep them as ONE question: put the lead-in in "instructions" and the parts in "sub_questions". Do NOT emit each part as a separate question.
+- Do NOT confuse MCQ OPTIONS with sub-questions: (a)(b)(c)(d) right after a single question are OPTIONS → put them in "options", leave "sub_questions" empty.
+
+SKIP entirely (do not output):
+- chapter titles, section/exercise headings, page numbers, headers, footers
+- Solution:, Answer:, Proof:, Given:, Note:, Remark:, Hint:, Therefore, Hence, Step N:
+- definitions, theorems, activities, projects, summaries, learning outcomes, explanatory prose
+- any fragment with no clear task
+
+CLASSIFICATION:
+- question_type: mcq (has options), truefalse, fill (blanks/____), short (≤2 line answer), long, integer/numerical, assertionreason
+- options: string array for mcq/truefalse; else []
+- answer: the correct option text for mcq; a brief answer otherwise (omit if unknown)
+- topic_name + sub_topic: infer from the block label / nearby heading
+- difficulty: easy | medium | hard, judged from complexity
 - marks: mcq/truefalse/fill=1, short=2, long=5, integer=2
-- difficulty: judge from complexity (easy/medium/hard)
-- topic_name: infer from block label or text heading
-${tableSection ? '- If question refers to a table, the question_text must mention it clearly' : ''}
 ${MATH_RULES}
 
 BLOCK TEXT:
 ${chunk.text}
-${tableSection}
 JSON:`;
   }
 
@@ -121,30 +125,29 @@ JSON:`;
     const cls     = bookMetadata.class   || 'Unknown';
     const board   = bookMetadata.board   || 'CBSE';
 
-    const tableMd = tableToMarkdown(bookMetadata.tableData);
-    const tableSection = tableMd
-      ? `\nEXACT TABLE DATA:\n${tableMd}\n`
-      : '';
-
-    return `Extract ALL exam questions from the text below. Return ONLY valid JSON.
+    return `Extract EVERY distinct exam question from the text below. Return ONLY valid JSON.
 
 JSON schema:
 ${jsonSchema(subject, chapter, cls, board)}
 
 Rules:
+- A valid question has a clear task: Find, Calculate, Prove, Show, Explain, State, Define, Describe, Choose, Match, What, Which, How, Why, or ends with "?".
+- Each question must be self-contained. Keep wording exact — do NOT paraphrase. Deduplicate repeats.
+- SUB-QUESTIONS: a stem ("Simplify the following:") with parts (i)(ii)(iii) is ONE question — put the lead-in in "instructions" and the parts in "sub_questions". Do NOT split the parts into separate questions.
+- OPTIONS vs sub-questions: (a)(b)(c)(d) after a single stem are OPTIONS → "options"; leave "sub_questions" empty.
 - options: array of strings for MCQ/TrueFalse, else []
-- answer: correct option text for MCQ, or answer text
-- question_type: mcq if 4 options, truefalse if 2, fill if blanks, short/long otherwise
+- answer: correct option text for MCQ, or brief answer (omit if unknown)
+- question_type: mcq, truefalse, fill, short, long, integer, assertionreason
 - marks: mcq/truefalse/fill=1, short=2, long=5, integer=2
-- Extract subject/topic/chapter from headings in text when visible
-- Keep question wording exact
-- Deduplicate: skip repeated questions
-- SKIP: Solution:, Proof:, Given:, Note:, Remark:, explanatory paragraphs
+- topic_name + sub_topic + chapter: infer from headings in the text when visible
+- SKIP: chapter titles, section/exercise headings, page numbers, headers, footers
+- SKIP: Solution:, Answer:, Proof:, Given:, Note:, Remark:, Hint:, Therefore, Hence, Step N:
+- SKIP: definitions, theorems, activities, projects, summaries, learning outcomes, explanatory prose
+- SKIP: any fragment with no clear task
 ${MATH_RULES}
 
 TEXT:
 ${inputText}
-${tableSection}
 JSON:`;
   }
 
@@ -200,17 +203,47 @@ JSON:`;
 
   // ── Question mapper ─────────────────────────────────────────────────────────
 
+  // Map the AI's extended type vocabulary onto the fixed schema enum.
+  normalizeType(t) {
+    const k = String(t || '').toLowerCase().replace(/[_\s-]/g, '');
+    const map = {
+      mcq: 'mcq', multiplechoice: 'mcq', objective: 'mcq', singlecorrect: 'mcq',
+      truefalse: 'truefalse', tf: 'truefalse',
+      fill: 'fill', fillintheblank: 'fill', fillintheblanks: 'fill', blank: 'fill',
+      short: 'short', shortanswer: 'short', long: 'long', longanswer: 'long', essay: 'long', descriptive: 'long',
+      integer: 'integer', integertype: 'integer', numerical: 'integer', numeric: 'integer',
+      assertionreason: 'assertionreason', assertion: 'assertionreason',
+      // Extended types map onto the closest schema enum (fine-grained label lives in logs)
+      match: 'short', matchthefollowing: 'short', matchfollowing: 'short',
+      casestudy: 'short', passage: 'short', passagebased: 'short', comprehension: 'short',
+    };
+    return map[k] || 'short';
+  }
+
   mapQuestion(q, chunkMeta) {
-    const questionType = q.question_type || 'short';
-    const allowedTypes = new Set(['mcq', 'short', 'long', 'truefalse', 'fill', 'integer', 'assertionreason']);
-    const type = allowedTypes.has(questionType) ? questionType : 'short';
+    const type = this.normalizeType(q.question_type);
+    const isExample = chunkMeta.blockType === 'example';
+
+    // Compose the question text: embed sub-parts (Phase 2), strip worked
+    // solutions for Examples (per import policy), then normalize LaTeX.
+    const stem = String(q.question || '').trim();
+    const instr = String(q.instructions || '').trim();
+    const subs = Array.isArray(q.sub_questions)
+      ? q.sub_questions.map(s => String(s || '').trim()).filter(Boolean)
+      : [];
+
+    let rawText = subs.length >= 1
+      ? buildEmbeddedText(instr || stem, subs.map(s => ({ label: '', text: s })))
+      : stem;
+    if (isExample) rawText = stripSolutionContent(rawText, { aggressive: true });
+    const text = this.normalizeMath(rawText).trim();
 
     let options = [];
     if ((type === 'mcq' || type === 'truefalse') && Array.isArray(q.options) && q.options.length > 0) {
-      options = q.options.map(opt => ({
-        text:      this.normalizeMath(String(opt)),
-        isCorrect: String(opt).trim() === String(q.answer || '').trim(),
-      }));
+      options = q.options
+        .map(opt => String(opt || '').trim())
+        .filter(Boolean)
+        .map(opt => ({ text: this.normalizeMath(opt), isCorrect: opt === String(q.answer || '').trim() }));
       if (options.length > 0 && options.every(o => !o.isCorrect)) {
         options[0] = { ...options[0], isCorrect: true };
       }
@@ -221,13 +254,14 @@ JSON:`;
         type === 'long' ? 5 : 2);
 
     return {
-      text:              this.normalizeMath(String(q.question).trim()),
+      text,
       type,
-      subject:           q.subject           || chunkMeta.subject  || 'Unknown',
-      topic:             q.topic_name        || chunkMeta.topic    || 'General',
-      chapter:           q.chapter_name      || chunkMeta.chapter  || 'Unknown',
-      board:             chunkMeta.board     || 'CBSE',
-      class:             q.class             || chunkMeta.class    || 'Unknown',
+      subject:           q.subject      || chunkMeta.subject || 'Unknown',
+      topic:             q.topic_name   || chunkMeta.topic   || 'General',
+      chapter:           q.chapter_name || chunkMeta.chapter || 'Unknown',
+      board:             chunkMeta.board || 'CBSE',
+      class:             q.class        || chunkMeta.class   || 'Unknown',
+      section:           isExample ? 'Example' : undefined,
       difficulty:        ['easy', 'medium', 'hard'].includes(q.difficulty) ? q.difficulty : 'medium',
       marks,
       source:            'Smart Import',
@@ -235,8 +269,10 @@ JSON:`;
       options:           options.length > 0 ? options : undefined,
       correctAnswerText: (type !== 'mcq' && type !== 'truefalse' && q.answer)
         ? this.normalizeMath(String(q.answer)) : undefined,
-      diagram:           chunkMeta.diagram   || null,
-      tableData:         chunkMeta.tableData || null,
+      // In-memory only (not persisted) — used by the quality scorer / logs.
+      hasSubParts:       subs.length >= 1,
+      subParts:          subs.length >= 1 ? subs.map(s => ({ label: '', text: s })) : undefined,
+      _subTopic:         q.sub_topic || undefined,
     };
   }
 
@@ -250,7 +286,13 @@ JSON:`;
   splitStructuredBlocks(rawBlocks) {
     const out = [];
     for (const block of rawBlocks) {
-      if (QUESTION_BLOCK_TYPES.has(block.blockType)) {
+      // Defense-in-depth: drop instructional/solution blocks the parser missed.
+      if (!shouldImport(block.blockType)) continue;
+
+      if (block.blockType === 'question_group') {
+        // Multi-question page → one structured call that extracts ALL questions
+        out.push({ ...block, _structured: true });
+      } else if (QUESTION_BLOCK_TYPES.has(block.blockType)) {
         // One block = one API call — never merge with others
         out.push({ ...block, _structured: true });
       } else if (HEADER_BLOCK_TYPES.has(block.blockType)) {
@@ -281,29 +323,23 @@ JSON:`;
   }
 
   /**
-   * Fallback: character-based chunking, preserving first diagram/table per chunk.
+   * Fallback: character-based chunking for text-only question extraction.
    */
   splitIntoChunks(rawQuestions) {
     const chunks = [];
-    let buffer        = '';
-    let bufferDiagram = null;
-    let bufferTable   = null;
+    let buffer = '';
 
     for (const q of rawQuestions) {
       const block = q.text || '';
       if (buffer.length + block.length > CHUNK_SIZE && buffer.length > 0) {
-        chunks.push({ text: buffer.trim(), diagram: bufferDiagram, tableData: bufferTable, _structured: false });
-        buffer        = block;
-        bufferDiagram = q.diagram   || null;
-        bufferTable   = q.tableData || null;
+        chunks.push({ text: buffer.trim(), _structured: false });
+        buffer = block;
       } else {
         buffer += (buffer ? '\n\n' : '') + block;
-        if (!bufferDiagram && q.diagram)   bufferDiagram = q.diagram;
-        if (!bufferTable   && q.tableData) bufferTable   = q.tableData;
       }
     }
     if (buffer.trim()) {
-      chunks.push({ text: buffer.trim(), diagram: bufferDiagram, tableData: bufferTable, _structured: false });
+      chunks.push({ text: buffer.trim(), _structured: false });
     }
     return chunks;
   }
@@ -311,63 +347,80 @@ JSON:`;
   // ── Main enhancer ───────────────────────────────────────────────────────────
 
   async enhanceQuestions(rawQuestions, bookMetadata) {
+    return this._enhance(rawQuestions, bookMetadata, (p) => this.callOllama(p), `[AIEnhancer] Ollama ${this.model}`);
+  }
+
+  /**
+   * Shared extraction loop for both Ollama and Gemini: chunk → AI → map →
+   * quality-gate → dedup. Emits Phase-9 structured logs.
+   * @param {(prompt:string)=>Promise<object[]>} callFn  provider call
+   */
+  async _enhance(rawQuestions, bookMetadata, callFn, tag) {
     const hasStructure = rawQuestions.some(q => q.blockType);
-    console.log(`\n[AIEnhancer] Ollama ${this.model} — ${rawQuestions.length} raw items (${hasStructure ? 'structured' : 'unstructured'})`);
+    console.log(`\n${tag} — ${rawQuestions.length} raw block(s) (${hasStructure ? 'structured' : 'unstructured'})`);
 
     const chunks = hasStructure
       ? this.splitStructuredBlocks(rawQuestions)
       : this.splitIntoChunks(rawQuestions);
+    console.log(`${tag} ${chunks.length} chunk(s) to process`);
 
-    console.log(`[AIEnhancer] ${chunks.length} chunk(s) to process`);
-
-    const allQuestions = [];
+    const all = [];
+    const stats = { extracted: 0, kept: 0, rejected: 0, examples: 0, subpart: 0 };
 
     for (let i = 0; i < chunks.length; i++) {
       const chunk = chunks[i];
       const label = chunk.blockLabel || `chunk ${i + 1}`;
-      console.log(`[AIEnhancer] ${i + 1}/${chunks.length} [${chunk.blockType || 'text'}] "${label.slice(0, 50)}" (${chunk.text.length} chars)`);
+      console.log(`${tag} ${i + 1}/${chunks.length} [${chunk.blockType || 'text'}] "${String(label).slice(0, 50)}" (${chunk.text.length} chars)`);
 
       const chunkMeta = {
         ...bookMetadata,
-        diagram:   chunk.diagram   || null,
-        tableData: chunk.tableData || null,
-        blockType: chunk.blockType || null,
+        chapter:     chunk.chapter || bookMetadata.chapter,
+        topic:       chunk.topic   || bookMetadata.topic,
+        parentLabel: chunk.parentLabel || null,
+        blockType:   chunk.blockType || null,
       };
 
       const prompt = chunk._structured
         ? this.buildStructuredPrompt(chunk, chunkMeta)
         : this.buildPrompt(chunk.text, chunkMeta);
 
-      const raw    = await this.callOllama(prompt);
-      const mapped = raw.map(q => this.mapQuestion(q, chunkMeta));
-      console.log(`[AIEnhancer]   → ${mapped.length} question(s)`);
-      allQuestions.push(...mapped);
+      const raw = await callFn(prompt);
+      stats.extracted += raw.length;
+
+      let kept = 0;
+      for (const rq of raw) {
+        const mapped = this.mapQuestion(rq, chunkMeta);
+        const gate = passesQualityGate(mapped);
+        if (!gate.pass) {
+          stats.rejected++;
+          if (stats.rejected <= 25) {
+            console.log(`${tag}   [Quality] ✗ score=${gate.score} (${gate.reasons.slice(0, 3).join('; ')}) :: "${mapped.text.slice(0, 45)}"`);
+          }
+          continue;
+        }
+        if (mapped.section === 'Example') stats.examples++;
+        if (mapped.hasSubParts) { stats.subpart++; console.log(`${tag}   [SubQ] parent + ${mapped.subParts.length} parts :: "${mapped.text.split('\n')[0].slice(0, 45)}"`); }
+        all.push(mapped);
+        kept++;
+      }
+      stats.kept += kept;
+      console.log(`${tag}   → ${kept} kept / ${raw.length} extracted`);
     }
 
-    const unique  = this.deduplicateQuestions(allQuestions);
-    const removed = allQuestions.length - unique.length;
-    console.log(`[AIEnhancer] Total: ${unique.length} unique (${removed} duplicates removed)`);
-    return unique;
+    const unique  = this.deduplicateQuestions(all);
+    const dupes   = all.length - unique.length;
+    console.log(`${tag} ✅ ${unique.length} questions | gate-rejected ${stats.rejected}, dupes ${dupes}, examples ${stats.examples}, multi-part ${stats.subpart}`);
+
+    // Strip in-memory-only helper fields before import.
+    return unique.map(({ hasSubParts, subParts, _subTopic, ...q }) => q);
   }
 
   // ── Math normalization ──────────────────────────────────────────────────────
+  // Delegates to the dedicated latex-normalizer (Phase 4) — the single source of
+  // truth for clean, balanced, KaTeX-renderable math.
 
   normalizeMath(text) {
-    if (!text) return text;
-    text = text.replace(/(?<!\$)(\\begin\{[^}]+\}[\s\S]*?\\end\{[^}]+\})(?!\$)/g, '$$$1$$');
-    text = text.replace(/(?<!\$)(\\(?:frac|sqrt|int|sum|prod|lim|alpha|beta|gamma|delta|pi|theta|lambda|mu|sigma|omega|times|div|pm|mp|leq|geq|neq|approx|infty|partial|nabla|cdot|ldots|forall|exists|in|notin|subset|cup|cap|mathbf|mathrm|text|overline|hat|vec|bar)\b[^$\n]*?)(?!\$)/g, '$$$1$$');
-    text = text.replace(/(?<!\$)×(?!\$)/g, ' $\\times$ ');
-    text = text.replace(/(?<!\$)÷(?!\$)/g, ' $\\div$ ');
-    text = text.replace(/(?<!\$)≠(?!\$)/g, ' $\\neq$ ');
-    text = text.replace(/(?<!\$)≤(?!\$)/g, ' $\\leq$ ');
-    text = text.replace(/(?<!\$)≥(?!\$)/g, ' $\\geq$ ');
-    text = text.replace(/(?<!\$)²(?!\$)/g, '$^{2}$');
-    text = text.replace(/(?<!\$)³(?!\$)/g, '$^{3}$');
-    text = text.replace(/(?<!\$)½(?!\$)/g, '$\\frac{1}{2}$');
-    text = text.replace(/(?<!\$)¼(?!\$)/g, '$\\frac{1}{4}$');
-    text = text.replace(/(?<!\$)¾(?!\$)/g, '$\\frac{3}{4}$');
-    text = text.replace(/\${3,}/g, '$$');
-    return text;
+    return normalizeLatex(text);
   }
 
   normalizeQuestionText(text) {
@@ -419,43 +472,7 @@ class GeminiEnhancer extends AIEnhancer {
   }
 
   async enhanceQuestions(rawQuestions, bookMetadata) {
-    const hasStructure = rawQuestions.some(q => q.blockType);
-    console.log(`\n[GeminiEnhancer] ${this.geminiModel} — ${rawQuestions.length} raw items (${hasStructure ? 'structured' : 'unstructured'})`);
-
-    const chunks = hasStructure
-      ? this.splitStructuredBlocks(rawQuestions)
-      : this.splitIntoChunks(rawQuestions);
-
-    console.log(`[GeminiEnhancer] ${chunks.length} chunk(s) to process`);
-
-    const allQuestions = [];
-
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      const label = chunk.blockLabel || `chunk ${i + 1}`;
-      console.log(`[GeminiEnhancer] ${i + 1}/${chunks.length} [${chunk.blockType || 'text'}] "${label.slice(0, 50)}" (${chunk.text.length} chars)`);
-
-      const chunkMeta = {
-        ...bookMetadata,
-        diagram:   chunk.diagram   || null,
-        tableData: chunk.tableData || null,
-        blockType: chunk.blockType || null,
-      };
-
-      const prompt = chunk._structured
-        ? this.buildStructuredPrompt(chunk, chunkMeta)
-        : this.buildPrompt(chunk.text, chunkMeta);
-
-      const raw    = await this.callGeminiWithPrompt(prompt);
-      const mapped = raw.map(q => this.mapQuestion(q, chunkMeta));
-      console.log(`[GeminiEnhancer]   → ${mapped.length} question(s)`);
-      allQuestions.push(...mapped);
-    }
-
-    const unique  = this.deduplicateQuestions(allQuestions);
-    const removed = allQuestions.length - unique.length;
-    console.log(`[GeminiEnhancer] Total: ${unique.length} unique (${removed} duplicates removed)`);
-    return unique;
+    return this._enhance(rawQuestions, bookMetadata, (p) => this.callGeminiWithPrompt(p), `[GeminiEnhancer] ${this.geminiModel}`);
   }
 }
 

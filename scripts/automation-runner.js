@@ -186,6 +186,13 @@ class AutomationRunner {
         return;
       }
 
+      // Phase-9 visibility: structure breakdown from the parser
+      const byType = parsed.stats && parsed.stats.byType ? JSON.stringify(parsed.stats.byType) : '{}';
+      const droppedInfo = parsed.stats
+        ? `${parsed.stats.dropped || 0} instructional${parsed.stats.droppedProse ? ` + ${parsed.stats.droppedProse} prose` : ''} dropped`
+        : '';
+      console.log(`   📐 Structure: ${parsed.questions.length} block(s) ${byType}${droppedInfo ? ` · ${droppedInfo}` : ''}`);
+
       // Step 2: Enhance questions with AI (split, structure, add LaTeX)
       console.log('2️⃣  Enhancing questions with AI...');
       const enhancedQuestions = await this.aiEnhancer.enhanceQuestions(
@@ -221,7 +228,7 @@ class AutomationRunner {
         status: 'completed',
         totalQuestions: enhancedQuestions.length,
         questionsImported: imported.count,
-        questionsWithDiagrams: parsed.stats.withDiagrams,
+        questionsWithDiagrams: parsed.stats.withDiagrams || 0, // EPUB no longer extracts diagrams; PDF still reports its count
         questionsWithCorrectAnswers: parsed.stats.withCorrectAnswers,
         questionsWithOptions: parsed.stats.withOptions
       });

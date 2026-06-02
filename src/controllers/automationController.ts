@@ -96,7 +96,7 @@ export const bulkImportQuestions = async (req: Request, res: Response) => {
       ? targetCollection.replace('class_', 'Class ') 
       : undefined;
 
-    // Convert to EnhancedQuestionData format
+    // Convert to EnhancedQuestionData format (text + metadata only — no diagrams/tables yet)
     const enhancedQuestions: EnhancedQuestionData[] = questions.map(q => ({
       text: q.text,
       type: q.type,
@@ -105,10 +105,6 @@ export const bulkImportQuestions = async (req: Request, res: Response) => {
       integerAnswer: q.integerAnswer,
       assertion: q.assertion,
       reason: q.reason,
-      diagramUrl: q.diagramUrl,
-      diagramAlt: q.diagramAlt,
-      diagram:    q.diagram,
-      tableData:  q.tableData,
 
       // Flat structure - all at root level
       subject: q.subject,
@@ -120,7 +116,7 @@ export const bulkImportQuestions = async (req: Request, res: Response) => {
       difficulty: q.difficulty || 'medium',
       marks: q.marks || 1,
       explanation: q.explanation,
-      
+
       createdBy: new Types.ObjectId(userId || (req as any).user?.id),
       source: 'Smart Import',
       isActive: true

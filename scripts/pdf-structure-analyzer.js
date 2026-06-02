@@ -13,6 +13,9 @@
  * Returns an array of SemanticBlock objects or null if no structure is found.
  */
 
+const { classifyContentType, IMPORT_BLACKLIST } = require('./content-classifier');
+const { groupSubQuestionBlocks } = require('./sub-question-grouper');
+
 // ── Boundary patterns (order matters — more specific first) ──────────────────
 
 const QUESTION_BOUNDARIES = [
@@ -21,7 +24,13 @@ const QUESTION_BOUNDARIES = [
   { re: /^CHAPTER\s+\d+/i,                                    type: 'chapter_header' },
   { re: /^(?:THINK ABOUT IT|TRY THESE|LET[''']S\s+THINK)/i,  type: 'section_header' },
   { re: /^(?:IN[-\s]TEXT\s*QUESTIONS?|CHECK YOUR PROGRESS)/i, type: 'section_header' },
-  { re: /^(?:ACTIVITIES?|PROJECTS?)\s*$/i,                    type: 'section_header' },
+
+  // Instructional sections — boundaries so they form their own blocks and are
+  // then dropped (Phase 5). Must precede the question/verb patterns below.
+  { re: /^(?:Activit(?:y|ies)|Projects?|Experiments?|Lab\s*Work|Do\s+This)\b/i, type: 'activity' },
+  { re: /^Definition\b/i,                                     type: 'definition' },
+  { re: /^(?:Summary|Key\s+Points|Points\s+to\s+Remember|Let\s+us\s+Recall|What\s+(?:we\s+have|you\s+will)\s+learn)/i, type: 'summary' },
+  { re: /^(?:Learning\s+Outcomes?|Learning\s+Objectives?)/i,  type: 'learning_outcome' },
 
   // Individual question / example starters
   { re: /^Example\s+\d+\s*[:.]/i,                            type: 'example' },
@@ -209,9 +218,24 @@ function analyzeDocumentStructure(pageData) {
     });
   }
 
-  // Phase 4: discard header-only blocks with no meaningful body text
-  // (exercise headers will be merged into following question blocks below)
-  const meaningful = mergeHeadersIntoFollowing(blocks);
+  // Phase 5: drop instructional/solution blocks (activity, note, definition,
+  // theorem, proof, summary, learning outcome). Re-classifying each block's label
+  // catches both boundary-typed 'theorem' blocks and "Activity"/"Definition"
+  // sections. Done BEFORE sub-part grouping and header merge so labels are clean.
+  const importable = blocks.filter((b) => {
+    if (IMPORT_BLACKLIST.has(b.blockType)) return false;
+    const ct = classifyContentType(b.blockLabel || b.text);
+    return !IMPORT_BLACKLIST.has(ct);
+  });
+
+  // Phase 2: merge parent stems with their sub-question blocks (must run before
+  // header-merge, which would otherwise prefix "[EXERCISE x]" onto each (i)/(ii)
+  // and hide the sub-part markers).
+  const grouped = groupSubQuestionBlocks(importable);
+
+  // Phase 4: prepend exercise/section header context to following questions and
+  // drop header-only blocks with no body.
+  const meaningful = mergeHeadersIntoFollowing(grouped);
 
   if (meaningful.length === 0) return null;
   return meaningful;

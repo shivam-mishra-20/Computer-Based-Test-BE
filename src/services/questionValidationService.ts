@@ -156,60 +156,79 @@ export function sanitizeQuestionData(data: Partial<EnhancedQuestionData>): Parti
 }
 
 /**
- * Convert common math/science notation to LaTeX
- * Preserves existing LaTeX syntax
+ * Repair malformed LaTeX: drop empty \frac{}{} / \sqrt{} / ^{} / _{},
+ * balance braces and $ delimiters. Mirrors scripts/latex-normalizer.fixCommonErrors
+ * (kept in sync manually — JS↔TS can't share the module without build wiring).
+ * The authoritative normalization already runs at extraction time; this is a
+ * defensive pass so no import path can persist broken math.
+ */
+function fixLatexErrors(text: string): string {
+  if (!text) return text;
+  let t = text;
+
+  // Repair missing frac braces, then drop empty macros
+  t = t.replace(/\\frac\s*(\d)\s*(\d)/g, '\\frac{$1}{$2}');
+  t = t.replace(/\\frac\s*\{\s*\}\s*\{\s*\}/g, '');
+  t = t.replace(/\\frac\s*\{([^{}]+)\}\s*\{\s*\}/g, '$1');
+  t = t.replace(/\\frac\s*\{\s*\}\s*\{([^{}]+)\}/g, '$1');
+  t = t.replace(/\\sqrt\s*\{\s*\}/g, '');
+  t = t.replace(/\^\{\s*\}/g, '');
+  t = t.replace(/_\{\s*\}/g, '');
+  t = t.replace(/\${3,}/g, '$$');
+
+  // Balance braces (drop unmatched closers, append missing closers)
+  let out = '';
+  let depth = 0;
+  for (const ch of t) {
+    if (ch === '}') { if (depth > 0) { depth--; out += ch; } }
+    else { if (ch === '{') depth++; out += ch; }
+  }
+  while (depth-- > 0) out += '}';
+
+  // Balance $ delimiters
+  if (((out.match(/\$/g) || []).length) % 2 !== 0) {
+    const i = out.lastIndexOf('$');
+    if (i !== -1) out = out.slice(0, i) + out.slice(i + 1);
+  }
+  return out;
+}
+
+/**
+ * Convert common math/science notation to LaTeX, then repair any malformed
+ * output. Already-delimited text (e.g. normalized Smart Import questions) skips
+ * conversion but still gets the structural repair pass.
  */
 function convertToLatex(text: string): string {
   let result = text;
-  
-  // Skip if already has LaTeX delimiters
+
+  // Skip conversion if already has LaTeX delimiters — but still repair structure
   if (result.includes('$') || result.includes('\\[') || result.includes('\\(')) {
-    return result;
+    return fixLatexErrors(result);
   }
-  
+
   // Common patterns to convert:
-  
-  // 1. Superscripts: x^2 -> $x^2$
+
+  // 1. Superscripts: x^2 -> $x^{2}$
   result = result.replace(/([a-zA-Z0-9]+)\^([0-9]+)/g, '$$$1^{$2}$$');
-  
-  // 2. Subscripts: H_2O -> $H_2O$
+
+  // 2. Subscripts: H_2O -> $H_{2}O$
   result = result.replace(/([a-zA-Z]+)_([0-9]+)/g, '$$$1_{$2}$$');
-  
+
   // 3. Fractions: 1/2 -> $\frac{1}{2}$ (simple cases)
   result = result.replace(/\b(\d+)\/(\d+)\b/g, '$$\\frac{$1}{$2}$$');
-  
-  // 4. Greek letters (common ones)
-  const greekMap: Record<string, string> = {
-    'alpha': '\\alpha',
-    'beta': '\\beta',
-    'gamma': '\\gamma',
-    'delta': '\\delta',
-    'theta': '\\theta',
-    'lambda': '\\lambda',
-    'pi': '\\pi',
-    'sigma': '\\sigma',
-    'omega': '\\omega',
-  };
-  
-  Object.entries(greekMap).forEach(([word, latex]) => {
-    const regex = new RegExp(`\\b${word}\\b`, 'gi');
-    result = result.replace(regex, `$${latex}$`);
-  });
-  
-  // 5. Mathematical operators and symbols
+
+  // 4. Mathematical operators and symbols (Unicode only — we do NOT convert
+  //    English words like "pi"/"alpha", which would corrupt ordinary prose)
   result = result.replace(/≤/g, '$\\leq$');
   result = result.replace(/≥/g, '$\\geq$');
   result = result.replace(/≠/g, '$\\neq$');
   result = result.replace(/×/g, '$\\times$');
   result = result.replace(/÷/g, '$\\div$');
-  result = result.replace(/√/g, '$\\sqrt{}$');
+  result = result.replace(/√\s*([0-9a-zA-Z]+)/g, '$\\sqrt{$1}$'); // √2 -> $\sqrt{2}$
+  result = result.replace(/√/g, '');                              // drop bare √ (no operand)
   result = result.replace(/∞/g, '$\\infty$');
-  
-  // 6. Clean up multiple consecutive $ signs
-  result = result.replace(/\$+/g, '$');
-  result = result.replace(/\$\s*\$/g, '');
-  
-  return result;
+
+  return fixLatexErrors(result);
 }
 
 /**
@@ -403,12 +422,21 @@ export async function isDuplicate(
  * Throws error if validation fails
  * Returns false if question should be skipped (e.g., empty answers)
  */
+// Instructional / non-question content that must never be saved as a question
+// (defense-in-depth for manual/upload paths; the import pipeline filters earlier).
+const INSTRUCTIONAL_RE = /^\s*(?:activit(?:y|ies)|project|experiment|lab\s*work|definition|theorem|lemma|corollary|postulate|proof|solution|explanation|summary|key\s+points|points\s+to\s+remember|learning\s+outcomes?|learning\s+objectives?|note\s*:|remark\s*:)\b/i;
+
 export function validateQuestionData(data: Partial<EnhancedQuestionData>): boolean {
   // Required fields
   if (!data.text || data.text.trim().length < 5) {
     throw new Error('Question text must be at least 5 characters');
   }
-  
+
+  // Reject instructional / solution material masquerading as a question
+  if (INSTRUCTIONAL_RE.test(data.text)) {
+    throw new Error('Instructional/non-question content rejected');
+  }
+
   if (!data.type) {
     throw new Error('Question type is required');
   }

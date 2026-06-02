@@ -1,95 +1,307 @@
 #!/usr/bin/env node
 
+/**
+ * EPUB Question Parser — structure-aware edition.
+ *
+ * Walks each chapter's DOM in document order, classifies every text block via
+ * the shared content-classifier, drops instructional/solution material, groups
+ * sub-questions with their parent, and emits blockType-annotated semantic blocks
+ * — the SAME shape pdf-parser produces — so EPUBs flow through ai-enhancer's
+ * high-quality STRUCTURED path instead of the old generic fallback.
+ *
+ * Output: { metadata, chapters, questions: blocks[], stats }
+ *   where each block = { text, blockType, blockLabel, parentLabel, chapter, topic }
+ *
+ * Graphics (images/tables) are intentionally NOT extracted — questions are
+ * text-only; graphical content is added manually later.
+ */
+
 const JSZip = require('jszip');
 const fs = require('fs').promises;
 const xml2js = require('xml2js');
 const cheerio = require('cheerio');
 const path = require('path');
-const DiagramExtractorEPUB = require('../src/services/diagramExtractorEPUB');
+
+const { classifyContentType, IMPORT_BLACKLIST, isQuestionType } = require('./content-classifier');
+const { groupSubQuestionBlocks } = require('./sub-question-grouper');
+
+// Max characters packed into one multi-question block before the AI is called.
+const PACK_SIZE = parseInt(process.env.EPUB_PACK_SIZE || '1500', 10);
+
+// Leaf block-level tags we treat as text containers (tables excluded on purpose).
+const BLOCK_TAGS = new Set(['p', 'li', 'blockquote', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'div']);
+const HEADER_TYPES = new Set(['chapter_header', 'exercise_header', 'section_header']);
 
 class EPUBParser {
   constructor() {
-    this.zip = null; // Store zip for image extraction
-    this.diagramExtractor = null; // Will be initialized after metadata is available
+    // Question text + metadata only. Diagram/image/table extraction is
+    // intentionally excluded from the EPUB pipeline.
   }
 
   async parse(epubPath) {
     console.log('[EPUB Parser] Reading:', epubPath);
     const data = await fs.readFile(epubPath);
     const zip = await JSZip.loadAsync(data);
-    this.zip = zip; // Store for later image access
-    
-    // Step 1: Get metadata
+
     const metadata = await this.extractMetadata(zip, epubPath);
     console.log('[EPUB Parser] Metadata:', metadata);
-    
-    // Step 2: Initialize diagram extractor with metadata
-    this.diagramExtractor = new DiagramExtractorEPUB(zip, metadata);
-    console.log('[EPUB Parser] Diagram extractor initialized');
-    
-    // Step 3: Get chapter structure
+
     const chapters = await this.extractChapters(zip);
     console.log(`[EPUB Parser] Found ${chapters.length} chapters`);
-    
-    // Step 4: Extract questions from each chapter
-    const questions = [];
+
+    // Classify every chapter into semantic blocks (instructional content dropped,
+    // sub-questions grouped). Precision/recall + packing are decided GLOBALLY so
+    // page-per-file ("reflowed") EPUBs don't explode into thousands of AI calls.
+    const allBlocks = [];
     for (const chapter of chapters) {
-      const chapterQuestions = await this.extractQuestionsFromChapter(
-        zip, 
-        chapter, 
-        metadata
-      );
-      questions.push(...chapterQuestions);
+      const chapterBlocks = await this.classifyChapter(zip, chapter);
+      allBlocks.push(...chapterBlocks);
     }
-    
-    // Step 5: Analyze statistics
-    const stats = this.analyzeQuestions(questions);
-    
-    console.log(`[EPUB Parser] Total questions: ${questions.length}`);
-    console.log(`[EPUB Parser] With options: ${stats.withOptions}`);
-    console.log(`[EPUB Parser] With correct answers: ${stats.withCorrectAnswers}`);
-    console.log(`[EPUB Parser] With diagrams: ${stats.withDiagrams}`);
-    
-    return { metadata, chapters, questions, stats };
+
+    // First mark multi-question pages (several numbered Qs in one block) as
+    // 'question_group' so the AI extracts ALL of them. Crucially this happens
+    // BEFORE sub-part grouping, so a whole page is never mistaken for one
+    // multi-part question. We over-detect deliberately: a single question marked
+    // question_group still extracts fine, whereas a missed multi-Q page would be
+    // mis-grouped into one giant "question".
+    for (const b of allBlocks) {
+      if (this.isMultiQuestion(b.text)) b.blockType = 'question_group';
+    }
+
+    // Group sub-parts only across SINGLE-question blocks (grouper ignores
+    // question_group). Then finalize the remaining singles as 'question'.
+    const grouped = groupSubQuestionBlocks(allBlocks);
+    for (const b of grouped) {
+      if (b.blockType === 'question_group' || b.blockType === 'example' || b.hasSubParts) continue;
+      b.blockType = 'question';
+    }
+
+    // Paginated book? (many chapters, ~1 block each) → ignore chapter boundaries
+    // when packing, since the "chapters" are just pages.
+    const paginated = chapters.length > 50 && allBlocks.length / Math.max(chapters.length, 1) < 2.5;
+    const blocks = this.packBlocks(grouped, PACK_SIZE, { flushOnChapter: !paginated });
+
+    const stats = this.analyzeBlocks(blocks);
+    console.log(`[EPUB Parser] ${allBlocks.length} kept blocks (${this.dropped || 0} instructional + ${this.droppedProse || 0} prose dropped) → ${blocks.length} block(s)${paginated ? ' [paginated]' : ''}`);
+    console.log(`[EPUB Parser] By type: ${JSON.stringify(stats.byType)}`);
+
+    return { metadata, chapters, questions: blocks, stats };
   }
-  
-  analyzeQuestions(questions) {
+
+  // ── Block classification (structure-aware) ──────────────────────────────────
+
+  async classifyChapter(zip, chapter) {
+    const htmlFile = zip.file(chapter.src);
+    if (!htmlFile) {
+      console.warn(`[EPUB Parser] Missing HTML for chapter "${chapter.title}" at ${chapter.src}`);
+      return [];
+    }
+
+    const html = await htmlFile.async('text');
+    const $ = cheerio.load(html);
+    const chapterTitle = chapter.title || 'General';
+
+    // 1. Collect leaf text blocks in document order
+    const rawTexts = this.collectLeafBlocks($, $('body')[0] || null);
+    if (rawTexts.length === 0) {
+      const bodyText = $('body').text().replace(/\r/g, '');
+      bodyText.split(/\n{2,}/).forEach((p) => {
+        const t = p.replace(/\s+/g, ' ').trim();
+        if (t.length > 2) rawTexts.push(t);
+      });
+    }
+
+    // 2. Classify each block + track the governing exercise/section header
+    let parentLabel = null;
+    const classified = [];
+    for (const text of rawTexts) {
+      if (text.length < 3) continue;
+      const blockType = classifyContentType(text);
+
+      if (HEADER_TYPES.has(blockType)) {
+        parentLabel = text.split('\n')[0].trim().slice(0, 80);
+        continue; // headers give context only — not imported themselves
+      }
+      if (IMPORT_BLACKLIST.has(blockType)) {
+        this.dropped = (this.dropped || 0) + 1;
+        continue; // activity / note / definition / theorem / proof / solution / …
+      }
+
+      // Keep questions and any block that carries a question signal; drop pure
+      // prose/theory. (Reflowed books bury questions mid-page, so we trust the
+      // signal, not just the first line.)
+      if (!isQuestionType(blockType) && !this.hasQuestionSignal(text)) {
+        this.droppedProse = (this.droppedProse || 0) + 1;
+        continue;
+      }
+
+      classified.push({
+        text,
+        blockType,
+        blockLabel: text.split('\n')[0].trim().slice(0, 80),
+        parentLabel,
+        chapter: chapterTitle,
+        topic: chapterTitle,
+      });
+    }
+
+    return classified; // sub-part grouping happens globally in parse()
+  }
+
+  // ── Question-signal heuristics ──────────────────────────────────────────────
+
+  // Counts top-level numbered-question starts: "1. " "12) " "10, " "Q.3" …
+  // (OCR books use varied delimiters, so we're liberal here.)
+  questionMarkerCount(text) {
+    const m = String(text || '').match(/(?:^|\s)(?:Q\.?\s*\d{1,3}\b|\d{1,3}[.),](?=\s+\S))/g);
+    return m ? m.length : 0;
+  }
+
+  /**
+   * Does this block hold MULTIPLE questions (so the AI should extract all)?
+   * Biased to over-detect: a question bank page packs ~10 MCQs, each ending in
+   * an "(d)" option, so ≥2 "(d)" markers is a strong multi-question signal.
+   */
+  isMultiQuestion(text) {
+    if (this.questionMarkerCount(text) >= 2) return true;
+    const dOptions = (String(text || '').match(/\(\s*[dD]\s*\)/g) || []).length;
+    if (dOptions >= 2) return true;                       // ≥2 MCQ option-sets
+    return false;
+  }
+
+  // True when a block plausibly contains a question (vs. pure theory/prose).
+  hasQuestionSignal(text) {
+    const t = String(text || '');
+    if (/\?/.test(t)) return true;
+    if (this.questionMarkerCount(t) >= 1) return true;
+    if (/^\s*(?:solve|find|prove|show|calculate|determine|evaluate|simplify|factori[sz]e|expand|rationali[sz]e|state|define|explain|describe|name|choose|fill|write|express|convert|draw|construct|verify|identify|match|compute|differentiate|integrate)\b/i.test(t)) return true;
+    if (/\(\s*a\s*\)[\s\S]*\(\s*b\s*\)/i.test(t)) return true; // (a)…(b) option pair
+    if (/_{3,}/.test(t)) return true;                          // fill-in-the-blank
+    return false;
+  }
+
+  /**
+   * Depth-first collection of leaf block-level elements' text, in document order.
+   * A "leaf block" is a block tag containing no nested block tags. Tables are
+   * skipped (their text is never emitted).
+   */
+  collectLeafBlocks($, root) {
+    const blocks = [];
+    if (!root) return blocks;
+
+    const walk = (node) => {
+      $(node).contents().each((_, child) => {
+        if (child.type !== 'tag') return;
+        const tag = (child.name || '').toLowerCase();
+        if (tag === 'table' || tag === 'style' || tag === 'script') return; // ignore
+        const $child = $(child);
+        const hasBlockChildren = $child
+          .children()
+          .toArray()
+          .some((c) => BLOCK_TAGS.has((c.name || '').toLowerCase()) || (c.name || '').toLowerCase() === 'table');
+
+        if (BLOCK_TAGS.has(tag) && !hasBlockChildren) {
+          const text = $child.text().replace(/\s+/g, ' ').trim();
+          if (text) blocks.push(text);
+        } else {
+          walk(child);
+        }
+      });
+    };
+
+    walk(root);
+    return blocks;
+  }
+
+  /**
+   * Pack consecutive simple questions into ≤maxChars multi-question blocks
+   * (blockType 'question_group'), while keeping examples and multi-part
+   * questions as their own single-question blocks to preserve boundaries.
+   */
+  packBlocks(blocks, maxChars, opts = {}) {
+    const { flushOnChapter = true } = opts;
+    const out = [];
+    let buf = [];
+    let bufLen = 0;
+    let bufParent = null;
+
+    const flush = () => {
+      if (buf.length === 0) return;
+      if (buf.length === 1) {
+        out.push(buf[0]); // single → keep its own type (one-question extraction)
+      } else {
+        out.push({
+          text: buf.map((b) => b.text).join('\n\n'),
+          blockType: 'question_group',
+          blockLabel: bufParent || 'Questions',
+          parentLabel: bufParent,
+          chapter: buf[0].chapter,
+          topic: buf[0].topic,
+        });
+      }
+      buf = [];
+      bufLen = 0;
+    };
+
+    for (const b of blocks) {
+      // Standalone: examples, multi-part questions, and multi-question pages
+      // (question_group) — each is its own AI call to preserve boundaries / fit
+      // the output token budget.
+      if (b.blockType === 'example' || b.blockType === 'question_group' || b.hasSubParts) {
+        flush();
+        out.push(b);
+        continue;
+      }
+      const parentChanged = buf.length > 0 && b.parentLabel !== bufParent;
+      const chapterChanged = flushOnChapter && buf.length > 0 && b.chapter !== buf[0].chapter;
+      const tooBig = bufLen + b.text.length > maxChars && buf.length > 0;
+      if (parentChanged || chapterChanged || tooBig) flush();
+      if (buf.length === 0) bufParent = b.parentLabel || null;
+      buf.push(b);
+      bufLen += b.text.length;
+    }
+    flush();
+    return out;
+  }
+
+  analyzeBlocks(blocks) {
     return {
-      total: questions.length,
-      withOptions: questions.filter(q => q.options && q.options.length > 0).length,
-      withCorrectAnswers: questions.filter(q => 
-        q.correctAnswerText || 
-        (q.options && q.options.some(opt => opt.isCorrect))
-      ).length,
-      withDiagrams: questions.filter(q => q.diagramUrl).length,
-      byType: questions.reduce((acc, q) => {
-        acc[q.type] = (acc[q.type] || 0) + 1;
+      total: blocks.length,
+      byType: blocks.reduce((acc, b) => {
+        acc[b.blockType] = (acc[b.blockType] || 0) + 1;
         return acc;
-      }, {})
+      }, {}),
+      // Determined after AI extraction — kept for processing-record compatibility.
+      withOptions: 0,
+      withCorrectAnswers: 0,
+      withDiagrams: 0,
+      dropped: this.dropped || 0,
+      droppedProse: this.droppedProse || 0,
     };
   }
-  
+
+  // ── Metadata ──────────────────────────────────────────────────────────────
+
   async extractMetadata(zip, epubPath) {
     try {
-      // Read container.xml to find content.opf location
       const containerXML = await zip.file('META-INF/container.xml').async('text');
       const container = await xml2js.parseStringPromise(containerXML);
       const contentPath = container.container.rootfiles[0].rootfile[0].$['full-path'];
-      
-      // Read content.opf
+
       const contentOPF = await zip.file(contentPath).async('text');
       const content = await xml2js.parseStringPromise(contentOPF);
-      
       const metadata = content.package.metadata[0];
-      
+
       const title = metadata['dc:title']?.[0] || path.basename(epubPath, '.epub');
       const metadataSubject = metadata['dc:subject']?.[0];
-      
+
       return {
-        title: title,
+        title,
         author: metadata['dc:creator']?.[0] || 'Unknown',
         subject: this.identifySubjectFromTitle(title, metadataSubject),
-        language: metadata['dc:language']?.[0] || 'en'
+        language: metadata['dc:language']?.[0] || 'en',
+        class: this.extractClassFromTitle(title),
+        board: this.extractBoardFromTitle(title),
       };
     } catch (error) {
       console.warn('[EPUB Parser] Failed to extract metadata:', error.message);
@@ -98,525 +310,163 @@ class EPUBParser {
         title: filename,
         author: 'Unknown',
         subject: this.identifySubjectFromTitle(filename, 'Unknown'),
-        language: 'en'
+        language: 'en',
+        class: this.extractClassFromTitle(filename),
+        board: this.extractBoardFromTitle(filename),
       };
     }
   }
 
-  /**
-   * Intelligently identify subject from book title or metadata
-   * @param {string} title - Book title
-   * @param {string} metadataSubject - Subject from metadata
-   * @returns {string} Identified subject
-   */
   identifySubjectFromTitle(title, metadataSubject) {
-    // If metadata has subject and it's not 'Unknown', use it
     if (metadataSubject && metadataSubject !== 'Unknown' && metadataSubject.length > 2) {
       return metadataSubject;
     }
 
     const titleLower = title.toLowerCase();
-
-    // Physics patterns
-    if (/(physics|mechanics|thermodynamics|electromagnetism|optics|waves)/i.test(titleLower)) {
-      return 'Physics';
-    }
-
-    // Chemistry patterns
-    if (/(chemistry|organic|inorganic|physical chemistry|chemical)/i.test(titleLower)) {
-      return 'Chemistry';
-    }
-
-    // Mathematics patterns
-    if (/(mathematics|math|algebra|geometry|calculus|trigonometry|statistics)/i.test(titleLower)) {
-      return 'Mathematics';
-    }
-
-    // Biology patterns
-    if (/(biology|bio|botany|zoology|life science|ecology|genetics)/i.test(titleLower)) {
-      return 'Biology';
-    }
-
-    // English patterns
-    if (/(english|literature|grammar|composition)/i.test(titleLower)) {
-      return 'English';
-    }
-
-    // Computer Science patterns
-    if (/(computer|programming|informatics|coding)/i.test(titleLower)) {
-      return 'Computer Science';
-    }
-
-    // Social Science patterns
-    if (/(history|geography|civics|economics|social)/i.test(titleLower)) {
-      return 'Social Science';
-    }
+    if (/(physics|mechanics|thermodynamics|electromagnetism|optics|waves)/i.test(titleLower)) return 'Physics';
+    if (/(chemistry|organic|inorganic|physical chemistry|chemical)/i.test(titleLower)) return 'Chemistry';
+    if (/(mathematics|math|algebra|geometry|calculus|trigonometry|statistics)/i.test(titleLower)) return 'Mathematics';
+    if (/(biology|bio|botany|zoology|life science|ecology|genetics)/i.test(titleLower)) return 'Biology';
+    if (/(english|literature|grammar|composition)/i.test(titleLower)) return 'English';
+    if (/(computer|programming|informatics|coding)/i.test(titleLower)) return 'Computer Science';
+    if (/(history|geography|civics|economics|social)/i.test(titleLower)) return 'Social Science';
 
     console.warn(`[EPUB Parser] Could not identify subject from title: "${title}"`);
     return 'Unknown';
   }
-  
+
+  /**
+   * Chapters = the OPF spine (canonical reading order of every content file).
+   * The TOC only labels a subset and is often nested, so we read the spine and
+   * borrow human-readable titles from toc.ncx where available.
+   */
   async extractChapters(zip) {
     try {
-      // Try toc.ncx first
-      const tocFile = zip.file(/toc\.ncx$/i)[0];
-      if (tocFile) {
-        const tocXML = await tocFile.async('text');
-        const toc = await xml2js.parseStringPromise(tocXML);
-        
-        const chapters = [];
-        const navPoints = toc.ncx.navMap[0].navPoint || [];
-        
-        for (const point of navPoints) {
-          chapters.push({
-            title: point.navLabel[0].text[0],
-            src: point.content[0].$.src,
-            id: point.$.id
-          });
-        }
-        
-        if (chapters.length > 0) {
-          return chapters;
-        }
-      }
-      
-      // Fallback: Scan all HTML/XHTML files
-      console.log('[EPUB Parser] Using fallback: scanning all HTML files');
+      const containerXML = await zip.file('META-INF/container.xml').async('text');
+      const container = await xml2js.parseStringPromise(containerXML);
+      const opfPath = container.container.rootfiles[0].rootfile[0].$['full-path'];
+      const opfDir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
+
+      const opf = await xml2js.parseStringPromise(await zip.file(opfPath).async('text'));
+      const pkg = opf.package;
+
+      const manifest = {};
+      for (const item of pkg.manifest[0].item || []) manifest[item.$.id] = item.$.href;
+
+      const labels = await this.buildTocLabels(zip).catch(() => ({}));
+
       const chapters = [];
-      const htmlFiles = [];
-      
-      // Get all HTML files from the zip
-      zip.forEach((relativePath, file) => {
-        if (/\.(x?html?|xml)$/i.test(relativePath) && 
-            !relativePath.includes('toc.') && 
-            !relativePath.includes('nav.') &&
-            !file.dir) {
-          htmlFiles.push({
-            path: relativePath,
-            name: relativePath.split('/').pop().replace(/\.(x?html?|xml)$/i, '')
-          });
-        }
-      });
-      
-      console.log(`[EPUB Parser] Found ${htmlFiles.length} HTML files to scan`);
-      
-      // Create chapters from HTML files
-      for (let i = 0; i < htmlFiles.length; i++) {
+      for (const ref of pkg.spine[0].itemref || []) {
+        const href = manifest[ref.$.idref];
+        if (!href) continue;
+        const src = this.resolvePath(opfDir, href.split('#')[0]);
+        if (!/\.(x?html?|xml)$/i.test(src)) continue;
+        const base = src.split('/').pop();
         chapters.push({
-          title: htmlFiles[i].name || `Chapter ${i + 1}`,
-          src: htmlFiles[i].path,
-          id: `chapter_${i + 1}`
+          title: labels[base] || base.replace(/\.(x?html?|xml)$/i, ''),
+          src,
+          id: ref.$.idref,
         });
       }
-      
-      return chapters;
+      if (chapters.length > 0) return chapters;
     } catch (error) {
-      console.warn('[EPUB Parser] Failed to extract chapters:', error.message);
-      return [];
-    }
-  }
-  
-  async extractQuestionsFromChapter(zip, chapter, metadata) {
-    const questions = [];
-    
-    // Get the HTML file - chapter.src is already the full path from extractChapters
-    const htmlFile = zip.file(chapter.src);
-    
-    if (!htmlFile) {
-      console.warn(`[EPUB Parser] Could not find HTML for chapter: ${chapter.title} at ${chapter.src}`);
-      return questions;
-    }
-    
-    const html = await htmlFile.async('text');
-    const $ = cheerio.load(html);
-    
-    console.log(`[EPUB Parser] Processing chapter: ${chapter.title}`);
-    
-    // Try multiple extraction strategies
-    
-    // Strategy 1: Look for exercise sections
-    const exercises = this.detectExerciseSections($);
-    if (exercises.length > 0) {
-      console.log(`[EPUB Parser] Found ${exercises.length} exercise sections in "${chapter.title}"`);
-      for (const exercise of exercises) {
-        const exerciseQuestions = await this.extractQuestionsFromExercise($, exercise, chapter, metadata);
-        questions.push(...exerciseQuestions);
-      }
-    }
-    
-    // Strategy 2: If no exercises found, look for numbered paragraphs/questions
-    if (questions.length === 0) {
-      console.log(`[EPUB Parser] No exercise sections found, trying direct question extraction`);
-      const directQuestions = await this.extractDirectQuestions($, chapter, metadata);
-      questions.push(...directQuestions);
-    }
-    
-    // Strategy 3: If still no questions, extract all paragraphs as potential questions
-    if (questions.length === 0) {
-      console.log(`[EPUB Parser] Trying paragraph extraction for "${chapter.title}"`);
-      const paragraphQuestions = await this.extractFromParagraphs($, chapter, metadata);
-      questions.push(...paragraphQuestions);
-    }
-    
-    console.log(`[EPUB Parser] Extracted ${questions.length} questions from "${chapter.title}"`);
-    
-    return questions;
-  }
-  
-  detectExerciseSections($) {
-    const exercises = [];
-    const exerciseHeaders = [
-      /exercise\s+\d+\.?\d*/i,
-      /practice\s+questions/i,
-      /miscellaneous\s+exercise/i,
-      /chapter.*test/i,
-      /mcqs?/i,
-      /objective/i,
-      /very\s+short\s+answer/i,
-      /short\s+answer/i,
-      /long\s+answer/i,
-      /solved\s+examples?/i
-    ];
-    
-    $('h1, h2, h3, h4, h5, p.title, div.title').each((i, elem) => {
-      const text = $(elem).text().trim();
-      
-      for (const pattern of exerciseHeaders) {
-        if (pattern.test(text)) {
-          exercises.push({
-            title: text,
-            element: elem,
-            type: this.classifyExerciseType(text)
-          });
-          break;
-        }
-      }
-    });
-    
-    return exercises;
-  }
-  
-  classifyExerciseType(title) {
-    const lower = title.toLowerCase();
-    if (/mcq|objective|multiple\s+choice/i.test(lower)) return 'mcq';
-    if (/true.*false/i.test(lower)) return 'truefalse';
-    if (/fill.*blank/i.test(lower)) return 'fill';
-    if (/very\s+short/i.test(lower)) return 'short';
-    if (/long\s+answer/i.test(lower)) return 'long';
-    return 'mixed';
-  }
-  
-  async extractQuestionsFromExercise($, exercise, chapter, metadata) {
-    const questions = [];
-    
-    // Get all content after exercise header until next exercise or end
-    let currentElement = $(exercise.element).next();
-    let questionNumber = 1;
-    const maxIterations = 500; // Safety limit
-    let iterations = 0;
-    
-    while (currentElement.length && !this.isExerciseHeader($, currentElement) && iterations < maxIterations) {
-      iterations++;
-      const text = currentElement.text().trim();
-      
-      // Check if this element starts with a question number
-      const questionMatch = text.match(/^(?:Q\.?\s*)?(\d+)\.?\s+(.+)/);
-      
-      if (questionMatch && questionMatch[2]) {
-        const questionText = questionMatch[2].trim();
-        
-        // Check for MCQ options in next elements
-        const { options, nextElement } = this.extractOptions($, currentElement);
-        currentElement = nextElement;
-        
-        // Check for images/diagrams with question context for Firebase Storage
-        const questionContext = {
-          chapter: chapter.title || 'general',
-          questionNumber: questionNumber.toString()
-        };
-        const diagramMetadata = await this.extractDiagram($, currentElement, questionContext);
-        
-        // Create question object with diagram metadata (NOT base64)
-        const question = {
-          // Core fields
-          text: questionText,
-          type: options.length > 0 ? 'mcq' : (exercise.type && exercise.type !== 'mixed' ? exercise.type : 'short'),
-          options: options.length > 0 ? options : undefined,
-          
-          // Metadata fields (FLAT - at root level, NOT nested)
-          subject: metadata.subject || 'Unknown',           // REQUIRED
-          topic: chapter.title || 'General',                // REQUIRED  
-          chapter: chapter.title || 'Unknown',              // REQUIRED
-          board: this.extractBoardFromTitle(metadata.title), // REQUIRED
-          class: this.extractClassFromTitle(metadata.title),
-          section: exercise.title,
-          difficulty: 'medium',
-          marks: this.estimateMarks(exercise.type, options.length > 0),
-          
-          // Additional fields
-          correctAnswerText: this.extractCorrectAnswer(options),
-          diagram: diagramMetadata || undefined,  // Firebase metadata, NOT base64
-          source: 'Smart Import',                           // REQUIRED
-          isActive: true,                                   // REQUIRED
-          
-          // For tracking during extraction
-          questionNumber: questionNumber.toString()
-        };
-        
-        questions.push(question);
-        questionNumber++;
-      }
-      
-      currentElement = currentElement.next();
-    }
-    
-    return questions;
-  }
-  
-  extractOptions($, questionElement) {
-    const options = [];
-    let nextElement = questionElement.next();
-    const optionPattern = /^\s*[\(\[]?([a-dA-D])[\)\]\.]\s*(.+)/;
-    
-    // Check next 6 elements for options
-    for (let i = 0; i < 6 && nextElement.length; i++) {
-      const text = nextElement.text().trim();
-      
-      if (optionPattern.test(text)) {
-        const match = text.match(optionPattern);
-        const optionText = match ? match[2].trim() : text.replace(optionPattern, '').trim();
-        
-        options.push({
-          text: optionText,
-          isCorrect: false // Will be determined from answer key if available
-        });
-        
-        nextElement = nextElement.next();
-      } else if (text && !this.isQuestionHeader(text)) {
-        // Might be a continuation of previous option
-        break;
-      } else {
-        break;
-      }
-    }
-    
-    return { options, nextElement };
-  }
-  
-  extractCorrectAnswer(options) {
-    if (!options || options.length === 0) return undefined;
-    
-    const correctOption = options.find(opt => opt.isCorrect);
-    return correctOption ? correctOption.text : undefined;
-  }
-  
-  /**
-   * Extract diagram using Firebase Storage (NOT base64)
-   * Delegates to DiagramExtractorEPUB service
-   * @param {CheerioStatic} $ - Cheerio instance
-   * @param {CheerioElement} element - Current element
-   * @param {Object} questionContext - Question context (chapter, number)
-   * @returns {Promise<Object|null>} Diagram metadata or null
-   */
-  async extractDiagram($, element, questionContext) {
-    if (!this.diagramExtractor) {
-      console.warn('[EPUB Parser] Diagram extractor not initialized');
-      return null;
+      console.warn('[EPUB Parser] Spine parse failed, scanning all HTML:', error.message);
     }
 
-    try {
-      const diagramMetadata = await this.diagramExtractor.extractDiagram($, element, questionContext);
-      return diagramMetadata;
-    } catch (error) {
-      console.warn('[EPUB Parser] Diagram extraction failed:', error.message);
-      return null;
+    // Fallback: scan all HTML files
+    const chapters = [];
+    zip.forEach((relativePath, file) => {
+      if (/\.(x?html?|xml)$/i.test(relativePath) &&
+          !relativePath.includes('toc.') &&
+          !relativePath.includes('nav.') &&
+          !file.dir) {
+        chapters.push({
+          title: relativePath.split('/').pop().replace(/\.(x?html?|xml)$/i, ''),
+          src: relativePath,
+          id: relativePath,
+        });
+      }
+    });
+    return chapters;
+  }
+
+  /** Map content-file basename → navLabel text from toc.ncx (best effort). */
+  async buildTocLabels(zip) {
+    const tocFile = zip.file(/toc\.ncx$/i)[0];
+    if (!tocFile) return {};
+    const toc = await xml2js.parseStringPromise(await tocFile.async('text'));
+    const labels = {};
+    const walk = (points) => {
+      for (const p of points || []) {
+        try {
+          const label = p.navLabel[0].text[0];
+          const src = (p.content[0].$.src || '').split('#')[0];
+          if (src && label) labels[src.split('/').pop()] = label.trim();
+        } catch { /* skip malformed navPoint */ }
+        if (p.navPoint) walk(p.navPoint);
+      }
+    };
+    walk(toc.ncx.navMap[0].navPoint);
+    return labels;
+  }
+
+  /** Resolve an OPF-relative href to an in-zip path, collapsing ./ and ../ */
+  resolvePath(dir, href) {
+    const stack = [];
+    for (const part of (dir + href).split('/')) {
+      if (part === '' || part === '.') continue;
+      if (part === '..') stack.pop();
+      else stack.push(part);
     }
+    return stack.join('/');
   }
-  
-  isExerciseHeader($, element) {
-    const text = $(element).text().toLowerCase();
-    return /^(exercise|practice|mcq|objective|chapter|test|solved)/i.test(text);
-  }
-  
-  isQuestionHeader(text) {
-    return /^(?:Q\.?\s*)?\d+\.?\s+/.test(text);
-  }
-  
+
   extractClassFromTitle(title) {
     const match = title.match(/class\s+(\d+|xi|xii|11|12)/i);
     if (!match) return 'Unknown';
-    
     const classNum = match[1].toLowerCase();
     if (classNum === 'xi' || classNum === '11') return 'Class 11';
     if (classNum === 'xii' || classNum === '12') return 'Class 12';
     return `Class ${classNum}`;
   }
-  
+
   extractBoardFromTitle(title) {
     const lower = title.toLowerCase();
     if (/ncert/i.test(lower)) return 'NCERT';
     if (/cbse/i.test(lower)) return 'CBSE';
     if (/jee/i.test(lower)) return 'JEE';
     if (/neet/i.test(lower)) return 'NEET';
-    return 'CBSE'; // Default
-  }
-  
-  estimateMarks(exerciseType, isMCQ) {
-    if (isMCQ) return 1;
-    if (exerciseType === 'short') return 2;
-    if (exerciseType === 'long') return 5;
-    return 1;
-  }
-  
-  // New extraction strategies
-  async extractDirectQuestions($, chapter, metadata) {
-    const questions = [];
-    let questionNumber = 1;
-    
-    // Look for any paragraph or div that starts with a number followed by dot or period
-    const elements = $('p, div, li').get();
-    for (const elem of elements) {
-      const $elem = $(elem);
-      const text = $elem.text().trim();
-      const questionMatch = text.match(/^(?:Q\.?\s*)?(\d+)[\.\)]\s+(.+)/);
-      
-      if (questionMatch && questionMatch[2] && questionMatch[2].length > 10) {
-        const questionText = questionMatch[2].trim();
-        
-        // Look for options
-        const { options } = this.extractOptions($, $elem);
-        
-        // Extract diagram with question context
-        const questionContext = {
-          chapter: chapter.title || 'general',
-          questionNumber: questionNumber.toString()
-        };
-        const diagramMetadata = await this.extractDiagram($, $elem, questionContext);
-        
-        const question = {
-          text: questionText,
-          type: options.length > 0 ? 'mcq' : 'short',
-          options: options.length > 0 ? options : undefined,
-          subject: metadata.subject || 'Unknown',
-          topic: chapter.title || 'General',
-          chapter: chapter.title || 'Unknown',
-          board: this.extractBoardFromTitle(metadata.title),
-          class: this.extractClassFromTitle(metadata.title),
-          difficulty: 'medium',
-          marks: options.length > 0 ? 1 : 2,
-          correctAnswerText: this.extractCorrectAnswer(options),
-          diagram: diagramMetadata || undefined,  // Firebase metadata
-          source: 'Smart Import',
-          isActive: true,
-          questionNumber: questionNumber.toString()
-        };
-        
-        questions.push(question);
-        questionNumber++;
-      }
-    }
-    
-    return questions;
-  }
-  
-  async extractFromParagraphs($, chapter, metadata) {
-    const questions = [];
-    let questionNumber = 1;
-    
-    // Extract all paragraphs that look like questions
-    const elements = $('p').get();
-    for (const elem of elements) {
-      const $elem = $(elem);
-      const text = $elem.text().trim();
-      
-      // Skip very short paragraphs
-      if (text.length < 20) continue;
-      
-      // Check if it looks like a question (ends with ?, has certain keywords, etc.)
-      const looksLikeQuestion = 
-        text.endsWith('?') ||
-        /\b(what|which|how|why|when|where|calculate|find|determine|explain|describe)\b/i.test(text) ||
-        /^\d+[\.\)]\s+/.test(text);
-      
-      if (looksLikeQuestion) {
-        // Look for options in next elements
-        const { options } = this.extractOptions($, $elem);
-        
-        // Extract diagram with question context
-        const questionContext = {
-          chapter: chapter.title || 'general',
-          questionNumber: questionNumber.toString()
-        };
-        const diagramMetadata = await this.extractDiagram($, $elem, questionContext);
-        
-        const question = {
-          text: text.replace(/^\d+[\.\)]\s+/, ''), // Remove leading number if any
-          type: options.length > 0 ? 'mcq' : 'short',
-          options: options.length > 0 ? options : undefined,
-          subject: metadata.subject || 'Unknown',
-          topic: chapter.title || 'General',
-          chapter: chapter.title || 'Unknown',
-          board: this.extractBoardFromTitle(metadata.title),
-          class: this.extractClassFromTitle(metadata.title),
-          difficulty: 'medium',
-          marks: options.length > 0 ? 1 : 2,
-          correctAnswerText: this.extractCorrectAnswer(options),
-          diagram: diagramMetadata || undefined,  // Firebase metadata
-          source: 'Smart Import',
-          isActive: true,
-          questionNumber: questionNumber.toString()
-        };
-        
-        questions.push(question);
-        questionNumber++;
-      }
-    }
-    
-    return questions;
+    return 'CBSE';
   }
 }
 
-// CLI Interface
+// ── CLI ─────────────────────────────────────────────────────────────────────
+
 async function main() {
   const parser = new EPUBParser();
-  
-  const epubPath = process.argv[2] || '../class_12/NEET JEE Chemistry Practice Bank Part 1 (5000+ Questions).epub';
-  
+  const epubPath = process.argv[2];
   if (!epubPath) {
     console.error('Usage: node epub-parser.js <path-to-epub-file>');
     process.exit(1);
   }
-  
+
   try {
     const result = await parser.parse(epubPath);
-    
-    // Save to JSON for inspection
     const outputPath = path.join(__dirname, 'extracted_questions.json');
-    await fs.writeFile(
-      outputPath,
-      JSON.stringify(result, null, 2)
-    );
-    
+    await fs.writeFile(outputPath, JSON.stringify(result, null, 2));
+
     console.log('\n✅ Extraction Complete!');
     console.log('═══════════════════════════════════════');
     console.log(`📚 Book: ${result.metadata.title}`);
     console.log(`✍️  Author: ${result.metadata.author}`);
     console.log(`📖 Subject: ${result.metadata.subject}`);
     console.log(`📝 Chapters: ${result.chapters.length}`);
-    console.log(`\n❓ Questions:`);
-    console.log(`   Total: ${result.stats.total}`);
-    console.log(`   With Options: ${result.stats.withOptions}`);
-    console.log(`   With Correct Answers: ${result.stats.withCorrectAnswers}`);
-    console.log(`   With Diagrams: ${result.stats.withDiagrams}`);
-    console.log(`\n📊 By Type:`);
-    Object.entries(result.stats.byType).forEach(([type, count]) => {
-      console.log(`   ${type}: ${count}`);
-    });
-    console.log(`\n💾 Saved to: ${outputPath}`);
+    console.log(`🧱 Blocks: ${result.stats.total}`);
+    console.log(`   By type: ${JSON.stringify(result.stats.byType)}`);
+    console.log(`   Dropped (instructional/solution): ${result.stats.dropped}`);
+    console.log(`💾 Saved to: ${outputPath}`);
     console.log('═══════════════════════════════════════\n');
-    
     process.exit(0);
-    
   } catch (error) {
     console.error('❌ Error:', error.message);
     console.error(error.stack);
