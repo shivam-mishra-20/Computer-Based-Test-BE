@@ -371,6 +371,8 @@ console.log('[AttendanceRoutes] Registering admin attendance routes...');
 router.get('/admin/today', authMiddleware, requireRole('admin'), AttendanceController.getAdminToday);
 router.get('/admin/by-date', authMiddleware, requireRole('admin'), AttendanceController.getAdminByDate);
 router.get('/admin/summary', authMiddleware, requireRole('admin'), AttendanceController.getAdminSummary);
+router.get('/admin/export', authMiddleware, requireRole('admin'), AttendanceController.getAdminExport);
+router.get('/admin/deduction-summary', authMiddleware, requireRole('admin'), AttendanceController.getAdminDeductionSummary);
 router.get('/admin/user/:userId', authMiddleware, requireRole('admin'), AttendanceController.getAdminUserAttendance);
 
 // Auto-sync: Trigger immediate sync from start of month to today

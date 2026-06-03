@@ -35,6 +35,7 @@ import studentProgressRoutes from './routes/api/studentProgressRoutes';
 import commentRoutes from './routes/api/commentRoutes';
 import practiceTestRoutes from './routes/api/practiceTestRoutes';
 import leaveRoutes from './routes/api/leaveRoutes';
+import attendanceRuleRoutes from './routes/api/attendanceRuleRoutes';
 import syllabusRoutes from './routes/api/syllabusRoutes';
 import automationRoutes from './routes/api/automation';
 import resourceRoutes from './routes/api/resourceRoutes';
@@ -243,6 +244,8 @@ app.use('/api/comments', commentRoutes);
 app.use('/api/practice-tests', practiceTestRoutes);
 // Leave management routes
 app.use('/api/leaves', leaveRoutes);
+// Attendance timing & deduction rules (admin-configurable)
+app.use('/api/attendance-rules', attendanceRuleRoutes);
 // Syllabus management routes
 app.use('/api/syllabus', syllabusRoutes);
 // Study resources (videos/PDFs) routes
