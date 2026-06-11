@@ -231,26 +231,35 @@ router.post('/:courseId/enroll', authMiddleware, invalidateCacheOn(['courses', '
       (id: any) => String(id) === String(user.id)
     );
 
+    // Enrollment is idempotent: if the client's enrolled-state is stale and
+    // the student taps Enroll again, treat it as success (and self-heal the
+    // progress record) instead of a 400 that would strand them — unable to
+    // enroll yet still shown as not-enrolled, so content looks locked.
     if (alreadyEnrolled) {
-      return res.status(400).json({ error: 'Already enrolled' });
+      await CourseProgress.findOneAndUpdate(
+        { studentId: user.id, courseId: course._id },
+        { studentId: user.id, courseId: course._id },
+        { upsert: true, setDefaultsOnInsert: true }
+      );
+      return res.json({ success: true, message: 'Already enrolled', alreadyEnrolled: true });
     }
-    
+
     // Add student to enrolled list
     await Course.findByIdAndUpdate(course._id, {
       $addToSet: { enrolledStudents: user.id }
     });
-    
+
     // Create progress record
     await CourseProgress.findOneAndUpdate(
       { studentId: user.id, courseId: course._id },
-      { 
-        studentId: user.id, 
+      {
+        studentId: user.id,
         courseId: course._id,
         enrolledAt: new Date()
       },
       { upsert: true }
     );
-    
+
     res.json({ success: true, message: 'Enrolled successfully' });
   } catch (error: any) {
     res.status(500).json({ error: error.message });

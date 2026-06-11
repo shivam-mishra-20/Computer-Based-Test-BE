@@ -63,7 +63,25 @@ app.set('trust proxy', 1);
 // Apply global rate limiter (must be early in middleware chain)
 app.use(globalLimiter);
 
-app.use(express.json({ limit: BODY_LIMIT }));
+// Parse JSON bodies, but SKIP parsing when there is no body. A body-less POST
+// (e.g. course enroll) that still carries `Content-Type: application/json`
+// would otherwise make express.json try to parse an empty string and reject the
+// whole request with "Unexpected token … is not valid JSON" — before the route
+// even runs. Skipping empty bodies lets those requests through cleanly.
+const jsonParser = express.json({ limit: BODY_LIMIT });
+app.use((req, res, next) => {
+	const contentLength = req.headers['content-length'];
+	const hasBody =
+		(contentLength !== undefined && contentLength !== '0') ||
+		req.headers['transfer-encoding'] !== undefined;
+	if (!hasBody) {
+		// Mirror express.json's empty-body behavior so downstream handlers that
+		// destructure req.body don't crash.
+		if (req.body === undefined) req.body = {};
+		return next();
+	}
+	return jsonParser(req, res, next);
+});
 app.use(express.urlencoded({ limit: BODY_LIMIT, extended: true, parameterLimit: 1000 }));
 
 // CORS configuration - allow credentials and Authorization header
