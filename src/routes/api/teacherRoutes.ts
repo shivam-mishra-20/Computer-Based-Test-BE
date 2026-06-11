@@ -39,10 +39,18 @@ router.get('/batches', authMiddleware, async (req: AuthRequest, res: Response) =
 
     // Get batches from exams created by this teacher
     const examBatches = await Exam.distinct('batch', { createdBy: req.user._id });
-    
-    // Also include the teacher's own batch if assigned
+
+    // Also include batches that actually exist on students, so pickers work
+    // even before the teacher has created any batch-scoped exam
+    const studentBatches = await User.distinct('batch', { role: 'student', status: 'approved' });
+
+    // Also include the teacher's own batch if assigned.
+    // 'All Batches' is a placeholder, never a real batch.
     const teacherBatch = req.user.batch;
-    const allBatches = [...new Set([...examBatches, teacherBatch].filter(Boolean))];
+    const allBatches = [
+      ...new Set([...examBatches, ...studentBatches, teacherBatch]
+        .filter((b) => b && b !== 'All Batches')),
+    ];
 
     // Get student counts per batch
     const batchData = await Promise.all(
@@ -82,20 +90,14 @@ router.get('/students', authMiddleware, async (req: AuthRequest, res: Response) 
 
     const { batch, classLevel, page = 1, limit = 50, search } = req.query;
 
-    // Get teacher's batches
-    const examBatches = await Exam.distinct('batch', { createdBy: req.user._id });
-    const teacherBatch = req.user.batch;
-    const allowedBatches = [...new Set([...examBatches, teacherBatch].filter(Boolean))];
-
     const filter: any = {
       role: 'student',
       status: 'approved'
     };
 
-    // Only filter by allowed batches if we have them
-    if (allowedBatches.length > 0) {
-      filter.batch = { $in: allowedBatches };
-    }
+    // Note: students are intentionally NOT restricted to batches derived from
+    // the teacher's exams — creating one batch-scoped exam must not hide the
+    // rest of the roster from rosters/marks/assignment screens.
 
     // Apply additional filters
     // If batch param is provided, filter by that specific batch
@@ -126,8 +128,7 @@ router.get('/students', authMiddleware, async (req: AuthRequest, res: Response) 
       students,
       total,
       page: Number(page),
-      totalPages: Math.ceil(total / Number(limit)),
-      allowedBatches
+      totalPages: Math.ceil(total / Number(limit))
     });
   } catch (error) {
     console.error('Error fetching students:', error);

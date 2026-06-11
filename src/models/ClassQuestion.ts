@@ -68,6 +68,12 @@ export interface IClassQuestion extends Document {
   explanation?: string;
   solutionText?: string;
 
+  // PYQ (Previous Year Question) metadata
+  isPYQ?: boolean;
+  pyqYear?: number;
+  pyqExam?: string;
+  pyqShift?: string;
+
   // Audit
   createdBy: Types.ObjectId;
   source?: 'AI' | 'Smart Import' | 'Manual' | 'Upload';
@@ -88,7 +94,7 @@ const optionSchema = new Schema<IClassOption>(
 export const classQuestionSchema = new Schema<IClassQuestion>(
   {
     text: { type: String, required: true },
-    type: { type: String, enum: ['mcq','truefalse','fill','short','long','assertionreason','integer'], required: true },
+    type: { type: String, enum: ['mcq', 'truefalse', 'fill', 'short', 'long', 'assertionreason', 'integer'], required: true },
     options: { type: [optionSchema], default: undefined },
     correctAnswerText: { type: String },
     integerAnswer: { type: Number },
@@ -113,12 +119,17 @@ export const classQuestionSchema = new Schema<IClassQuestion>(
     topic: { type: String, index: true },
     section: { type: String },
     marks: { type: Number },
-    difficulty: { type: String, enum: ['easy','medium','hard'], default: 'medium', index: true },
+    difficulty: { type: String, enum: ['easy', 'medium', 'hard'], default: 'medium', index: true },
 
     explanation: { type: String },
 
+    isPYQ: { type: Boolean, default: false, index: true },
+    pyqYear: { type: Number, index: true },
+    pyqExam: { type: String },
+    pyqShift: { type: String },
+
     createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-    source: { type: String, enum: ['AI','Smart Import','Manual','Upload'], default: 'Manual' },
+    source: { type: String, enum: ['AI', 'Smart Import', 'Manual', 'Upload'], default: 'Manual' },
     isActive: { type: Boolean, default: true },
   },
   { timestamps: true }

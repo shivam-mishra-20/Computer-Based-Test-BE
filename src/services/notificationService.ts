@@ -1,9 +1,33 @@
 import { Expo, ExpoPushMessage, ExpoPushTicket } from 'expo-server-sdk';
 import Notification from '../models/Notification';
 import User from '../models/User';
+import SocketService from './SocketService';
 
 // Initialize Expo SDK
 const expo = new Expo();
+
+/**
+ * Emit a freshly-created notification to the recipient's personal socket room
+ * (`user:<id>`) so an open app updates its inbox / badge in real time, without
+ * waiting for a push notification or a manual refresh. Safe no-op if the socket
+ * server isn't initialised.
+ */
+function emitRealtimeNotification(userId: unknown, doc: any): void {
+  if (!userId || !doc) return;
+  try {
+    SocketService.emitToUser(String(userId), 'notification', {
+      _id: String(doc._id),
+      type: doc.type,
+      title: doc.title,
+      message: doc.message,
+      data: doc.data ?? {},
+      read: false,
+      createdAt: doc.createdAt ? new Date(doc.createdAt).toISOString() : new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('[notificationService] Realtime emit error:', error);
+  }
+}
 
 // Check if a string is a valid MongoDB ObjectId
 function isValidObjectId(id: string): boolean {
@@ -114,7 +138,7 @@ export async function sendScheduleNotification(
     if (users.length === 0) return;
 
     // ── 1. Persist in-app notifications to MongoDB ───────────────────────────
-    await Notification.insertMany(
+    const scheduleNotifications = await Notification.insertMany(
       users.map(u => ({
         userId: u._id,
         type: 'schedule' as const,
@@ -124,7 +148,13 @@ export async function sendScheduleNotification(
         priority: 'medium' as const,
         read: false,
       }))
-    ).catch(err => console.error('[sendScheduleNotification] DB insert error:', err));
+    ).catch(err => {
+      console.error('[sendScheduleNotification] DB insert error:', err);
+      return [] as any[];
+    });
+
+    // Real-time fan-out to any connected clients
+    (scheduleNotifications || []).forEach((doc: any) => emitRealtimeNotification(doc.userId, doc));
 
     // ── 2. Send push notifications to users with valid tokens ─────────────────
     const usersWithTokens = users.filter(u => u.pushToken && Expo.isExpoPushToken(u.pushToken));
@@ -199,7 +229,7 @@ export async function sendTeacherNotification(
     });
 
     // ── Persist in-app notification to MongoDB regardless of push token ──────
-    await Notification.create({
+    const teacherNotification = await Notification.create({
       userId: teacher._id,
       type: 'leave' as const,
       title,
@@ -207,7 +237,14 @@ export async function sendTeacherNotification(
       data: { type: 'leave', role: 'teacher', screen: '/(teacher)/more' },
       priority: 'medium' as const,
       read: false,
-    }).catch(err => console.error('[sendTeacherNotification] DB insert error:', err));
+    }).catch(err => {
+      console.error('[sendTeacherNotification] DB insert error:', err);
+      return null;
+    });
+
+    if (teacherNotification) {
+      emitRealtimeNotification(teacherNotification.userId, teacherNotification);
+    }
 
     if (!teacher?.pushToken) {
       console.log(`[sendTeacherNotification] Teacher ${teacher._id} (${teacher.name}) has no push token — in-app notification saved.`);
@@ -282,7 +319,7 @@ export async function sendStudentNotifications(
     const normalizedData = normalizeNotificationData(notifType, data);
 
     // ── Persist all notifications to MongoDB ─────────────────────────────────
-    await Notification.insertMany(
+    const createdNotifications = await Notification.insertMany(
       allStudents.map((s) => ({
         userId: s._id,
         type: notifType,
@@ -293,6 +330,10 @@ export async function sendStudentNotifications(
         read: false,
       }))
     );
+
+    // ── Real-time fan-out: push the new notification straight to each student's
+    //    socket room so an open app shows it instantly (homework/material/etc.) ─
+    (createdNotifications || []).forEach((doc: any) => emitRealtimeNotification(doc.userId, doc));
 
     // ── Send push notifications ───────────────────────────────────────────────
     const pushTokens = allStudents
@@ -360,7 +401,7 @@ export async function createAndSendNotification(payload: {
     }
 
     // ── 2. Persist to MongoDB (notification inbox) ───────────────────────────
-    await Notification.create({
+    const createdNotification = await Notification.create({
       userId: mongoUser._id,
       type: notifType,
       title,
@@ -369,6 +410,9 @@ export async function createAndSendNotification(payload: {
       priority: 'medium',
       read: false,
     });
+
+    // ── 2b. Real-time delivery to an open app ────────────────────────────────
+    emitRealtimeNotification(createdNotification.userId, createdNotification);
 
     // ── 3. Send Expo push notification if token is valid ─────────────────────
     if (mongoUser.pushToken && Expo.isExpoPushToken(mongoUser.pushToken)) {

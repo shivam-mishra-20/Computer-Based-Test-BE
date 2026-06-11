@@ -7,6 +7,7 @@ export interface IStudentResult {
   percentage: number;
   grade: string;
   remarks?: string;
+  isAbsent?: boolean;
 }
 
 export interface ITestResult extends Document {
@@ -49,11 +50,15 @@ const studentResultSchema = new Schema<IStudentResult>({
     type: String,
     required: true,
     default: 'F',
-    enum: ['A+', 'A', 'B+', 'B', 'C', 'D', 'F'],
+    enum: ['A+', 'A', 'B+', 'B', 'C', 'D', 'F', 'AB'],
   },
   remarks: {
     type: String,
     trim: true,
+  },
+  isAbsent: {
+    type: Boolean,
+    default: false,
   },
 }, { _id: false });
 
@@ -113,18 +118,20 @@ testResultSchema.index({ class: 1, batch: 1, testDate: -1 });
 testResultSchema.index({ class: 1, subject: 1 });
 testResultSchema.index({ createdBy: 1, createdAt: -1 });
 
-// Virtual for average performance
+// Virtual for average performance (absent students excluded)
 testResultSchema.virtual('classAverage').get(function() {
-  if (this.studentResults.length === 0) return 0;
-  const total = this.studentResults.reduce((sum, r) => sum + r.marksObtained, 0);
-  return total / this.studentResults.length;
+  const present = this.studentResults.filter(r => !r.isAbsent);
+  if (present.length === 0) return 0;
+  const total = present.reduce((sum, r) => sum + r.marksObtained, 0);
+  return total / present.length;
 });
 
-// Virtual for pass percentage
+// Virtual for pass percentage (absent students excluded)
 testResultSchema.virtual('passPercentage').get(function() {
-  if (this.studentResults.length === 0) return 0;
-  const passedCount = this.studentResults.filter(r => r.percentage >= 40).length;
-  return (passedCount / this.studentResults.length) * 100;
+  const present = this.studentResults.filter(r => !r.isAbsent);
+  if (present.length === 0) return 0;
+  const passedCount = present.filter(r => r.percentage >= 40).length;
+  return (passedCount / present.length) * 100;
 });
 
 // Ensure virtuals are included in JSON

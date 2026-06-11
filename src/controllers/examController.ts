@@ -167,14 +167,17 @@ export const getTopicsCtrl = async (req: Request, res: Response) => {
 // Get filtered questions for paper creation
 export const getQuestionsForPaperCtrl = async (req: Request, res: Response) => {
   try {
-    const { 
-      subject, 
-      class: className, 
-      board, 
-      chapter, 
+    const {
+      subject,
+      class: className,
+      board,
+      chapter,
       topic,
       type,
       difficulty,
+      isPYQ,
+      pyqYear,
+      pyqExam,
       limit = '0', // Default to 0 = fetch all
       skip = '0'
     } = req.query as any;
@@ -196,6 +199,11 @@ export const getQuestionsForPaperCtrl = async (req: Request, res: Response) => {
   if (typ) filter.type = typ;
   if (brd) filter.board = brd;
   if (ch) filter.chapter = ch;
+  // PYQ filters
+  if (isPYQ === 'true' || isPYQ === true) filter.isPYQ = true;
+  if (pyqYear && String(pyqYear).trim()) filter.pyqYear = Number(pyqYear);
+  const exam = ci(pyqExam);
+  if (exam) filter.pyqExam = exam;
 
     const limitNum = parseInt(limit, 10);
     const skipNum = parseInt(skip, 10);

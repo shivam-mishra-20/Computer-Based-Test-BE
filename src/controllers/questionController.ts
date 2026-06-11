@@ -43,8 +43,12 @@ export const saveValidatedQuestionsCtrl = async (req: Request, res: Response) =>
       explanation: q.explanation || q.solutionText,
       diagramUrl: q.diagramUrl,
       diagramAlt: q.diagramAlt,
-      diagram:    q.diagram,
-      tableData:  q.tableData,
+      diagram: q.diagram,
+      tableData: q.tableData,
+      isPYQ: q.isPYQ,
+      pyqYear: q.pyqYear,
+      pyqExam: q.pyqExam,
+      pyqShift: q.pyqShift,
     }));
 
     // Save with validation
@@ -76,7 +80,7 @@ export const saveValidatedQuestionsCtrl = async (req: Request, res: Response) =>
 export const getClassQuestionsCtrl = async (req: Request, res: Response) => {
   try {
     const { class: className } = req.params;
-    const { 
+    const {
       // Pagination
       limit = '20',
       page = '1',
@@ -92,7 +96,10 @@ export const getClassQuestionsCtrl = async (req: Request, res: Response) => {
       source,
       hasCorrectAnswer,
       hasImage,
-      hasExplanation
+      hasExplanation,
+      isPYQ,
+      pyqYear,
+      pyqExam,
     } = req.query;
 
     if (!className) {
@@ -149,6 +156,11 @@ export const getClassQuestionsCtrl = async (req: Request, res: Response) => {
       andClauses.push({ $or: [{ diagramUrl: { $exists: false } }, { diagramUrl: '' }] });
     }
 
+    // PYQ Filters
+    if (isPYQ === 'true') andClauses.push({ isPYQ: true });
+    if (pyqYear) andClauses.push({ pyqYear: Number(pyqYear) });
+    if (pyqExam) andClauses.push({ pyqExam: { $regex: `^${String(pyqExam).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' } });
+
     // Has Explanation Filter
     if (hasExplanation === 'yes') {
       andClauses.push({ $or: [{ explanation: { $exists: true, $ne: '' } }, { solutionText: { $exists: true, $ne: '' } }] });
@@ -202,7 +214,7 @@ export const getClassQuestionsCtrl = async (req: Request, res: Response) => {
 export const getClassQuestionFiltersCtrl = async (req: Request, res: Response) => {
   try {
     const { class: className } = req.params;
-    const { subject } = req.query;
+    const { subject, board } = req.query;
 
     if (!className) {
       return res.status(400).json({
@@ -214,20 +226,41 @@ export const getClassQuestionFiltersCtrl = async (req: Request, res: Response) =
     const { getClassQuestionModel } = await import('../models/ClassQuestion');
     const ClassQuestionModel = getClassQuestionModel(className as string);
 
+    const escapeRegex = (v: string) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // board scopes everything except the boards list itself
+    const boardClause = board
+      ? { board: { $regex: `^${escapeRegex(String(board).trim())}$`, $options: 'i' } }
+      : {};
+
     // Base filter — use $ne: false to match docs where isActive is missing too
-    const baseFilter: any = { isActive: { $ne: false } };
-    if (subject) baseFilter.subject = { $regex: `^${String(subject).trim()}$`, $options: 'i' };
+    // subject supports a comma-separated list so multiple subjects can be scoped at once
+    const baseFilter: any = { isActive: { $ne: false }, ...boardClause };
+    if (subject) {
+      const subjectList = String(subject)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (subjectList.length === 1) {
+        baseFilter.subject = { $regex: `^${escapeRegex(subjectList[0])}$`, $options: 'i' };
+      } else if (subjectList.length > 1) {
+        baseFilter.subject = { $in: subjectList.map((s) => new RegExp(`^${escapeRegex(s)}$`, 'i')) };
+      }
+    }
 
     // Get distinct values — all use $ne:false so missing-isActive docs are included
-    const activeFilter = { isActive: { $ne: false } };
-    const [subjects, chapters, topics, sections, boards, sources, types] = await Promise.all([
+    const activeFilter = { isActive: { $ne: false }, ...boardClause };
+    const pyqFilter = { isActive: { $ne: false }, isPYQ: true };
+    const allBoardsFilter = { isActive: { $ne: false } };
+    const [subjects, chapters, topics, sections, boards, sources, types, pyqYears, pyqExams] = await Promise.all([
       ClassQuestionModel.distinct('subject', activeFilter),
       ClassQuestionModel.distinct('chapter', baseFilter),
       ClassQuestionModel.distinct('topic', baseFilter),
       ClassQuestionModel.distinct('section', baseFilter),
-      ClassQuestionModel.distinct('board', activeFilter),
+      ClassQuestionModel.distinct('board', allBoardsFilter),
       ClassQuestionModel.distinct('source', activeFilter),
       ClassQuestionModel.distinct('type', activeFilter),
+      ClassQuestionModel.distinct('pyqYear', pyqFilter),
+      ClassQuestionModel.distinct('pyqExam', pyqFilter),
     ]);
 
     return res.status(200).json({
@@ -240,6 +273,8 @@ export const getClassQuestionFiltersCtrl = async (req: Request, res: Response) =
         boards: boards.filter(Boolean).sort(),
         sources: sources.filter(Boolean).sort(),
         types: types.filter(Boolean).sort(),
+        pyqYears: (pyqYears as number[]).filter(Boolean).sort((a, b) => b - a),
+        pyqExams: pyqExams.filter(Boolean).sort(),
       }
     });
   } catch (error) {
@@ -274,7 +309,7 @@ export const updateClassQuestionCtrl = async (req: Request, res: Response) => {
     // Find and update the question
     const updated = await ClassQuestionModel.findByIdAndUpdate(
       id,
-      { 
+      {
         $set: {
           text: updateData.text,
           type: updateData.type,
@@ -291,6 +326,14 @@ export const updateClassQuestionCtrl = async (req: Request, res: Response) => {
           diagramUrl: updateData.diagramUrl,
           assertion: updateData.assertion,
           reason: updateData.reason,
+          assertionIsTrue: updateData.assertionIsTrue,
+          reasonIsTrue: updateData.reasonIsTrue,
+          reasonExplainsAssertion: updateData.reasonExplainsAssertion,
+          integerAnswer: updateData.integerAnswer,
+          isPYQ: updateData.isPYQ ?? false,
+          pyqYear: updateData.pyqYear,
+          pyqExam: updateData.pyqExam,
+          pyqShift: updateData.pyqShift,
           updatedAt: new Date()
         }
       },
@@ -403,13 +446,13 @@ export const solveClassQuestionCtrl = async (req: Request, res: Response) => {
     // Check if already has correct answer
     // If preview is requested, we allow solving even if answer exists (to double check)
     if (!preview) {
-        const hasCorrectAnswer = question.options?.some(opt => opt.isCorrect);
-        if (hasCorrectAnswer) {
+      const hasCorrectAnswer = question.options?.some(opt => opt.isCorrect);
+      if (hasCorrectAnswer) {
         return res.status(400).json({
-            success: false,
-            message: 'Question already has a correct answer marked'
+          success: false,
+          message: 'Question already has a correct answer marked'
         });
-        }
+      }
     }
 
     // Solve with AI
@@ -426,15 +469,15 @@ export const solveClassQuestionCtrl = async (req: Request, res: Response) => {
 
     // If preview mode, return result without saving
     if (preview) {
-        return res.status(200).json({
-          success: true,
-          data: question,
-          aiResult: {
-            correctOptionIndex: result.correctOptionIndex,
-            confidence: result.confidence,
-            explanation: result.explanation
-          }
-        });
+      return res.status(200).json({
+        success: true,
+        data: question,
+        aiResult: {
+          correctOptionIndex: result.correctOptionIndex,
+          confidence: result.confidence,
+          explanation: result.explanation
+        }
+      });
     }
 
     // Update the question with correct answer
@@ -539,33 +582,33 @@ export const solveBatchQuestionsCtrl = async (req: Request, res: Response) => {
         });
 
         if (preview) {
-             results.push({ 
-               id, 
-               success: true, 
-               aiResult: {
-                 correctOptionIndex: result.correctOptionIndex,
-                 confidence: result.confidence,
-                 explanation: result.explanation
-               } 
-             });
-             solved++;
+          results.push({
+            id,
+            success: true,
+            aiResult: {
+              correctOptionIndex: result.correctOptionIndex,
+              confidence: result.confidence,
+              explanation: result.explanation
+            }
+          });
+          solved++;
         } else {
-             // Update the question
-             const updatedOptions = question.options?.map((opt, idx) => ({
-                ...opt,
-                isCorrect: idx === result.correctOptionIndex
-             }));
+          // Update the question
+          const updatedOptions = question.options?.map((opt, idx) => ({
+            ...opt,
+            isCorrect: idx === result.correctOptionIndex
+          }));
 
-             await ClassQuestionModel.findByIdAndUpdate(id, {
-                $set: {
-                  options: updatedOptions,
-                  correctAnswerText: (typeof result.correctOptionIndex === 'number' && question.options && question.options[result.correctOptionIndex]) ? question.options[result.correctOptionIndex].text : undefined,
-                  explanation: result.explanation || question.explanation,
-                  updatedAt: new Date()
-                }
-             });
-             results.push({ id, success: true });
-             solved++;
+          await ClassQuestionModel.findByIdAndUpdate(id, {
+            $set: {
+              options: updatedOptions,
+              correctAnswerText: (typeof result.correctOptionIndex === 'number' && question.options && question.options[result.correctOptionIndex]) ? question.options[result.correctOptionIndex].text : undefined,
+              explanation: result.explanation || question.explanation,
+              updatedAt: new Date()
+            }
+          });
+          results.push({ id, success: true });
+          solved++;
         }
 
         // Small delay to avoid rate limiting
@@ -606,7 +649,7 @@ export const bulkUpdateMetaCtrl = async (req: Request, res: Response) => {
     const { class: className } = req.params;
     const { field, fromValue, toValue } = req.body;
 
-    const allowedFields = ['subject', 'topic', 'chapter', 'difficulty', 'board', 'source'];
+    const allowedFields = ['subject', 'topic', 'chapter', 'difficulty', 'board', 'source', 'pyqExam', 'pyqShift'];
     if (!className) return res.status(400).json({ success: false, message: 'Class required' });
     if (!allowedFields.includes(field)) return res.status(400).json({ success: false, message: `Field must be one of: ${allowedFields.join(', ')}` });
     if (!toValue || !toValue.toString().trim()) return res.status(400).json({ success: false, message: 'toValue is required' });
@@ -638,7 +681,7 @@ export const bulkUpdateMetaCtrl = async (req: Request, res: Response) => {
 export const bulkUpdateClassQuestionsCtrl = async (req: Request, res: Response) => {
   try {
     const { class: className } = req.params;
-    const { updates } = req.body; 
+    const { updates } = req.body;
 
     if (!className) {
       return res.status(400).json({ success: false, message: 'Class parameter required' });
@@ -657,12 +700,12 @@ export const bulkUpdateClassQuestionsCtrl = async (req: Request, res: Response) 
       if (!update.id) continue;
       try {
         await ClassQuestionModel.findByIdAndUpdate(update.id, {
-           $set: {
-             options: update.options,
-             correctAnswerText: update.correctAnswerText,
-             explanation: update.explanation,
-             updatedAt: new Date()
-           }
+          $set: {
+            options: update.options,
+            correctAnswerText: update.correctAnswerText,
+            explanation: update.explanation,
+            updatedAt: new Date()
+          }
         });
         updatedCount++;
       } catch (err) {

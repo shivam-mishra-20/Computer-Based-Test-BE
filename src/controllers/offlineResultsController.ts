@@ -66,13 +66,13 @@ export const getAllTests = async (req: Request, res: Response) => {
       createdByRole: creatorMap[t.createdBy]?.role || 'teacher',
       studentCount: Array.isArray(t.studentResults) ? t.studentResults.length : 0,
       classAverage: (() => {
-        const results = t.studentResults || [];
+        const results = (t.studentResults || []).filter((r: any) => !r.isAbsent);
         if (!results.length || !t.maxMarks) return 0;
         const avg = results.reduce((s: number, r: any) => s + (r.marksObtained || 0), 0) / results.length;
         return Math.round((avg / t.maxMarks) * 100);
       })(),
       passCount: (() => {
-        const results = t.studentResults || [];
+        const results = (t.studentResults || []).filter((r: any) => !r.isAbsent);
         return results.filter((r: any) => (r.percentage || 0) >= 40).length;
       })(),
     }));
@@ -154,6 +154,9 @@ export const updateTestProperties = async (req: Request, res: Response) => {
 
     if (maxMarksChanged && test.studentResults && test.studentResults.length > 0) {
       test.studentResults = test.studentResults.map((result) => {
+        if (result.isAbsent) {
+          return { ...result, marksObtained: 0, percentage: 0, grade: 'AB' };
+        }
         const percentage = Math.round((result.marksObtained / maxMarks) * 100);
         let grade = 'F';
         if (percentage >= 90) grade = 'A+';
@@ -269,6 +272,8 @@ export const getLeaderboard = async (req: Request, res: Response) => {
 
     tests.forEach((test: any) => {
       test.studentResults.forEach((result: IStudentResult) => {
+        // Absent students are not counted in the leaderboard
+        if (result.isAbsent) return;
         const studentId = result.studentId;
         if (!studentPerformance[studentId]) {
           studentPerformance[studentId] = {

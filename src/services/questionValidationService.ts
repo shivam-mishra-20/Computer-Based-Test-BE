@@ -18,7 +18,7 @@ export interface EnhancedQuestionData {
   assertionIsTrue?: boolean;
   reasonIsTrue?: boolean;
   reasonExplainsAssertion?: boolean;
-  
+
   // Diagram/media — legacy flat fields
   diagramUrl?: string;
   diagramAlt?: string;
@@ -42,7 +42,7 @@ export interface EnhancedQuestionData {
     caption?: string;
     pageNumber?: number;
   };
-  
+
   // Enhanced metadata for paper creation
   class?: string;          // e.g., "Class 10", "Class 11"
   subject: string;          // REQUIRED: Mathematics, Physics, etc.
@@ -52,11 +52,11 @@ export interface EnhancedQuestionData {
   section?: string;         // e.g., "Objective", "Short Answer", "Long Answer"
   marks?: number;           // Default marks for this question
   difficulty: Difficulty;   // easy, medium, hard
-  
+
   // Solution and explanation
   explanation?: string;
   solutionText?: string;
-  
+
   // Metadata
   createdBy: Types.ObjectId;
   source?: 'AI' | 'Smart Import' | 'Manual' | 'Upload';
@@ -68,26 +68,26 @@ export interface EnhancedQuestionData {
  */
 export function sanitizeQuestionData(data: Partial<EnhancedQuestionData>): Partial<EnhancedQuestionData> {
   const sanitized: Partial<EnhancedQuestionData> = { ...data };
-  
+
   // 1. Sanitize question text
   if (sanitized.text) {
     // Trim and normalize whitespace
     sanitized.text = sanitized.text.trim().replace(/\s+/g, ' ');
-    
+
     // Remove stray HTML tags (except for allowed LaTeX-like markup)
     sanitized.text = sanitized.text.replace(/<(?!\/?(sup|sub|i|b|em|strong)>)[^>]*>/gi, '');
-    
+
     // Capitalize first character if it's lowercase
     if (sanitized.text.length > 0 && /^[a-z]/.test(sanitized.text)) {
       sanitized.text = sanitized.text.charAt(0).toUpperCase() + sanitized.text.slice(1);
     }
-    
+
     // Ensure proper sentence ending (add period if missing and not already punctuated)
     if (sanitized.text.length > 0 && !/[.!?:;]$/.test(sanitized.text)) {
       sanitized.text = sanitized.text + '.';
     }
   }
-  
+
   // 2. Convert math/science equations to LaTeX syntax
   if (sanitized.text) {
     sanitized.text = convertToLatex(sanitized.text);
@@ -98,7 +98,7 @@ export function sanitizeQuestionData(data: Partial<EnhancedQuestionData>): Parti
   if (sanitized.solutionText) {
     sanitized.solutionText = convertToLatex(sanitized.solutionText);
   }
-  
+
   // 3. Sanitize MCQ options
   if (sanitized.options && Array.isArray(sanitized.options)) {
     sanitized.options = sanitized.options
@@ -108,11 +108,11 @@ export function sanitizeQuestionData(data: Partial<EnhancedQuestionData>): Parti
         text: convertToLatex(opt.text.trim().replace(/\s+/g, ' '))
       }))
       // Remove duplicates
-      .filter((opt, index, self) => 
+      .filter((opt, index, self) =>
         index === self.findIndex(o => o.text.toLowerCase() === opt.text.toLowerCase())
       );
   }
-  
+
   // 4. Normalize metadata fields
   if (sanitized.subject) {
     sanitized.subject = normalizeField(sanitized.subject);
@@ -146,12 +146,12 @@ export function sanitizeQuestionData(data: Partial<EnhancedQuestionData>): Parti
       sanitized.difficulty = 'hard';
     }
   }
-  
+
   // 5. Normalize question type
   if (sanitized.type) {
     sanitized.type = normalizeQuestionType(sanitized.type) as any;
   }
-  
+
   return sanitized;
 }
 
@@ -236,10 +236,10 @@ function convertToLatex(text: string): string {
  */
 function normalizeField(value: string): string {
   if (!value) return value;
-  
+
   // Trim and normalize whitespace
   let normalized = value.trim().replace(/\s+/g, ' ');
-  
+
   // Capitalize each word (proper case)
   normalized = normalized
     .split(' ')
@@ -252,7 +252,7 @@ function normalizeField(value: string): string {
       return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
     })
     .join(' ');
-  
+
   return normalized;
 }
 
@@ -262,9 +262,9 @@ function normalizeField(value: string): string {
  */
 function normalizeQuestionType(type: string): QuestionType {
   if (!type) return 'mcq'; // default
-  
+
   const normalized = type.toLowerCase().replace(/[_\s-]/g, '');
-  
+
   // Map common variations to standard types
   const typeMap: Record<string, QuestionType> = {
     // MCQ variations
@@ -274,46 +274,46 @@ function normalizeQuestionType(type: string): QuestionType {
     'choice': 'mcq',
     'objective': 'mcq',
     'singlecorrect': 'mcq',
-    
+
     // True/False variations
     'truefalse': 'truefalse',
     'true/false': 'truefalse',
     'tf': 'truefalse',
     'boolean': 'truefalse',
-    
+
     // Fill in the blank variations
     'fill': 'fill',
     'fillblank': 'fill',
     'fillintheblank': 'fill',
     'fillup': 'fill',
     'blank': 'fill',
-    
+
     // Short answer variations
     'short': 'short',
     'shortanswer': 'short',
     'sa': 'short',
     'brief': 'short',
-    
+
     // Long answer variations
     'long': 'long',
     'longanswer': 'long',
     'la': 'long',
     'essay': 'long',
     'descriptive': 'long',
-    
+
     // Assertion-Reason variations
     'assertionreason': 'assertionreason',
     'assertion': 'assertionreason',
     'ar': 'assertionreason',
     'assertionreasontype': 'assertionreason',
-    
+
     // Integer variations
     'integer': 'integer',
     'integertype': 'integer',
     'numerical': 'integer',
     'numeric': 'integer',
   };
-  
+
   return typeMap[normalized] || 'mcq'; // default to mcq if unknown
 }
 
@@ -440,15 +440,15 @@ export function validateQuestionData(data: Partial<EnhancedQuestionData>): boole
   if (!data.type) {
     throw new Error('Question type is required');
   }
-  
+
   if (!data.subject || data.subject.trim().length === 0) {
     throw new Error('Subject is required for paper creation filters');
   }
-  
+
   if (!data.createdBy) {
     throw new Error('createdBy is required');
   }
-  
+
   // Type-specific validation
   if (data.type === 'mcq' || data.type === 'truefalse') {
     if (!data.options || !Array.isArray(data.options) || data.options.length < 2) {
@@ -456,18 +456,18 @@ export function validateQuestionData(data: Partial<EnhancedQuestionData>): boole
     }
     // Note: We no longer validate if answers are present - questions can be saved without answers
   }
-  
+
   if (data.type === 'assertionreason') {
     if (!data.assertion || !data.reason) {
       throw new Error('Assertion-Reason questions must have both assertion and reason');
     }
   }
-  
+
   // Difficulty must be valid
   if (data.difficulty && !['easy', 'medium', 'hard'].includes(data.difficulty)) {
     throw new Error('Difficulty must be easy, medium, or hard');
   }
-  
+
   // Passed all validations
   return true;
 }
@@ -481,14 +481,14 @@ export async function saveValidatedQuestion(
 ): Promise<IClassQuestion | null> {
   // 1. Sanitize data
   const sanitized = sanitizeQuestionData(data);
-  
+
   // 2. Validate (returns false if should skip, throws on hard errors)
   const isValid = validateQuestionData(sanitized);
   if (!isValid) {
     // Question should be skipped (e.g., no answer provided)
     return null;
   }
-  
+
   // 3. Check for duplicates within same class + chapter
   const isDupe = await isDuplicate(
     sanitized.text!,
@@ -497,12 +497,12 @@ export async function saveValidatedQuestion(
     sanitized.board,
     sanitized.class
   );
-  
+
   if (isDupe) {
     console.log(`[Duplicate] Skipping question in ${sanitized.class}/${sanitized.chapter}: ${sanitized.text!.substring(0, 50)}...`);
     return null;
   }
-  
+
   // 4. Map enhanced fields to ClassQuestion model schema
   const questionData: any = {
     text: sanitized.text,
@@ -517,8 +517,8 @@ export async function saveValidatedQuestion(
     reasonExplainsAssertion: sanitized.reasonExplainsAssertion,
     diagramUrl: sanitized.diagramUrl,
     diagramAlt: sanitized.diagramAlt,
-    diagram:    sanitized.diagram,
-    tableData:  sanitized.tableData,
+    diagram: sanitized.diagram,
+    tableData: sanitized.tableData,
     explanation: sanitized.explanation || sanitized.solutionText,
     createdBy: sanitized.createdBy!,
     isActive: sanitized.isActive !== false,
@@ -532,7 +532,7 @@ export async function saveValidatedQuestion(
     // Normalize source to match enum values (handle legacy 'Import' value)
     source: (sanitized.source as any) === 'Import' ? 'Smart Import' : (sanitized.source || 'Smart Import'),
   };
-  
+
   // 5. Save to class-wise collection (e.g., class_10, class_11, class_12)
   try {
     if (!sanitized.class) throw new Error('Class is required to save question');
@@ -561,7 +561,7 @@ export async function saveBatchValidatedQuestions(
     skippedInvalid: 0,
     errors: 0
   };
-  
+
   for (const q of questions) {
     try {
       const result = await saveValidatedQuestion(q);
@@ -594,13 +594,13 @@ export async function saveBatchValidatedQuestions(
       // Continue with next question
     }
   }
-  
+
   console.log(`✅ Batch Save Complete:
   - Total: ${stats.total}
   - Saved: ${stats.saved}
   - Skipped (duplicate): ${stats.skippedDuplicate}
   - Skipped (invalid/no answer): ${stats.skippedInvalid}
   - Errors: ${stats.errors}`);
-  
+
   return saved;
 }

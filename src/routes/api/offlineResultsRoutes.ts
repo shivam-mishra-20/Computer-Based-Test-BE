@@ -85,6 +85,7 @@ router.get('/student', authMiddleware, async (req: Request, res: Response) => {
             ? Math.round(((studentResult.marksObtained ?? studentResult.marks ?? 0) / test.maxMarks) * 100)
             : 0,
           grade: studentResult.grade || '',
+          isAbsent: !!studentResult.isAbsent,
         };
       })
       .filter(Boolean);

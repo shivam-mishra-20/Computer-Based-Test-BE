@@ -84,6 +84,8 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
 
     for (const test of allTests) {
       for (const r of (test.studentResults || [])) {
+        // Absent students must not affect leaderboard standings
+        if (r.isAbsent) continue;
         const marks = r.marksObtained ?? 0;
         const sid = r.studentId || '';
         const sname = r.studentName || '';

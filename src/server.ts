@@ -47,6 +47,23 @@ import { existsSync, writeFileSync, readFileSync } from 'fs';
   process.exit(1);
 })();
 
+// ── Fail fast on a missing/weak JWT secret ──────────────────────────────────
+// Auth tokens are signed with JWT_SECRET; a missing or trivially short secret
+// would let anyone forge tokens. Refuse to boot in production with an insecure
+// secret (warn-only in dev so local setups aren't blocked).
+(function validateJwtSecret() {
+  const secret = process.env.JWT_SECRET;
+  if (!secret || secret.length < 32) {
+    const msg =
+      '[Startup] JWT_SECRET is missing or too short (need >= 32 chars) — insecure auth secret.';
+    if (process.env.NODE_ENV === 'production') {
+      console.error(msg + ' Refusing to start.');
+      process.exit(1);
+    }
+    console.warn(msg + ' (continuing in non-production)');
+  }
+})();
+
 import http from 'http';
 import cluster from 'cluster';
 import SocketService from './services/SocketService';
