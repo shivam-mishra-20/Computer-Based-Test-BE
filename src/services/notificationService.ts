@@ -131,10 +131,21 @@ export async function sendScheduleNotification(
     // Find ALL matching students (even those without a push token) so we can
     // persist an in-app notification for every student regardless.
     const query: any = { role: 'student' };
-    if (classLevel) query.classLevel = classLevel;
-    if (batch) query.batch = batch;
+    if (classLevel) {
+      // Schedules store "11" while students store "Class 11" — match both
+      // formats, otherwise the query silently targets zero students.
+      const raw = String(classLevel).replace(/^Class\s*/i, '').trim();
+      query.classLevel = { $in: [...new Set([String(classLevel), raw, `Class ${raw}`])] };
+    }
+    // 'All Batches'/'All' are wildcards, not real batch names
+    if (batch && !['all batches', 'all'].includes(String(batch).trim().toLowerCase())) {
+      query.batch = batch;
+    }
 
     const users = await User.find(query).select('_id pushToken');
+    console.log(
+      `[sendScheduleNotification] class="${classLevel ?? 'any'}" batch="${batch ?? 'any'}" → ${users.length} students matched`
+    );
     if (users.length === 0) return;
 
     // ── 1. Persist in-app notifications to MongoDB ───────────────────────────
