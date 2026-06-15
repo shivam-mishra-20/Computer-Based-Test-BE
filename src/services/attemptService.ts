@@ -3,6 +3,7 @@ import Exam from '../models/Exam';
 import User from '../models/User';
 import Question, { IQuestion } from '../models/Question';
 import Attempt, { IAnswerItem } from '../models/Attempt';
+import ExamEvaluation from '../models/ExamEvaluation';
 import { computeMaxScoreForExam, sanitizeQuestion, shuffleArray } from '../utils/exam';
 import { gradeSubjectiveAnswerGroq } from './aiService';
 import { getClassQuestionModel } from '../models/ClassQuestion';
@@ -95,17 +96,29 @@ export async function startAttempt(examId: string, userId: string) {
     }
   }
 
-  attempt = await Attempt.create({
-    examId: new Types.ObjectId(examId),
-    userId: new Types.ObjectId(userId),
-    mode: exam.mode || 'live',
-    status: 'in-progress',
-    startedAt: new Date(),
-    snapshot: { sectionOrder, questionOrderBySection, optionOrderByQuestion, adaptiveState },
-    answers: [],
-    maxScore: computeMaxScoreForExam(exam, qmap),
-  });
-  return attempt;
+  try {
+    attempt = await Attempt.create({
+      examId: new Types.ObjectId(examId),
+      userId: new Types.ObjectId(userId),
+      mode: exam.mode || 'live',
+      status: 'in-progress',
+      startedAt: new Date(),
+      snapshot: { sectionOrder, questionOrderBySection, optionOrderByQuestion, adaptiveState },
+      answers: [],
+      maxScore: computeMaxScoreForExam(exam, qmap),
+    });
+    return attempt;
+  } catch (err: any) {
+    // Two concurrent "start" requests (e.g. the app and the web, a double-tap,
+    // or a retried POST) can both pass the findOne() above and try to create an
+    // attempt. The unique (examId, userId) index rejects the loser with E11000;
+    // return the attempt that won instead of erroring or duplicating.
+    if (err?.code === 11000) {
+      const existing = await Attempt.findOne({ examId, userId });
+      if (existing) return existing;
+    }
+    throw err;
+  }
 }
 
 export async function getAttemptView(attemptId: string, userId: string) {
@@ -323,7 +336,16 @@ export async function saveAnswer(attemptId: string, userId: string, answer: IAns
   
   const idx = attempt.answers.findIndex((a) => a.questionId.toString() === answer.questionId.toString());
   if (idx >= 0) {
-    attempt.answers[idx] = { ...attempt.answers[idx], ...answer };
+    // Non-destructive merge: only overwrite fields that were actually provided.
+    // A spread merge ({ ...existing, ...answer }) would clobber chosenOptionId /
+    // textAnswer with `undefined` whenever a partial update (e.g. a mark-for-review
+    // toggle) comes in, silently erasing the student's saved answer. Mutate the
+    // existing subdocument in place so untouched fields survive.
+    const existing = attempt.answers[idx] as any;
+    for (const [key, value] of Object.entries(answer)) {
+      if (value !== undefined) existing[key] = value;
+    }
+    attempt.markModified('answers');
   } else {
     attempt.answers.push(answer);
   }
@@ -335,66 +357,165 @@ export async function markForReview(attemptId: string, userId: string, questionI
   return saveAnswer(attemptId, userId, { questionId: new Types.ObjectId(questionId), isMarkedForReview: marked });
 }
 
-function gradeObjective(q: IQuestion, ans: IAnswerItem): { isCorrect: boolean; score: number } | null {
-  if (q.type === 'mcq' || q.type === 'truefalse') {
-    const correctOption = q.options?.find((o) => o.isCorrect);
-    if (q.type === 'mcq') {
-      if (!correctOption || !ans.chosenOptionId) return { isCorrect: false, score: 0 };
+/**
+ * Clear a student's selected response for a question (deselect), keeping the
+ * mark-for-review flag if set. If nothing else remains on the answer, the entry
+ * is removed so the question reverts to "not attempted".
+ */
+export async function clearAnswerResponse(attemptId: string, userId: string, questionId: string) {
+  const attempt = await Attempt.findById(attemptId);
+  if (!attempt) throw new Error('Attempt not found');
+  if (attempt.userId.toString() !== userId) throw new Error('Forbidden');
+  if (!['in-progress'].includes(attempt.status)) throw new Error('Attempt not editable');
+
+  const idx = attempt.answers.findIndex((a) => a.questionId.toString() === questionId.toString());
+  if (idx >= 0) {
+    const a = attempt.answers[idx] as any;
+    const marked = a.isMarkedForReview;
+    if (marked) {
+      // Keep the review flag, drop only the response fields.
+      a.chosenOptionId = undefined;
+      a.textAnswer = undefined;
+      a.isCorrect = undefined;
+      a.scoreAwarded = undefined;
+    } else {
+      attempt.answers.splice(idx, 1);
+    }
+    attempt.markModified('answers');
+    await attempt.save();
+  }
+  return attempt;
+}
+
+// Collapse the many type aliases the web/mobile players emit into a canonical
+// key (e.g. "mcq-single" / "MCQ_Single" -> "mcqsingle"). Without this the grader
+// silently skipped real question types and treated them as subjective.
+export function normalizeQuestionType(t?: string): string {
+  return (t || '').toLowerCase().replace(/[\s_-]+/g, '');
+}
+
+const SINGLE_CHOICE_TYPES = new Set(['mcq', 'mcqsingle', 'singlechoice', 'multiplechoice']);
+const TRUEFALSE_TYPES = new Set(['truefalse']);
+const MULTI_SELECT_TYPES = new Set(['mcqmulti', 'multiselect', 'multipleselect', 'msq']);
+const INTEGER_TYPES = new Set(['integer', 'numerical', 'numeric', 'number']);
+const FILL_TYPES = new Set(['fill', 'fillblank', 'fillintheblank', 'fillups']);
+const SUBJECTIVE_TYPES = new Set(['short', 'long', 'subjective', 'text', 'essay', 'descriptive']);
+
+export function isSubjectiveType(t?: string): boolean {
+  return SUBJECTIVE_TYPES.has(normalizeQuestionType(t));
+}
+
+export function gradeObjective(q: IQuestion, ans: IAnswerItem): { isCorrect: boolean; score: number } | null {
+  const type = normalizeQuestionType(q.type);
+  const correctOptions = (q.options || []).filter((o) => o.isCorrect);
+
+  // Single-choice MCQ
+  if (SINGLE_CHOICE_TYPES.has(type)) {
+    const correctOption = correctOptions[0];
+    if (!correctOption || !ans.chosenOptionId) return { isCorrect: false, score: 0 };
+    const isCorrect = correctOption._id.toString() === ans.chosenOptionId.toString();
+    return { isCorrect, score: isCorrect ? 1 : 0 };
+  }
+
+  // True / false: option-based OR text-based
+  if (TRUEFALSE_TYPES.has(type)) {
+    const correctOption = correctOptions[0];
+    if (correctOption && ans.chosenOptionId) {
       const isCorrect = correctOption._id.toString() === ans.chosenOptionId.toString();
       return { isCorrect, score: isCorrect ? 1 : 0 };
-    } else {
-      // true/false: support either option-based or textAnswer-based
-      if (correctOption && ans.chosenOptionId) {
-        const isCorrect = correctOption._id.toString() === ans.chosenOptionId.toString();
-        return { isCorrect, score: isCorrect ? 1 : 0 };
-      }
-      const expected = (q.correctAnswerText || '').trim().toLowerCase();
-      const got = (ans.textAnswer || '').trim().toLowerCase();
-      const isCorrect = !!expected && (got === expected || (got === 'true' && expected === 'true') || (got === 'false' && expected === 'false'));
-      return { isCorrect, score: isCorrect ? 1 : 0 };
     }
+    const expected = (q.correctAnswerText || '').trim().toLowerCase();
+    const got = (ans.textAnswer || '').trim().toLowerCase();
+    const isCorrect = !!expected && got === expected;
+    return { isCorrect, score: isCorrect ? 1 : 0 };
   }
-  if (q.type === 'fill') {
+
+  // Multi-select: chosen set must exactly equal the correct set.
+  if (MULTI_SELECT_TYPES.has(type)) {
+    const correctIds = correctOptions.map((o) => o._id.toString()).sort();
+    let chosenIds: string[] = [];
+    if (Array.isArray((ans as any).selectedOptionIds) && (ans as any).selectedOptionIds.length) {
+      chosenIds = (ans as any).selectedOptionIds.map((id: any) => id.toString());
+    } else if (ans.textAnswer) {
+      // Players persist multi-select as a JSON array of option ids in textAnswer.
+      try {
+        const parsed = JSON.parse(ans.textAnswer);
+        if (Array.isArray(parsed)) chosenIds = parsed.map((id) => id.toString());
+      } catch {
+        /* not JSON */
+      }
+    }
+    chosenIds = chosenIds.sort();
+    const isCorrect =
+      correctIds.length > 0 &&
+      correctIds.length === chosenIds.length &&
+      correctIds.every((id, i) => id === chosenIds[i]);
+    return { isCorrect, score: isCorrect ? 1 : 0 };
+  }
+
+  // Integer / numerical
+  if (INTEGER_TYPES.has(type)) {
+    const expected = (q.correctAnswerText ?? '').toString().trim();
+    const got = (ans.textAnswer ?? '').toString().trim();
+    if (expected === '' || got === '' || Number.isNaN(Number(expected)) || Number.isNaN(Number(got))) {
+      return { isCorrect: false, score: 0 };
+    }
+    const isCorrect = Number(expected) === Number(got);
+    return { isCorrect, score: isCorrect ? 1 : 0 };
+  }
+
+  // Fill in the blank
+  if (FILL_TYPES.has(type)) {
     const expected = (q.correctAnswerText || '').trim().toLowerCase();
     const got = (ans.textAnswer || '').trim().toLowerCase();
     const isCorrect = expected.length > 0 && expected === got;
     return { isCorrect, score: isCorrect ? 1 : 0 };
   }
-  if (q.type === 'assertionreason') {
-    // Expected mapping:
-    // A: Both true and reason explains assertion
-    // B: Both true but reason does not explain assertion
-    // C: Assertion true, reason false
-    // D: Assertion false, reason true
-    const aT = !!q.assertionIsTrue; 
+
+  // Assertion-Reason
+  if (type === 'assertionreason') {
+    // Mobile renders q.options and submits an option id -> grade like single-choice.
+    if (ans.chosenOptionId && correctOptions.length) {
+      const isCorrect = correctOptions[0]._id.toString() === ans.chosenOptionId.toString();
+      return { isCorrect, score: isCorrect ? 1 : 0 };
+    }
+    // Web submits an A/B/C/D code (textAnswer) derived from assertion flags.
+    // A: both true & reason explains; B: both true & not explains;
+    // C: assertion true, reason false; D: assertion false, reason true.
+    const aT = !!q.assertionIsTrue;
     const rT = !!q.reasonIsTrue;
     const explains = !!q.reasonExplainsAssertion;
-    let correct: 'A'|'B'|'C'|'D' | null = null;
+    let correct: 'A' | 'B' | 'C' | 'D' | null = null;
     if (aT && rT && explains) correct = 'A';
     else if (aT && rT && !explains) correct = 'B';
     else if (aT && !rT) correct = 'C';
     else if (!aT && rT) correct = 'D';
-    // Accept textAnswer or chosenOptionId codes
-    const given = ((ans.textAnswer !== undefined && ans.textAnswer !== null)
-      ? ans.textAnswer
-      : (ans.chosenOptionId !== undefined && ans.chosenOptionId !== null)
-        ? ans.chosenOptionId
-        : '').toString().trim().toUpperCase();
-    const isCorrect = !!correct && typeof given === 'string' && given === correct ? true : false;
+    const given = (ans.textAnswer ?? ans.chosenOptionId ?? '').toString().trim().toUpperCase();
+    const isCorrect = !!correct && given === correct;
     return { isCorrect, score: isCorrect ? 1 : 0 };
   }
-  return null; // subjective
+
+  return null; // subjective -> AI graded
 }
 
 export async function submitAttempt(attemptId: string, userId: string, auto = false) {
   const attempt = await Attempt.findById(attemptId);
   if (!attempt) throw new Error('Attempt not found');
   if (attempt.userId.toString() !== userId) throw new Error('Forbidden');
-  if (!['in-progress', 'created'].includes(attempt.status)) throw new Error('Attempt already submitted');
+  if (!['in-progress', 'created'].includes(attempt.status)) {
+    // Idempotent submit: an auto-submit (time-up / tab-violation / page-unload
+    // beacon) may have already finalized this attempt. Returning the existing
+    // attempt instead of throwing prevents the manual "Submit" button from
+    // surfacing a spurious "Submit failed" error to the student.
+    return attempt;
+  }
 
   let qmap: Map<string, any>;
   let markingScheme = { correct: 1, incorrect: 0, unattempted: 0 };
-  
+  // Max attainable raw score (sum of per-question correct marks). For exams this
+  // reflects the build-time marking scheme; for practice tests, the start value.
+  let baseMaxScore = attempt.maxScore || 0;
+
   if (attempt.practiceTestId) {
     // Practice test - load from class-specific collection
     const PracticeTest = (await import('../models/PracticeTest')).default;
@@ -444,6 +565,14 @@ export async function submitAttempt(attemptId: string, userId: string, auto = fa
       questions = await Question.find({ _id: { $in: qids } });
     }
     qmap = new Map<string, IQuestion>(questions.map((q) => [(q as any)._id.toString(), q]));
+    // Grade with the exam's build-time marking scheme (e.g. +4 / -1 / 0) so the
+    // provisional score matches the same logic the review module finalises with.
+    markingScheme = {
+      correct: exam.markingScheme?.correct ?? 1,
+      incorrect: exam.markingScheme?.incorrect ?? 0,
+      unattempted: exam.markingScheme?.unattempted ?? 0,
+    };
+    baseMaxScore = Math.round(markingScheme.correct * qids.length * 100) / 100;
   }
 
   let total = 0;
@@ -460,7 +589,7 @@ export async function submitAttempt(attemptId: string, userId: string, auto = fa
         ans.scoreAwarded = markingScheme.incorrect;
       }
       total += ans.scoreAwarded;
-    } else if (q.type === 'short' || q.type === 'long') {
+    } else if (isSubjectiveType(q.type)) {
       // subjective: use AI grading (Groq)
       try {
         const r = await gradeSubjectiveAnswerGroq({
@@ -485,7 +614,37 @@ export async function submitAttempt(attemptId: string, userId: string, auto = fa
   attempt.totalScore = total;
   attempt.submittedAt = new Date();
   attempt.status = auto ? 'auto-submitted' : 'submitted';
-  
+
+  // Record the immutable raw (pre-override) scores, then apply any active
+  // test-level total-marks override so a late submission is presented on the
+  // same scale as the rest of the cohort. Per-test ranks are (re)assigned by
+  // the propagation engine across all attempts, not here.
+  attempt.rawTotalScore = total;
+  attempt.rawMaxScore = baseMaxScore;
+  let effTotal = total;
+  let effMax = baseMaxScore || 0;
+  if (attempt.examId && !attempt.practiceTestId) {
+    try {
+      const evaluation = await ExamEvaluation.findOne({ examId: attempt.examId }).select('totalMarksOverride overrideMode');
+      const override = evaluation?.totalMarksOverride;
+      if (override !== null && override !== undefined && override > 0) {
+        if (evaluation!.overrideMode === 'denominator') {
+          effMax = override;
+        } else {
+          const factor = (attempt.rawMaxScore || 0) > 0 ? override / (attempt.rawMaxScore as number) : 0;
+          effTotal = Math.round(total * factor * 100) / 100;
+          effMax = override;
+        }
+      }
+    } catch {
+      /* fall back to raw values */
+    }
+  }
+  attempt.totalScore = effTotal;
+  attempt.maxScore = effMax;
+  // Negative marking can push the total below zero; percentage is floored at 0.
+  attempt.percentage = effMax > 0 ? Math.max(0, Math.round((effTotal / effMax) * 10000) / 100) : 0;
+
   // Practice tests: auto-publish results immediately so students can see scores
   if (attempt.practiceTestId) {
     attempt.resultPublished = true;
@@ -569,6 +728,8 @@ export async function listAttemptsForUser(userId: string, opts: { published?: bo
       id = exam._id?.toString() || (a.examId instanceof Types.ObjectId ? a.examId.toString() : null);
     }
     
+    const maxScore = a.maxScore;
+    const totalScore = a.totalScore;
     return {
       _id: a._id,
       examId: !isPracticeTest ? id : null,
@@ -576,8 +737,18 @@ export async function listAttemptsForUser(userId: string, opts: { published?: bo
       examTitle: title,
       isPracticeTest,
       submittedAt: a.submittedAt,
-      totalScore: a.totalScore,
-      maxScore: a.maxScore,
+      totalScore,
+      maxScore,
+      // Effective percentage + per-test rank from the review/propagation engine.
+      // Fall back to a live computation for attempts graded before those fields
+      // existed (until a backfill recompute runs).
+      percentage:
+        typeof a.percentage === 'number'
+          ? a.percentage
+          : maxScore && maxScore > 0
+          ? Math.round(((totalScore || 0) / maxScore) * 10000) / 100
+          : 0,
+      rankInTest: a.rankInTest ?? null,
       status: a.status,
       resultPublished: a.resultPublished,
     };

@@ -9,12 +9,21 @@ export interface IExamSection {
   shuffleOptions?: boolean;
 }
 
+export interface IMarkingScheme {
+  correct: number;
+  incorrect: number;
+  unattempted: number;
+}
+
 export interface IExam extends Document {
   title: string;
   description?: string;
   createdBy: Types.ObjectId; // teacher/admin
   sections: IExamSection[];
   totalDurationMins?: number; // overall exam timer
+  // Marks awarded per question (e.g. +4 / -1 / 0). Set at build time and used
+  // as the grading default; the review module can still override per-test.
+  markingScheme?: IMarkingScheme;
   mode?: 'practice' | 'live' | 'adaptive';
   schedule?: {
     startAt?: Date;
@@ -50,6 +59,11 @@ const examSchema = new Schema<IExam>(
     createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     sections: { type: [examSectionSchema], required: true },
     totalDurationMins: { type: Number },
+    markingScheme: {
+      correct: { type: Number, default: 1 },
+      incorrect: { type: Number, default: 0 },
+      unattempted: { type: Number, default: 0 },
+    },
     mode: { type: String, enum: ['practice', 'live', 'adaptive'], default: 'live', index: true },
     schedule: {
       startAt: { type: Date },

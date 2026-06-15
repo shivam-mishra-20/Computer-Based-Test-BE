@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
-import { listAssignedExams, startAttempt, getAttemptView, saveAnswer, markForReview, submitAttempt, publishResult, logActivity, nextAdaptiveQuestion, listPendingReviewAttempts, adjustAnswerScore, listAttemptsForUser, getAttemptViewForTeacher } from '../services/attemptService';
+import { listAssignedExams, startAttempt, getAttemptView, saveAnswer, markForReview, clearAnswerResponse, submitAttempt, publishResult, logActivity, nextAdaptiveQuestion, listPendingReviewAttempts, adjustAnswerScore, listAttemptsForUser, getAttemptViewForTeacher } from '../services/attemptService';
 import Question from '../models/Question';
 import Attempt from '../models/Attempt';
 
@@ -29,13 +29,55 @@ export const getAttemptCtrl = async (req: Request, res: Response) => {
 
 export const saveAnswerCtrl = async (req: Request, res: Response) => {
   try {
-    const attempt = await saveAnswer(req.params.attemptId, (req as any).user.id, {
-      questionId: new Types.ObjectId(req.body.questionId),
-      chosenOptionId: req.body.chosenOptionId ? new Types.ObjectId(req.body.chosenOptionId) : undefined,
-      textAnswer: req.body.textAnswer,
-      isMarkedForReview: req.body.isMarkedForReview,
-      timeSpentSec: req.body.timeSpentSec,
-    });
+    const body = req.body || {};
+    // Deselect / clear a response (keeps the mark-for-review flag).
+    if (body.clear) {
+      const cleared = await clearAnswerResponse(req.params.attemptId, (req as any).user.id, body.questionId);
+      return res.json(cleared);
+    }
+    // Build a PARTIAL answer that contains only the fields the client actually
+    // sent. The service merges non-destructively, so omitting a field leaves the
+    // stored value intact (critical: a mark-for-review toggle must not wipe the
+    // answer, and an answer save must not wipe the review flag).
+    const answer: any = { questionId: new Types.ObjectId(body.questionId) };
+
+    if (body.chosenOptionId) {
+      answer.chosenOptionId = new Types.ObjectId(body.chosenOptionId);
+    }
+    if (Array.isArray(body.selectedOptionIds)) {
+      // Multi-select is persisted as a JSON array of option ids in textAnswer.
+      answer.textAnswer = JSON.stringify(body.selectedOptionIds);
+    } else if (body.textAnswer !== undefined && body.textAnswer !== null) {
+      answer.textAnswer = body.textAnswer;
+    }
+    if (typeof body.isMarkedForReview === 'boolean') {
+      answer.isMarkedForReview = body.isMarkedForReview;
+    }
+    if (body.timeSpentSec !== undefined) {
+      answer.timeSpentSec = body.timeSpentSec;
+    }
+
+    // Backward/cross-client compatibility: older mobile builds POST a single
+    // `response` field instead of chosenOptionId/textAnswer. Route it to the
+    // right field so those answers are no longer silently dropped (the "0
+    // attempted from app" bug). Only used when explicit fields are absent.
+    if (
+      answer.chosenOptionId === undefined &&
+      answer.textAnswer === undefined &&
+      body.response !== undefined &&
+      body.response !== null
+    ) {
+      const r = body.response;
+      if (Array.isArray(r)) {
+        answer.textAnswer = JSON.stringify(r);
+      } else if (typeof r === 'string' && /^[a-f\d]{24}$/i.test(r)) {
+        answer.chosenOptionId = new Types.ObjectId(r);
+      } else {
+        answer.textAnswer = String(r);
+      }
+    }
+
+    const attempt = await saveAnswer(req.params.attemptId, (req as any).user.id, answer);
     res.json(attempt);
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Failed to save answer' });

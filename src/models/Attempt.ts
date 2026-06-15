@@ -42,6 +42,17 @@ export interface IAttempt extends Document {
   answers: IAnswerItem[];
   totalScore?: number;
   maxScore?: number;
+  // Immutable auto/teacher-graded raw values (before any test-level total-marks
+  // override). The propagation engine always rescales from these so repeated
+  // total-marks edits stay idempotent and never compound.
+  rawTotalScore?: number;
+  rawMaxScore?: number;
+  // Effective percentage (0-100) after any override is applied. Cached so every
+  // reader (student portal, analytics, exports) shows the same value.
+  percentage?: number;
+  // Rank within this exam's attempters (1 = highest), refreshed on every
+  // recompute/publish. Standard competition ranking (1,2,2,4).
+  rankInTest?: number;
   resultPublished?: boolean;
   activityLogs?: IActivityLog[];
 }
@@ -83,6 +94,10 @@ const attemptSchema = new Schema<IAttempt>(
     answers: { type: [answerSchema], default: [] },
     totalScore: { type: Number },
     maxScore: { type: Number },
+    rawTotalScore: { type: Number },
+    rawMaxScore: { type: Number },
+    percentage: { type: Number },
+    rankInTest: { type: Number },
     resultPublished: { type: Boolean, default: false },
     activityLogs: [
       {

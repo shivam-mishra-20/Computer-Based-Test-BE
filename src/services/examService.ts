@@ -120,13 +120,27 @@ export const deleteQuestion = async (id: string) => {
   await Question.findByIdAndDelete(id);
 };
 
+// Ensure a marking scheme coming from any client persists as numbers (so the
+// scheme set during exam creation reliably reaches the DB and the review).
+function normalizeMarkingScheme<T extends { markingScheme?: any }>(payload: T): T {
+  const m = payload?.markingScheme;
+  if (m && typeof m === 'object') {
+    payload.markingScheme = {
+      correct: Number(m.correct) || 0,
+      incorrect: Number(m.incorrect) || 0,
+      unattempted: Number(m.unattempted) || 0,
+    };
+  }
+  return payload;
+}
+
 export const createExam = async (payload: Partial<IExam>): Promise<IExam> => {
-  const exam = await Exam.create(payload as IExam);
+  const exam = await Exam.create(normalizeMarkingScheme({ ...payload }) as IExam);
   return exam;
 };
 
 export const updateExam = async (id: string, payload: Partial<IExam>) => {
-  return Exam.findByIdAndUpdate(id, payload, { new: true });
+  return Exam.findByIdAndUpdate(id, normalizeMarkingScheme({ ...payload }), { new: true });
 };
 
 export const getExam = async (id: string) => Exam.findById(id);
