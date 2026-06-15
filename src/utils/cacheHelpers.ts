@@ -11,6 +11,8 @@ interface CacheOptions {
   ttl?: number;
   /** Cache key generator function */
   keyFn?: (req: Request) => string;
+  /** Alias for keyFn — the name route call sites use */
+  customKey?: (req: Request) => string;
   /** Condition to enable caching */
   condition?: (req: Request) => boolean;
   /** Invalidate cache on specific patterns */
@@ -38,9 +40,10 @@ export function generateCacheKey(req: Request, prefix: string = 'api'): string {
 export function cacheMiddleware(options: CacheOptions = {}) {
   const {
     ttl = 300,
-    keyFn = (req) => generateCacheKey(req),
     condition = () => true,
   } = options;
+  // Accept either `keyFn` or the `customKey` alias that route call sites use.
+  const keyFn = options.keyFn || options.customKey || ((req: Request) => generateCacheKey(req));
 
   return async (req: Request, res: Response, next: NextFunction) => {
     // Only cache GET requests by default
@@ -100,7 +103,9 @@ export function cacheMiddleware(options: CacheOptions = {}) {
  * Usage:
  * router.post('/courses', invalidateCacheOn(['courses']), controller)
  */
-export function invalidateCacheOn(patterns: string[]) {
+export function invalidateCacheOn(arg: string[] | { patterns?: string[] }) {
+  // Route call sites pass `{ patterns: [...] }`; also accept a bare string[].
+  const patterns: string[] = Array.isArray(arg) ? arg : arg?.patterns ?? [];
   return async (req: Request, res: Response, next: NextFunction) => {
     // Store original methods
     const originalJson = res.json.bind(res);

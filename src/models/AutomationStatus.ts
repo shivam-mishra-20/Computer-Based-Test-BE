@@ -41,5 +41,4 @@ const AutomationStatusSchema = new Schema<IAutomationStatus>(
 const AutomationStatus: Model<IAutomationStatus> = (mongoose.models.AutomationStatus as Model<IAutomationStatus>) || 
   mongoose.model<IAutomationStatus>('AutomationStatus', AutomationStatusSchema);
 
-export { IAutomationStatus };
 export default AutomationStatus;
