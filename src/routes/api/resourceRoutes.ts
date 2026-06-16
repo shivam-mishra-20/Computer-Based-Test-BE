@@ -4,24 +4,19 @@ import StudyResource from '../../models/StudyResource';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import { uploadLimiter } from '../../middlewares/rateLimiter';
 import { uploadToFirebase } from '../../services/firebaseService';
+import { pdfFileFilter, resolveContentType } from '../../utils/uploadFileTypes';
 import youtubeService from '../../services/youtubeService';
 
 const router = Router();
 
-// Configure multer for PDF uploads
+// Configure multer for PDF uploads. Accept by mimetype OR .pdf extension so a PDF
+// picked from a cloud provider (sent as application/octet-stream) isn't rejected.
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 50 * 1024 * 1024, // 50MB max
   },
-  fileFilter: (_req, file, cb) => {
-    const allowedTypes = ['application/pdf'];
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only PDF files are allowed'));
-    }
-  }
+  fileFilter: pdfFileFilter,
 });
 
 // ============ Public Routes ============
@@ -219,8 +214,9 @@ router.post('/upload-pdf', authMiddleware, uploadLimiter, upload.single('file'),
     const timestamp = Date.now();
     const sanitizedName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
     const fileName = `study-resources/pdfs/${classLevel}/${subject}/${timestamp}_${sanitizedName}`;
-    
-    const fileUrl = await uploadToFirebase(file.buffer, fileName, file.mimetype);
+
+    const contentType = resolveContentType(file.mimetype, file.originalname);
+    const fileUrl = await uploadToFirebase(file.buffer, fileName, contentType);
 
     // Create resource record
     const resource = new StudyResource({

@@ -5,6 +5,7 @@ import User from '../../models/User';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import { uploadLimiter } from '../../middlewares/rateLimiter';
 import { uploadToFirebase } from '../../services/firebaseService';
+import { materialFileFilter, resolveContentType } from '../../utils/uploadFileTypes';
 import { sendStudentNotifications } from '../../services/notificationService';
 
 const router = Router();
@@ -404,24 +405,12 @@ const notifyMaterialPublished = async (material: any): Promise<void> => {
 };
 
 // Configure multer for memory storage (we'll upload to Firebase)
+// Accept PDFs/images/Word docs by mimetype OR extension so files the app lets
+// teachers pick (HEIC photos, Drive files sent as application/octet-stream,
+// image/jpg) are not rejected. See uploadFileTypes.ts.
 const upload = multer({
   storage: multer.memoryStorage(),
-  fileFilter: (_req, file, cb) => {
-    const allowedTypes = [
-      'application/pdf',
-      'image/jpeg',
-      'image/png',
-      'image/webp',
-      'image/gif',
-      'application/msword',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-    ];
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Invalid file type. Only PDF, images, and documents are allowed.'));
-    }
-  }
+  fileFilter: materialFileFilter,
 });
 
 // Get materials (filtered by assignment for students)
@@ -612,26 +601,29 @@ router.post('/upload', authMiddleware, uploadLimiter, upload.single('file'), asy
       return res.status(400).json({ error: targetingError });
     }
     
+    // Normalize the content type (generic/missing mimetypes -> inferred from extension)
+    const contentType = resolveContentType(file.mimetype, file.originalname);
+
     // Determine file type
     let fileType: string = 'other';
-    if (file.mimetype === 'application/pdf') {
+    if (contentType === 'application/pdf') {
       fileType = 'pdf';
-    } else if (file.mimetype.startsWith('image/')) {
+    } else if (contentType.startsWith('image/')) {
       fileType = 'image';
-    } else if (file.mimetype.includes('document') || file.mimetype.includes('word')) {
+    } else if (contentType.includes('document') || contentType.includes('word')) {
       fileType = 'document';
     }
-    
+
     // Generate unique filename
     const timestamp = Date.now();
     const sanitizedName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
     const classFolder = targeting.classLevel.replace(/\s+/g, '_');
     const subjectFolder = safeString(subject).replace(/[^a-zA-Z0-9_-]/g, '_');
     const fileName = `materials/${classFolder}/${subjectFolder}/${timestamp}_${sanitizedName}`;
-    
+
     // Upload to Firebase Storage
-    const fileUrl = await uploadToFirebase(file.buffer, fileName, file.mimetype);
-    
+    const fileUrl = await uploadToFirebase(file.buffer, fileName, contentType);
+
     // Create material record
     const material = new Material({
       title,
@@ -639,7 +631,7 @@ router.post('/upload', authMiddleware, uploadLimiter, upload.single('file'), asy
       type: fileType,
       fileUrl,
       fileName: file.originalname,
-      mimeType: file.mimetype,
+      mimeType: contentType,
       fileSize: file.size,
       subject,
       classLevel: targeting.classLevel,
@@ -835,8 +827,9 @@ router.put('/:materialId/upload', authMiddleware, uploadLimiter, upload.single('
     const classFolder = normalizeClassLabel(req.body.classLevel || material.classLevel || 'General').replace(/\s+/g, '_');
     const subjectFolder = safeString(req.body.subject || material.subject || 'General').replace(/[^a-zA-Z0-9_-]/g, '_');
     const fileName = `materials/${classFolder}/${subjectFolder}/${timestamp}_${sanitizedName}`;
-    const fileUrl = await uploadToFirebase(file.buffer, fileName, file.mimetype);
-    
+    const contentType = resolveContentType(file.mimetype, file.originalname);
+    const fileUrl = await uploadToFirebase(file.buffer, fileName, contentType);
+
     // Add to versions
     const newVersion = material.version + 1;
     material.versions.push({
@@ -844,15 +837,15 @@ router.put('/:materialId/upload', authMiddleware, uploadLimiter, upload.single('
       fileUrl,
       fileSize: file.size,
       fileName: file.originalname,
-      mimeType: file.mimetype,
+      mimeType: contentType,
       uploadedAt: new Date(),
       notes: safeString(req.body.notes)
     });
-    
+
     // Update current file
     material.fileUrl = fileUrl;
     material.fileName = file.originalname;
-    material.mimeType = file.mimetype;
+    material.mimeType = contentType;
     material.fileSize = file.size;
     material.version = newVersion;
 

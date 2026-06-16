@@ -7,21 +7,17 @@ import { authMiddleware } from '../../middlewares/authMiddleware';
 import { uploadLimiter } from '../../middlewares/rateLimiter';
 import { sendStudentNotifications } from '../../services/notificationService';
 import { getFirestoreUserProfile, uploadToFirebase } from '../../services/firebaseService';
+import { attachmentFileFilter, resolveContentType } from '../../utils/uploadFileTypes';
 
 const router = Router();
 
-// Configure multer for memory storage
+// Configure multer for memory storage. Accept PDFs/images by mimetype OR extension
+// so files the app lets teachers pick (HEIC photos, Drive PDFs sent as
+// application/octet-stream, image/jpg) are not rejected. See uploadFileTypes.ts.
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }, // 25MB max
-  fileFilter: (_req, file, cb) => {
-    const allowedTypes = ['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp'];
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only PDF and image files allowed'));
-    }
-  }
+  fileFilter: attachmentFileFilter,
 });
 const normalizeClassValue = (value: unknown): string =>
   typeof value === 'string'
@@ -471,17 +467,22 @@ router.post('/:id/upload', authMiddleware, uploadLimiter, upload.single('file'),
       return res.status(400).json({ error: 'No file provided' });
     }
     
-    console.log('[Homework] Uploading file:', file.originalname, file.mimetype, file.size);
-    
+    // Normalize the content type: the picker may report a generic/missing mimetype
+    // (e.g. application/octet-stream for a PDF picked from Drive). Infer it from the
+    // file extension so the object stores and serves with the correct type.
+    const contentType = resolveContentType(file.mimetype, file.originalname);
+
+    console.log('[Homework] Uploading file:', file.originalname, file.mimetype, '->', contentType, file.size);
+
     // Upload to Firebase Storage
     const storagePath = `homework/${homework._id}/${Date.now()}_${file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
-    const fileUrl = await uploadToFirebase(file.buffer, storagePath, file.mimetype);
-    
+    const fileUrl = await uploadToFirebase(file.buffer, storagePath, contentType);
+
     // Add attachment to homework
     const attachment = {
       fileUrl,
       fileName: file.originalname,
-      mimeType: file.mimetype,
+      mimeType: contentType,
       fileSize: file.size
     };
     
