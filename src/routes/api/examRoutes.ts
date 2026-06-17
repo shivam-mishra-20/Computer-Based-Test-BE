@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
+import { invalidateCacheOn } from '../../utils/cacheHelpers';
 import {
   assignExamCtrl,
   createExamCtrl,
@@ -32,8 +33,11 @@ router.get('/questions/for-paper', authMiddleware, requireRole('teacher', 'admin
 router.put('/questions/:id', authMiddleware, requireRole('teacher', 'admin'), updateQuestionCtrl);
 router.delete('/questions/:id', authMiddleware, requireRole('teacher', 'admin'), deleteQuestionCtrl);
 
-// Exams (teacher/admin)
-router.post('/', authMiddleware, requireRole('teacher', 'admin'), createExamCtrl);
+// Exams (teacher/admin). Creating/publishing an exam must clear the students'
+// cached assigned-exams list (cached 180s) or a newly published exam takes up to
+// 3 minutes to appear on the student side.
+const invalidateAssigned = invalidateCacheOn({ patterns: ['assigned-exams', 'attempts'] });
+router.post('/', authMiddleware, requireRole('teacher', 'admin'), invalidateAssigned, createExamCtrl);
 router.get('/', authMiddleware, requireRole('teacher', 'admin'), listExamsCtrl);
 
 // Place more specific sub-routes BEFORE parameterized :id to avoid collisions
@@ -48,10 +52,10 @@ router.post('/from-paper', authMiddleware, requireRole('teacher', 'admin'), crea
 
 // Param-based exam operations (must come after specific paths)
 router.get('/:id', authMiddleware, requireRole('teacher', 'admin'), getExamCtrl);
-router.put('/:id', authMiddleware, requireRole('teacher', 'admin'), updateExamCtrl);
-router.delete('/:id', authMiddleware, requireRole('teacher', 'admin'), deleteExamCtrl);
+router.put('/:id', authMiddleware, requireRole('teacher', 'admin'), invalidateAssigned, updateExamCtrl);
+router.delete('/:id', authMiddleware, requireRole('teacher', 'admin'), invalidateAssigned, deleteExamCtrl);
 
 // Assign exams
-router.post('/:id/assign', authMiddleware, requireRole('teacher', 'admin'), assignExamCtrl);
+router.post('/:id/assign', authMiddleware, requireRole('teacher', 'admin'), invalidateAssigned, assignExamCtrl);
 
 export default router;

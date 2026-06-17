@@ -264,7 +264,7 @@ export async function getAttemptView(attemptId: string, userId: string) {
     }
     questionDict[qid] = sanitized;
   }
-  return { attempt, exam: { _id: exam._id, title: exam.title, totalDurationMins: exam.totalDurationMins }, sections, questions: questionDict };
+  return { attempt, exam: { _id: exam._id, title: exam.title, totalDurationMins: exam.totalDurationMins, antiCheat: !!exam.antiCheat }, sections, questions: questionDict };
 }
 
 export async function getAttemptViewForTeacher(attemptId: string) {

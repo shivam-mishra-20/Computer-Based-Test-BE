@@ -32,6 +32,9 @@ export interface IExam extends Document {
   classLevel?: string; // e.g., 'Class 10', 'NEET Batch'
   batch?: string; // batch/group label
   autoPublish?: boolean; // if true exam auto publishes at start
+  // Enable proctoring (heartbeat + tab-switch/background logging + auto-submit on
+  // repeated violations) for this exam. Off for relaxed practice tests.
+  antiCheat?: boolean;
   isPublished: boolean; // visible/assigned to students
   assignedTo?: {
     users?: Types.ObjectId[];
@@ -72,6 +75,7 @@ const examSchema = new Schema<IExam>(
     classLevel: { type: String, index: true },
     batch: { type: String, index: true },
     autoPublish: { type: Boolean, default: false },
+    antiCheat: { type: Boolean, default: false },
     isPublished: { type: Boolean, default: false, index: true },
     assignedTo: {
       users: [{ type: Schema.Types.ObjectId, ref: 'User' }],
