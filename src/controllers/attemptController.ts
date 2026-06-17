@@ -95,7 +95,9 @@ export const markForReviewCtrl = async (req: Request, res: Response) => {
 
 export const submitAttemptCtrl = async (req: Request, res: Response) => {
   try {
-    const attempt = await submitAttempt(req.params.attemptId, (req as any).user.id, !!req.body.auto);
+    // Tolerate a body-less POST (req.body may be undefined) — older mobile builds
+    // submit with no body, and reading `.auto` off undefined throws a 400.
+    const attempt = await submitAttempt(req.params.attemptId, (req as any).user.id, !!req.body?.auto);
     res.json(attempt);
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Failed to submit attempt' });
