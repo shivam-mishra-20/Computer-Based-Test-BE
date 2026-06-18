@@ -17,36 +17,61 @@ import {
 
 const router = Router();
 
-// Build the assignment-aware $or that matches every TestResult targeting a
-// given student. Mirrors the Homework student query and also matches legacy
-// tests (no assignmentType) plus tests created before assignment fields were
-// sent (assignmentType present but assignment arrays empty → fall back to the
-// test's own `class`/`batch`).
+// Build the assignment-aware $or that matches every TestResult a given student
+// should see. A test is visible when the student's CLASS matches AND, if the
+// test specifies a BATCH (its `batch` field or `assignedBatches`), the student's
+// batch matches too. Individually-assigned tests bypass class/batch. This also
+// covers legacy tests (no assignmentType) and tests created before the
+// assignment fields existed, which carry their scope on `class`/`batch`.
 function buildStudentTestMatch(user: { id?: string; classLevel?: string; batch?: string }): any[] {
   const rawClass = String(user.classLevel || '').trim();
   const classNum = rawClass.replace(/^Class\s*/i, '').trim();
   const classVariants = [classNum, `Class ${classNum}`, rawClass].filter((v) => v && v !== 'Class');
   const userBatch = (user.batch || '').trim();
 
-  const or: any[] = [
-    // Legacy tests (assignment fields never set) — scoped to the test's class.
-    { assignmentType: { $exists: false }, class: { $in: classVariants } },
-    // 'all' / 'class' types: match explicit assignedClasses OR the test's class.
-    {
-      assignmentType: { $in: ['all', 'class'] },
-      $or: [{ assignedClasses: { $in: classVariants } }, { class: { $in: classVariants } }],
-    },
-    // Direct individual assignment (no class filter needed).
-    ...(user.id && mongoose.Types.ObjectId.isValid(user.id)
-      ? [{ assignmentType: 'students', assignedStudents: new mongoose.Types.ObjectId(user.id) }]
-      : []),
-  ];
+  // Class scope: the test's own `class` OR an explicit `assignedClasses` entry.
+  const classMatch = {
+    $or: [{ class: { $in: classVariants } }, { assignedClasses: { $in: classVariants } }],
+  };
 
+  // A test is NOT batch-restricted when it has no specific `batch` and no
+  // `assignedBatches` ("" / "all" / "All Batches" == whole class).
+  const noBatchRestriction = {
+    $and: [
+      {
+        $or: [
+          { batch: { $in: [null, ''] } },
+          { batch: { $exists: false } },
+          { batch: { $regex: /^all(\s*batches)?$/i } },
+        ],
+      },
+      {
+        $or: [{ assignedBatches: { $exists: false } }, { assignedBatches: { $size: 0 } }],
+      },
+    ],
+  };
+
+  const or: any[] = [];
+
+  // Individually-assigned tests are always visible to the named student.
+  if (user.id && mongoose.Types.ObjectId.isValid(user.id)) {
+    or.push({
+      assignmentType: 'students',
+      assignedStudents: new mongoose.Types.ObjectId(user.id),
+    });
+  }
+
+  // Whole-class tests: class matches and the test imposes no batch restriction.
+  or.push({ $and: [{ assignmentType: { $ne: 'students' } }, classMatch, noBatchRestriction] });
+
+  // Batch-restricted tests: class matches AND the student's batch is targeted.
   if (userBatch) {
     or.push({
-      assignmentType: 'batch',
-      class: { $in: classVariants },
-      $or: [{ assignedBatches: userBatch }, { batch: userBatch }],
+      $and: [
+        { assignmentType: { $ne: 'students' } },
+        classMatch,
+        { $or: [{ batch: userBatch }, { assignedBatches: userBatch }] },
+      ],
     });
   }
 

@@ -37,8 +37,11 @@ const normalizeBatchList = (values: unknown): string[] => {
   return list.map((v) => String(v || '').trim()).filter(Boolean);
 };
 
-// Resolve the set of student User _ids a test targets, based on its assignment.
-// Legacy tests (no assignmentType) behave as 'class' scoped to `class` + `batch`.
+// Resolve the set of student User _ids a test targets — kept consistent with
+// the visibility query (buildStudentTestMatch). A test targets students whose
+// CLASS matches and, when the test specifies a BATCH (its `batch` field or
+// `assignedBatches`), whose batch matches too. 'students' assignment targets
+// the named students directly.
 async function resolveTestStudentIds(test: any): Promise<string[]> {
   const assignmentType = test.assignmentType || 'class';
 
@@ -46,24 +49,20 @@ async function resolveTestStudentIds(test: any): Promise<string[]> {
     return (test.assignedStudents || []).map((id: any) => id.toString());
   }
 
-  const query: any = { role: 'student' };
-
-  const classSource =
-    assignmentType === 'class'
-      ? (test.assignedClasses?.length ? test.assignedClasses : [test.class])
-      : [test.class, ...(test.assignedClasses || [])];
+  const classSource = test.assignedClasses?.length ? test.assignedClasses : [test.class];
   const classScope = buildClassVariants(classSource);
+  if (classScope.length === 0) return [];
 
-  if (assignmentType === 'batch') {
-    const batchSource = test.assignedBatches?.length ? test.assignedBatches : [test.batch];
-    const batchScope = normalizeBatchList(batchSource);
-    if (batchScope.length === 0) return [];
-    if (classScope.length > 0) query.classLevel = { $in: classScope };
+  const query: any = { role: 'student', classLevel: { $in: classScope } };
+
+  // Batch restriction = assignedBatches ∪ the test's own `batch`, ignoring
+  // empty / "all" / "All Batches" wildcards. When present, only those batches
+  // are targeted — so notifications match exactly who can see the test.
+  const batchScope = normalizeBatchList([...(test.assignedBatches || []), test.batch]).filter(
+    (b) => !['all', 'all batches'].includes(b.toLowerCase()),
+  );
+  if (batchScope.length > 0) {
     query.batch = { $in: batchScope };
-  } else {
-    // 'class' and 'all' both scope to the class level
-    if (classScope.length === 0) return [];
-    query.classLevel = { $in: classScope };
   }
 
   const students = await User.find(query).select('_id').lean();
