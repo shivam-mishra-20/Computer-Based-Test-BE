@@ -10,16 +10,18 @@ export async function studentProgressOverTime(userId: string) {
   const withTitles = await Promise.all(
     attempts.map(async (a) => {
       const exam = await Exam.findById(a.examId).select('title');
+      // Skip attempts whose exam was deleted — keep deleted exams out of analytics.
+      if (!exam) return null;
       return {
         submittedAt: a.submittedAt,
         totalScore: a.totalScore ?? 0,
         maxScore: a.maxScore ?? 0,
         percent: a.maxScore ? Math.round(((a.totalScore ?? 0) / (a.maxScore || 1)) * 100) : null,
-        examTitle: exam?.title || 'Exam',
+        examTitle: exam.title || 'Exam',
       };
     })
   );
-  return withTitles;
+  return withTitles.filter((x): x is NonNullable<typeof x> => x !== null);
 }
 
 export async function examInsights(examId: string) {
@@ -70,7 +72,7 @@ export async function getStudentAnalytics(userId: string, mode: 'online' | 'offl
 
   // --- 1. Process Online Data (if mode is online or combined) ---
   if (mode === 'online' || mode === 'combined') {
-    const attempts = await Attempt.find({
+    const rawAttempts = await Attempt.find({
       userId: new Types.ObjectId(userId),
       status: { $in: ['submitted', 'auto-submitted', 'graded'] }
     })
@@ -78,6 +80,10 @@ export async function getStudentAnalytics(userId: string, mode: 'online' | 'offl
     .populate('examId', 'title')
     .populate('practiceTestId', 'title subjects filters')
     .lean();
+
+    // Exclude orphaned attempts whose exam/practice test was deleted so deleted
+    // exams ("Exam Not Found") never skew the student's performance/analytics.
+    const attempts = rawAttempts.filter((a: any) => a.examId || a.practiceTestId);
 
     totalExams += attempts.length;
 

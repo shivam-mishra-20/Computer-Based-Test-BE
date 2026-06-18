@@ -1,6 +1,9 @@
 import { Types } from 'mongoose';
 import Exam, { IExam } from '../models/Exam';
 import Question, { IQuestion } from '../models/Question';
+import Attempt from '../models/Attempt';
+import ExamEvaluation from '../models/ExamEvaluation';
+import ReviewAuditLog from '../models/ReviewAuditLog';
 import Blueprint, { IBlueprint } from '../models/Blueprint';
 import { ImportedQuestion } from '../models/ImportedQuestion';
 import { getClassQuestionModel } from '../models/ClassQuestion';
@@ -152,7 +155,21 @@ export const listExams = async (filter: any = {}, limit = 50, skip = 0) => {
   return { items, total };
 };
 
-export const deleteExam = async (id: string) => Exam.findByIdAndDelete(id);
+export const deleteExam = async (id: string) => {
+  const examObjectId = new Types.ObjectId(id);
+
+  // Cascade delete everything tied to this exam. Without this, deleting an exam
+  // leaves orphaned attempts that surface as "Exam Not Found" in a student's
+  // results/analytics. Removing attempts + their evaluations + review logs keeps
+  // student performance data consistent with the exams that still exist.
+  await Promise.all([
+    Attempt.deleteMany({ examId: examObjectId }),
+    ExamEvaluation.deleteMany({ examId: examObjectId }),
+    ReviewAuditLog.deleteMany({ examId: examObjectId }),
+  ]);
+
+  return Exam.findByIdAndDelete(id);
+};
 
 export const assignExam = async (id: string, users?: string[], groups?: string[]) => {
   const exam = await Exam.findById(id);

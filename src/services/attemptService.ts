@@ -709,8 +709,13 @@ export async function listAttemptsForUser(userId: string, opts: { published?: bo
     .populate('examId', 'title')
     .populate('practiceTestId', 'title')
     .lean();
-  
-  return attempts.map(a => {
+
+  // Exclude orphaned attempts whose exam (or practice test) has been deleted.
+  // After populate these have a null ref and would otherwise surface as
+  // "Exam Not Found" in the student's results / recent attempts.
+  const validAttempts = attempts.filter((a) => a.examId || a.practiceTestId);
+
+  return validAttempts.map(a => {
     // Determine if this is a practice test or regular exam
     const isPracticeTest = !!a.practiceTestId;
     let title = 'Exam Not Found';

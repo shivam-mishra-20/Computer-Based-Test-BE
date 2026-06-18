@@ -136,10 +136,14 @@ export const getStudentReport = async (req: Request, res: Response) => {
         attemptQuery.examId = { $in: scopedExamIds };
       }
 
-      const attempts = await Attempt.find(attemptQuery)
+      const rawAttempts = await Attempt.find(attemptQuery)
         .populate('examId', 'title classLevel batch schedule')
         .sort({ submittedAt: -1, createdAt: -1 })
         .lean();
+
+      // Exclude attempts whose exam was deleted (orphaned) — deleted exams must
+      // not appear in or skew a student's performance/analytics.
+      const attempts = rawAttempts.filter((a: any) => a.examId);
 
       // Resolve subjects/topics for every answered question in one round-trip.
       const questionIds = new Set<string>();
