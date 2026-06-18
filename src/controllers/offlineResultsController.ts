@@ -2,6 +2,128 @@ import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import TestResult, { ITestResult, IStudentResult } from '../models/TestResult';
 import User from '../models/User';
+import { sendStudentNotifications } from '../services/notificationService';
+
+// ── Assignment + notification helpers ────────────────────────────────────────
+// These mirror the Homework module (homeworkRoutes.ts) so offline tests reuse
+// the same class-normalization, student-resolution and notification fan-out.
+
+const normalizeClassValue = (value: unknown): string =>
+  typeof value === 'string' ? value.replace(/Class\s*/i, '').trim() : '';
+
+const buildClassVariants = (values: unknown): string[] => {
+  const list = Array.isArray(values) ? values : [values];
+  const variants = new Set<string>();
+  list.forEach((value) => {
+    if (value === null || value === undefined) return;
+    const raw = String(value).trim();
+    if (!raw) return;
+    const normalized = normalizeClassValue(raw);
+    if (normalized) {
+      variants.add(normalized);
+      variants.add(`Class ${normalized}`);
+    }
+    variants.add(raw);
+  });
+  return Array.from(variants);
+};
+
+const normalizeBatchList = (values: unknown): string[] => {
+  const list = Array.isArray(values)
+    ? values
+    : typeof values === 'string'
+      ? values.split(',')
+      : [];
+  return list.map((v) => String(v || '').trim()).filter(Boolean);
+};
+
+// Resolve the set of student User _ids a test targets, based on its assignment.
+// Legacy tests (no assignmentType) behave as 'class' scoped to `class` + `batch`.
+async function resolveTestStudentIds(test: any): Promise<string[]> {
+  const assignmentType = test.assignmentType || 'class';
+
+  if (assignmentType === 'students') {
+    return (test.assignedStudents || []).map((id: any) => id.toString());
+  }
+
+  const query: any = { role: 'student' };
+
+  const classSource =
+    assignmentType === 'class'
+      ? (test.assignedClasses?.length ? test.assignedClasses : [test.class])
+      : [test.class, ...(test.assignedClasses || [])];
+  const classScope = buildClassVariants(classSource);
+
+  if (assignmentType === 'batch') {
+    const batchSource = test.assignedBatches?.length ? test.assignedBatches : [test.batch];
+    const batchScope = normalizeBatchList(batchSource);
+    if (batchScope.length === 0) return [];
+    if (classScope.length > 0) query.classLevel = { $in: classScope };
+    query.batch = { $in: batchScope };
+  } else {
+    // 'class' and 'all' both scope to the class level
+    if (classScope.length === 0) return [];
+    query.classLevel = { $in: classScope };
+  }
+
+  const students = await User.find(query).select('_id').lean();
+  return students.map((s: any) => s._id.toString());
+}
+
+const isFutureTestDate = (testDate: string): boolean => {
+  const today = new Date().toISOString().split('T')[0];
+  return typeof testDate === 'string' && testDate >= today;
+};
+
+const formatTestDate = (testDate: string): string => {
+  const parsed = new Date(testDate);
+  if (Number.isNaN(parsed.getTime())) return testDate;
+  return parsed.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+};
+
+// Sanitize incoming assignment fields from the request body onto a test doc.
+function applyAssignmentFields(test: any, body: any): void {
+  if (body.assignmentType) {
+    test.assignmentType = body.assignmentType;
+  }
+  if (Array.isArray(body.assignedClasses)) {
+    test.assignedClasses = body.assignedClasses.map((c: any) => String(c).trim()).filter(Boolean);
+  }
+  if (Array.isArray(body.assignedBatches)) {
+    test.assignedBatches = body.assignedBatches.map((b: any) => String(b).trim()).filter(Boolean);
+  }
+  if (Array.isArray(body.assignedStudents)) {
+    test.assignedStudents = body.assignedStudents
+      .filter((id: any) => mongoose.Types.ObjectId.isValid(id))
+      .map((id: any) => new mongoose.Types.ObjectId(id));
+  }
+}
+
+// Send the "New Upcoming Test" notification once per test (guarded by
+// notifiedUpcoming) when the test is dated today or in the future.
+async function notifyUpcomingTest(test: any): Promise<void> {
+  if (test.notifiedUpcoming) return;
+  if (!isFutureTestDate(test.testDate)) return;
+
+  const studentIds = await resolveTestStudentIds(test);
+  if (studentIds.length === 0) return;
+
+  const teacher = await User.findById(test.createdBy).select('name').lean().catch(() => null);
+  const assignedBy = (teacher as any)?.name ? ` • By ${(teacher as any).name}` : '';
+
+  // Fire-and-forget the push fan-out (matches the Homework module) so the
+  // create/update response isn't blocked on Expo delivery.
+  sendStudentNotifications(
+    studentIds,
+    'New Upcoming Test',
+    `${test.testName} — ${test.subject} on ${formatTestDate(test.testDate)}${assignedBy}`,
+    { type: 'offline_test', testId: String(test._id), screen: '/(student)/modules/results' },
+    'exam'
+  ).catch((err) => console.error('[TestResults] Upcoming push error:', err));
+
+  test.notifiedUpcoming = true;
+  await test.save();
+}
 
 // Create a new test
 export const createTest = async (req: Request, res: Response) => {
@@ -24,8 +146,15 @@ export const createTest = async (req: Request, res: Response) => {
       createdBy: authUser.id,
     });
 
+    applyAssignmentFields(newTest, req.body);
+
     await newTest.save();
     console.log(`[TestResults] Created test: ${testName} for ${className}`);
+
+    // Notify assigned students if the test is dated today/in the future.
+    await notifyUpcomingTest(newTest).catch((err) =>
+      console.error('[TestResults] Upcoming notification error:', err)
+    );
 
     res.status(201).json(newTest);
   } catch (error: any) {
@@ -116,8 +245,38 @@ export const updateTestResults = async (req: Request, res: Response) => {
       return res.status(404).json({ message: 'Test not found' });
     }
 
+    // Track which students already had a graded result so we only notify each
+    // student the first time their result becomes available.
+    const isGraded = (r: any) => (Number(r?.marksObtained) || 0) > 0 || !!r?.isAbsent;
+    const previouslyGraded = new Set(
+      (test.studentResults || []).filter(isGraded).map((r: any) => String(r.studentId))
+    );
+
     test.studentResults = studentResults;
     await test.save();
+
+    // "New Result Available" notification for students newly graded.
+    const alreadyNotified = new Set((test.resultsNotifiedStudentIds || []).map(String));
+    const newlyGraded = (studentResults as any[])
+      .filter(
+        (r) =>
+          isGraded(r) &&
+          !previouslyGraded.has(String(r.studentId)) &&
+          !alreadyNotified.has(String(r.studentId))
+      )
+      .map((r) => String(r.studentId));
+
+    if (newlyGraded.length > 0) {
+      sendStudentNotifications(
+        newlyGraded,
+        'New Result Available',
+        `Your result for ${test.testName} (${test.subject}) is now available`,
+        { type: 'offline_result', testId: String(test._id), screen: '/(student)/modules/results' },
+        'exam'
+      );
+      test.resultsNotifiedStudentIds = [...alreadyNotified, ...newlyGraded];
+      await test.save();
+    }
 
     console.log(`[TestResults] Updated results for test: ${test.testName}`);
     res.json(test);
@@ -152,6 +311,8 @@ export const updateTestProperties = async (req: Request, res: Response) => {
     test.subject = subject;
     test.maxMarks = maxMarks;
 
+    applyAssignmentFields(test, req.body);
+
     if (maxMarksChanged && test.studentResults && test.studentResults.length > 0) {
       test.studentResults = test.studentResults.map((result) => {
         if (result.isAbsent) {
@@ -175,6 +336,12 @@ export const updateTestProperties = async (req: Request, res: Response) => {
     }
 
     await test.save();
+
+    // Notify assigned students if this is (still) an upcoming test and they
+    // weren't notified yet.
+    await notifyUpcomingTest(test).catch((err) =>
+      console.error('[TestResults] Upcoming notification error:', err)
+    );
 
     console.log(`[TestResults] Updated properties for test: ${test.testName}`);
     res.json(test);

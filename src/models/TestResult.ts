@@ -10,6 +10,10 @@ export interface IStudentResult {
   isAbsent?: boolean;
 }
 
+// Assignment targeting — mirrors the Homework module so the same StudentSelector
+// UI, /api/teacher/students filters and notification fan-out can be reused.
+export type TestAssignmentType = 'all' | 'class' | 'batch' | 'students';
+
 export interface ITestResult extends Document {
   testName: string;
   testDate: string; // yyyy-mm-dd format
@@ -18,6 +22,15 @@ export interface ITestResult extends Document {
   subject: string;
   maxMarks: number;
   studentResults: IStudentResult[];
+  // Assignment targeting (optional for backward compatibility — legacy tests
+  // behave as assignmentType: 'class' scoped to `class` + `batch`).
+  assignmentType: TestAssignmentType;
+  assignedClasses: string[];
+  assignedBatches: string[];
+  assignedStudents: mongoose.Types.ObjectId[];
+  // Notification guards so students aren't spammed on every edit.
+  notifiedUpcoming: boolean;
+  resultsNotifiedStudentIds: string[];
   createdBy: string; // Teacher who created the test
   createdAt: Date;
   updatedAt: Date;
@@ -102,6 +115,17 @@ const testResultSchema = new Schema<ITestResult>(
       type: [studentResultSchema],
       default: [],
     },
+    assignmentType: {
+      type: String,
+      enum: ['all', 'class', 'batch', 'students'],
+      default: 'class',
+      index: true,
+    },
+    assignedClasses: { type: [String], default: [] },
+    assignedBatches: { type: [String], default: [] },
+    assignedStudents: { type: [Schema.Types.ObjectId], ref: 'User', default: [] },
+    notifiedUpcoming: { type: Boolean, default: false },
+    resultsNotifiedStudentIds: { type: [String], default: [] },
     createdBy: {
       type: String,
       required: true,
@@ -117,6 +141,9 @@ const testResultSchema = new Schema<ITestResult>(
 testResultSchema.index({ class: 1, batch: 1, testDate: -1 });
 testResultSchema.index({ class: 1, subject: 1 });
 testResultSchema.index({ createdBy: 1, createdAt: -1 });
+testResultSchema.index({ assignmentType: 1, assignedClasses: 1, testDate: -1 });
+testResultSchema.index({ assignmentType: 1, assignedBatches: 1, testDate: -1 });
+testResultSchema.index({ assignmentType: 1, assignedStudents: 1, testDate: -1 });
 
 // Virtual for average performance (absent students excluded)
 testResultSchema.virtual('classAverage').get(function() {

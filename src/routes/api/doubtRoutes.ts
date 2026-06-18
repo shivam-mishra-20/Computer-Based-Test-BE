@@ -304,6 +304,120 @@ router.get('/teacher', authMiddleware, async (req: AuthRequest, res: Response) =
   }
 });
 
+// POST - Teacher/admin starts (or continues) a conversation with student(s)
+router.post('/teacher/start', authMiddleware, messageLimiter, async (req: AuthRequest, res: Response) => {
+  try {
+    if (req.user?.role !== 'teacher' && req.user?.role !== 'admin') {
+      return res.status(403).json({ error: 'Only teachers can start conversations' });
+    }
+
+    const { studentIds, studentId, message, subject } = req.body;
+
+    if (!message?.trim()) {
+      return res.status(400).json({ error: 'Message is required' });
+    }
+
+    const rawIds: string[] = Array.isArray(studentIds)
+      ? studentIds
+      : studentId
+        ? [studentId]
+        : [];
+    const validIds = rawIds.filter((id) => mongoose.Types.ObjectId.isValid(id));
+
+    if (validIds.length === 0) {
+      return res.status(400).json({ error: 'At least one valid student is required' });
+    }
+
+    const teacherId = (req.user?._id || req.user?.id) as string;
+    const teacherObjId = new mongoose.Types.ObjectId(teacherId);
+    const senderName = req.user?.name || 'Teacher';
+    const senderRole = req.user.role as 'teacher' | 'admin';
+
+    // Only message real students (reuses the platform's role model).
+    const User = require('../../models/User').default;
+    const students = await User.find({ _id: { $in: validIds }, role: 'student' })
+      .select('_id name classLevel batch')
+      .lean();
+
+    if (students.length === 0) {
+      return res.status(404).json({ error: 'No valid students found' });
+    }
+
+    const createdDoubts: any[] = [];
+
+    for (const student of students) {
+      const newMessage = {
+        sender: teacherObjId,
+        senderRole,
+        message: message.trim(),
+        attachments: [],
+        createdAt: new Date(),
+      };
+
+      // Continue an existing thread between this teacher and student, else start one.
+      let doubt = await Doubt.findOne({ student: student._id, teacher: teacherObjId });
+
+      if (doubt) {
+        doubt.messages.push(newMessage);
+        doubt.status = 'in-progress';
+        doubt.repliedAt = new Date();
+        doubt.updatedAt = new Date();
+        await doubt.save();
+      } else {
+        doubt = new Doubt({
+          student: student._id,
+          teacher: teacherObjId,
+          subject: subject || 'General',
+          question: message.trim(),
+          batch: student.batch,
+          classLevel: student.classLevel,
+          status: 'in-progress',
+          priority: 'normal',
+          repliedAt: new Date(),
+          messages: [newMessage],
+        });
+        await doubt.save();
+      }
+
+      const populated = await Doubt.findById(doubt._id)
+        .populate('student', 'name email classLevel batch profileImage')
+        .populate('teacher', 'name email profileImage')
+        .populate('messages.sender', 'name email role profileImage')
+        .lean();
+
+      // Real-time update to the student's and teacher's chat lists / open chat.
+      SocketService.emitDoubtUpdate(
+        (doubt as any)._id.toString(),
+        student._id.toString(),
+        teacherObjId.toString(),
+        'new_message',
+        populated
+      );
+
+      // Notify the student a teacher reached out.
+      createAndSendNotification({
+        userId: student._id.toString(),
+        title: `New message from ${senderName}`,
+        body: message.substring(0, 100),
+        type: 'doubt',
+        data: {
+          doubtId: (doubt as any)._id.toString(),
+          type: 'doubt',
+          role: 'student',
+          screen: '/(student)/doubts',
+        },
+      }).catch((err) => console.error('Notification error:', err));
+
+      createdDoubts.push(populated);
+    }
+
+    return res.status(201).json({ doubts: createdDoubts });
+  } catch (error) {
+    console.error('[TeacherStartDoubt] Error:', error);
+    return res.status(500).json({ error: 'Failed to start conversation' });
+  }
+});
+
 // GET - Single doubt details
 router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
