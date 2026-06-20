@@ -21,18 +21,35 @@ export async function listAssignedExams(userId: string) {
     `Class ${userClass}`, // "9" -> "Class 9"
   ].filter(Boolean);
   
+  // An exam that names specific students (assignedTo.users) is individually
+  // targeted — it must NOT also be exposed to the whole class/batch. Only the
+  // class/batch branch needs this guard; the explicit-user branch is fine.
+  const notIndividuallyTargeted = {
+    $or: [
+      { 'assignedTo.users': { $exists: false } },
+      { 'assignedTo.users': { $size: 0 } },
+    ],
+  };
+
   const exams = await Exam.find({
     isPublished: true,
     $or: [
       // Explicitly assigned to this user
       { 'assignedTo.users': new Types.ObjectId(userId) },
-      // Class and batch match (including "All Batches")
+      // Class and batch match (including "All Batches") — only when the exam is
+      // not narrowed to specific students, otherwise an individually-assigned
+      // exam would leak to every student in the class via this branch.
       {
-        classLevel: { $in: classVariants },
-        $or: [
-          { batch: user.batch },
-          { batch: 'All Batches' },
-          { 'assignedTo.groups': { $in: [user.classLevel, user.batch].filter(Boolean) } },
+        $and: [
+          notIndividuallyTargeted,
+          {
+            classLevel: { $in: classVariants },
+            $or: [
+              { batch: user.batch },
+              { batch: 'All Batches' },
+              { 'assignedTo.groups': { $in: [user.classLevel, user.batch].filter(Boolean) } },
+            ],
+          },
         ],
       },
     ],
@@ -48,19 +65,26 @@ export async function startAttempt(examId: string, userId: string) {
   const now = new Date();
   const hasSchedule = !!(exam.schedule?.startAt && exam.schedule?.endAt);
   const openWindow = hasSchedule && exam.schedule!.startAt! <= now && exam.schedule!.endAt! >= now;
-  const explicitUser = (exam.assignedTo?.users || []).some((u) => u.toString() === userId.toString());
+  const assignedUsers = exam.assignedTo?.users || [];
+  // When an exam names specific students it is individually targeted: only those
+  // students may start it, and the "open window = public" fallback below must not
+  // apply. Keeps access in lock-step with listAssignedExams' visibility rule.
+  const isIndividuallyTargeted = assignedUsers.length > 0;
+  const explicitUser = assignedUsers.some((u) => u.toString() === userId.toString());
   const groupLabels = new Set<string>([user?.classLevel || '', user?.batch || ''].filter(Boolean));
   const inGroups = (exam.assignedTo?.groups || []).some((g) => groupLabels.has(g));
   // Handle both "9" and "Class 9" formats
   const normalizeClass = (cls?: string) => cls?.replace(/^Class\s*/i, '').trim().toLowerCase() || '';
-  const classMatch = !!(user?.classLevel && exam.classLevel && 
+  const classMatch = !!(user?.classLevel && exam.classLevel &&
     normalizeClass(exam.classLevel) === normalizeClass(user.classLevel));
-  const batchMatch = !!(user?.batch && exam.batch && 
+  const batchMatch = !!(user?.batch && exam.batch &&
     (exam.batch === user.batch || exam.batch === 'All Batches'));
-  const targeted = explicitUser || inGroups || classMatch || batchMatch;
+  const targeted = isIndividuallyTargeted
+    ? explicitUser
+    : (inGroups || classMatch || batchMatch);
   const canAccess = exam.isPublished && (
     (targeted && (!hasSchedule || openWindow)) ||
-    (!targeted && openWindow)
+    (!isIndividuallyTargeted && !targeted && openWindow)
   );
   if (!canAccess) throw new Error('You are not allowed to start this exam');
   // Prevent multiple attempts for same exam-user

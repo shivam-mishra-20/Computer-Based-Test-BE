@@ -62,10 +62,18 @@ export const getExamCtrl = async (req: Request, res: Response) => {
 
 export const listExamsCtrl = async (req: Request, res: Response) => {
   const { title, createdBy, isPublished, limit = '50', skip = '0' } = req.query as any;
+  const authUser = (req as any).user;
   const filter: any = {};
   if (title) filter.title = { $regex: title, $options: 'i' };
-  if (createdBy) filter.createdBy = createdBy;
   if (isPublished !== undefined) filter.isPublished = isPublished === 'true';
+  // Teachers may only list their own exams; admins see all (and may still scope
+  // to a specific author via ?createdBy=). Without this a teacher's list returns
+  // every teacher's exams.
+  if (authUser?.role === 'teacher') {
+    filter.createdBy = authUser.id;
+  } else if (createdBy) {
+    filter.createdBy = createdBy;
+  }
   const result = await listExams(filter, parseInt(limit, 10), parseInt(skip, 10));
   res.json(result);
 };
