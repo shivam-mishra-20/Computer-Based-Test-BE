@@ -49,7 +49,9 @@ const examSectionSchema = new Schema<IExamSection>(
     title: { type: String, required: true },
     questionIds: [{ type: Schema.Types.ObjectId, ref: 'Question', required: true }],
     sectionDurationMins: { type: Number },
-    shuffleQuestions: { type: Boolean, default: false },
+    // Question order is shuffled per student by default (each attempt gets a
+    // unique sequence). Teachers can opt out per section via the build UI.
+    shuffleQuestions: { type: Boolean, default: true },
     shuffleOptions: { type: Boolean, default: false },
   },
   { _id: true }

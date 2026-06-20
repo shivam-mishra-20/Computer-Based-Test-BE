@@ -108,7 +108,16 @@ export async function startAttempt(examId: string, userId: string) {
   const optionOrderByQuestion: Record<string, Types.ObjectId[]> = {};
   const adaptiveState = exam.mode === 'adaptive' ? { asked: [], currentDifficulty: 'medium' as const, topicMix: {} as Record<string, number> } : undefined;
   for (const sec of exam.sections) {
-    const order = sec.shuffleQuestions ? shuffleArray(sec.questionIds.map((id) => id)) : [...sec.questionIds];
+    // Randomize question order per student by DEFAULT so every attempt gets a
+    // unique sequence. Each startAttempt call draws its own Math.random() based
+    // Fisher-Yates shuffle, so concurrent starts produce independent orders and
+    // can't collide. A teacher can still pin a fixed order by explicitly
+    // unchecking "shuffle questions" on the section (shuffleQuestions === false).
+    // The order is frozen into the attempt snapshot here and never regenerated,
+    // so navigation / refresh / resume keep it stable, and grading stays correct
+    // because answers are always keyed by the original questionId.
+    const shuffleQuestions = sec.shuffleQuestions !== false;
+    const order = shuffleQuestions ? shuffleArray(sec.questionIds.map((id) => id)) : [...sec.questionIds];
     questionOrderBySection[sec._id.toString()] = order;
     if (sec.shuffleOptions) {
       for (const qid of order) {

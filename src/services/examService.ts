@@ -272,7 +272,7 @@ export const createExamFromPaper = async (paper: GeneratedPaperResult, createdBy
     return {
       title: s.title,
       questionIds: slice,
-      shuffleQuestions: false,
+      shuffleQuestions: true,
       shuffleOptions: false,
     };
   });
