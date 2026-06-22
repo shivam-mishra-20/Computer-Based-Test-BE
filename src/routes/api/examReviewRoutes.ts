@@ -9,6 +9,7 @@ import {
   setMarkingSchemeCtrl,
   setQuestionMarksCtrl,
   adjustSubjectiveCtrl,
+  setManualScoreCtrl,
   transitionStateCtrl,
   recomputeCtrl,
   approveSubjectiveCtrl,
@@ -32,6 +33,7 @@ router.post('/bulk/recompute', bulkRecomputeCtrl);
 router.post('/backfill', requireRole('admin'), backfillCtrl);
 router.post('/cleanup-duplicates', requireRole('admin'), cleanupDuplicatesCtrl);
 router.patch('/attempts/:attemptId/score', adjustSubjectiveCtrl);
+router.patch('/attempts/:attemptId/manual-score', setManualScoreCtrl);
 router.delete('/attempts/:attemptId', deleteAttemptCtrl);
 
 // Test-level routes.

@@ -10,6 +10,7 @@ import {
   setMarkingScheme,
   setQuestionMarks,
   adjustSubjectiveScore,
+  setManualScore,
   transitionState,
   recomputeExamResults,
   bulkPublish,
@@ -162,6 +163,28 @@ export const adjustSubjectiveCtrl = async (req: Request, res: Response) => {
     res.json(await adjustSubjectiveScore(req.params.attemptId, questionId, Number(score), feedback, actorOf(req)));
   } catch (err: any) {
     fail(res, err, 'Failed to adjust score');
+  }
+};
+
+// PATCH /api/exam-review/attempts/:attemptId/manual-score  { questionId, score|null }
+// Manually set/clear one student's mark for one question (any type). A number
+// pins a persistent override (+4/+1/0/-1/custom); null reverts to auto-grading.
+export const setManualScoreCtrl = async (req: Request, res: Response) => {
+  try {
+    const attempt = await Attempt.findById(req.params.attemptId).select('examId');
+    if (!attempt || !attempt.examId) {
+      return res.status(404).json({ message: 'Exam attempt not found' });
+    }
+    await ensureExamOwnership(req, attempt.examId.toString());
+    const { questionId, score } = req.body;
+    if (!questionId) return res.status(400).json({ message: 'questionId is required' });
+    const clear = score === null || score === undefined || score === '';
+    if (!clear && Number.isNaN(Number(score))) {
+      return res.status(400).json({ message: 'score must be a number or null' });
+    }
+    res.json(await setManualScore(req.params.attemptId, questionId, clear ? null : Number(score), actorOf(req)));
+  } catch (err: any) {
+    fail(res, err, 'Failed to set manual score');
   }
 };
 

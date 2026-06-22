@@ -117,6 +117,16 @@ export function gradeAttemptRaw(
     rawMax += m.correct;
     const ans = attempt.answers.find((a: any) => a.questionId.toString() === qid);
 
+    // Teacher's manual per-question mark wins over everything (objective OR
+    // subjective) and must persist across recomputes. Only a real number counts
+    // as "set"; undefined/null means fall back to automatic grading below.
+    if (ans && typeof ans.manualScore === 'number' && !Number.isNaN(ans.manualScore)) {
+      ans.scoreAwarded = ans.manualScore;
+      ans.isCorrect = ans.manualScore > 0;
+      rawTotal += ans.manualScore;
+      continue;
+    }
+
     // Subjective: keep the teacher-awarded marks (0..correct); default 0.
     if (isSubjectiveType((q as any).type)) {
       rawTotal += typeof ans?.scoreAwarded === 'number' ? ans.scoreAwarded : 0;
@@ -302,6 +312,16 @@ export async function recomputeExamResults(
     a.rankInTest = lastRank;
   });
 
+  // 2b) Percentile (0-100): the % of the cohort this attempt scored strictly
+  // higher than. Top unique scorer ≈ 100, lowest = 0. Persisted per attempt.
+  const N = computed.length;
+  const allScores = computed.map((a) => a.totalScore || 0);
+  computed.forEach((a) => {
+    const score = a.totalScore || 0;
+    const numBelow = allScores.reduce((acc, s) => (s < score ? acc + 1 : acc), 0);
+    a.percentile = N > 0 ? round2((numBelow / N) * 100) : 0;
+  });
+
   // 3) Persist all attempts in one batch.
   if (computed.length) {
     await Attempt.bulkWrite(
@@ -317,6 +337,7 @@ export async function recomputeExamResults(
               maxScore: a.maxScore,
               percentage: a.percentage,
               rankInTest: a.rankInTest,
+              percentile: a.percentile,
             },
           },
         },
@@ -576,6 +597,72 @@ export async function adjustSubjectiveScore(
   return recomputeExamResults(attempt.examId.toString(), { actorId });
 }
 
+/**
+ * Manually set (or clear) the marks awarded to ONE student for ONE question.
+ * Works for any question type (objective or subjective). A numeric `score`
+ * pins a persistent override (+4 / +1 / 0 / -1 / custom) that survives every
+ * recompute; passing `null` clears it and reverts the question to automatic
+ * grading. Recomputes the whole test so the student's score, rank, percentile,
+ * cohort stats (and any reader that derives from them — analytics, the online
+ * leaderboard) all update from this single call. A change to a published test
+ * auto-republishes, mirroring the other review mutations.
+ */
+export async function setManualScore(
+  attemptId: string,
+  questionId: string,
+  score: number | null,
+  actorId?: string
+): Promise<IExamEvaluation> {
+  const attempt = await Attempt.findById(attemptId);
+  if (!attempt) throw new Error('Attempt not found');
+  if (!attempt.examId) throw new Error('Attempt is not an exam attempt');
+
+  let ans = attempt.answers.find((a) => a.questionId.toString() === questionId);
+  const previous = ans?.manualScore ?? null;
+  if (!ans) {
+    // Student never answered this question — create a stub answer so the manual
+    // mark has somewhere to live (e.g. awarding credit for an unattempted Q).
+    attempt.answers.push({ questionId: new Types.ObjectId(questionId) } as any);
+    ans = attempt.answers[attempt.answers.length - 1];
+  }
+  if (score === null || score === undefined || Number.isNaN(Number(score))) {
+    ans!.manualScore = undefined;
+    ans!.manualScoreBy = undefined;
+    ans!.manualScoreAt = undefined;
+  } else {
+    ans!.manualScore = Number(score);
+    ans!.manualScoreBy = actorId ? new Types.ObjectId(actorId) : undefined;
+    ans!.manualScoreAt = new Date();
+  }
+  attempt.markModified('answers');
+  await attempt.save();
+
+  const evaluation = await ensureEvaluation(attempt.examId.toString());
+  const wasPublished = evaluation.reviewState === 'published' || evaluation.reviewState === 'republished';
+
+  await writeAudit({
+    examId: attempt.examId,
+    action: 'manual_score_changed',
+    actorId,
+    attemptId: attempt._id as Types.ObjectId,
+    questionId,
+    studentId: attempt.userId,
+    field: 'manualScore',
+    oldValue: previous,
+    newValue: score,
+  });
+
+  const updated = await recomputeExamResults(attempt.examId.toString(), { actorId });
+  if (wasPublished) {
+    updated.reviewState = 'republished';
+    updated.publishedAt = new Date();
+    if (actorId) updated.publishedBy = new Types.ObjectId(actorId);
+    pushVersion(updated, 'recompute', actorId ? new Types.ObjectId(actorId) : undefined, 'Manual question mark changed after publish');
+    await updated.save();
+  }
+  return updated;
+}
+
 // ── Publish-state machine ────────────────────────────────────────────────────
 const ALLOWED_TRANSITIONS: Record<ReviewState, ReviewState[]> = {
   draft: ['under_review', 'published'],
@@ -719,6 +806,8 @@ export async function getReviewSummary(examId: string) {
       maxScore: a.maxScore,
       percentage: a.percentage,
       rankInTest: a.rankInTest,
+      percentile: a.percentile,
+      hasManualOverride: (a.answers || []).some((ans: any) => typeof ans.manualScore === 'number'),
       hasSubjectivePending: (a.answers || []).some(
         (ans: any) => {
           const q = qmap.get(ans.questionId.toString());

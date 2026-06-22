@@ -19,6 +19,7 @@ export type ReviewAuditAction =
   | 'marking_scheme_changed'
   | 'question_marks_changed'
   | 'subjective_score_changed'
+  | 'manual_score_changed'
   | 'attempt_published'
   | 'attempt_unpublished'
   | 'state_changed'

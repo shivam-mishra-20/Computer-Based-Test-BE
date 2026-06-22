@@ -10,6 +10,13 @@ export interface IAnswerItem {
   scoreAwarded?: number; // per question score
   rubricScore?: number; // 0..1 for subjective grading
   aiFeedback?: string; // brief AI feedback for subjective answers
+  // Teacher's manual per-question mark for THIS student. When set (a number),
+  // it overrides the auto-grade/subjective score and PERSISTS through every
+  // recompute (gradeAttemptRaw honours it first). Unset (undefined/null) means
+  // "fall back to automatic grading". Tracks who/when for the audit trail.
+  manualScore?: number;
+  manualScoreBy?: Types.ObjectId;
+  manualScoreAt?: Date;
 }
 
 export interface IActivityLog {
@@ -53,6 +60,9 @@ export interface IAttempt extends Document {
   // Rank within this exam's attempters (1 = highest), refreshed on every
   // recompute/publish. Standard competition ranking (1,2,2,4).
   rankInTest?: number;
+  // Percentile (0-100) within this exam's cohort: the % of attempts this
+  // student scored strictly higher than. Refreshed on every recompute.
+  percentile?: number;
   resultPublished?: boolean;
   activityLogs?: IActivityLog[];
 }
@@ -68,6 +78,9 @@ const answerSchema = new Schema<IAnswerItem>(
     scoreAwarded: { type: Number },
     rubricScore: { type: Number, min: 0, max: 1 },
     aiFeedback: { type: String },
+    manualScore: { type: Number },
+    manualScoreBy: { type: Schema.Types.ObjectId, ref: 'User' },
+    manualScoreAt: { type: Date },
   },
   { _id: false }
 );
@@ -98,6 +111,7 @@ const attemptSchema = new Schema<IAttempt>(
     rawMaxScore: { type: Number },
     percentage: { type: Number },
     rankInTest: { type: Number },
+    percentile: { type: Number },
     resultPublished: { type: Boolean, default: false },
     activityLogs: [
       {

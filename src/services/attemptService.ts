@@ -53,8 +53,44 @@ export async function listAssignedExams(userId: string) {
         ],
       },
     ],
-  }).sort({ createdAt: -1 });
-  return exams;
+  }).sort({ createdAt: -1 }).lean();
+
+  // Attach this user's attempt summary to each exam so the client has a SINGLE
+  // authoritative source for "already attempted" — no fragile in-memory join
+  // against a separately-cached /mine response. This is what closes the
+  // cross-portal re-attempt gap: an exam finished on the web shows as
+  // attempted (and unstartable) in the app and vice-versa.
+  const examIds = exams.map((e: any) => e._id);
+  const attempts = await Attempt.find({
+    userId: new Types.ObjectId(userId),
+    examId: { $in: examIds },
+  })
+    .select('examId status totalScore maxScore percentage rankInTest resultPublished submittedAt')
+    .lean();
+  const attemptByExam = new Map<string, any>();
+  for (const a of attempts) {
+    if (!a.examId) continue;
+    attemptByExam.set(a.examId.toString(), a);
+  }
+
+  return exams.map((e: any) => {
+    const a = attemptByExam.get(e._id.toString());
+    return {
+      ...e,
+      attempt: a
+        ? {
+            _id: a._id,
+            status: a.status,
+            totalScore: a.totalScore,
+            maxScore: a.maxScore,
+            percentage: a.percentage,
+            rankInTest: a.rankInTest,
+            resultPublished: a.resultPublished,
+            submittedAt: a.submittedAt,
+          }
+        : null,
+    };
+  });
 }
 
 export async function startAttempt(examId: string, userId: string) {
@@ -768,6 +804,24 @@ export async function listAttemptsForUser(userId: string, opts: { published?: bo
     
     const maxScore = a.maxScore;
     const totalScore = a.totalScore;
+
+    // Per-attempt counts so the results list/detail can show accurate
+    // "X / Y correct" without a second round-trip. Mirrors the detail screen's
+    // own tally: a question is "attempted" if it has a response, and "correct"
+    // if auto-graded correct OR awarded positive marks (covers subjective).
+    const answers = (a.answers || []) as any[];
+    const attemptedCount = answers.filter(
+      (ans) => ans.chosenOptionId || (ans.textAnswer != null && String(ans.textAnswer) !== '')
+    ).length;
+    const correctCount = answers.filter(
+      (ans) => ans.isCorrect === true || (typeof ans.scoreAwarded === 'number' && ans.scoreAwarded > 0)
+    ).length;
+    // Total questions from the immutable per-attempt snapshot (no extra join).
+    const orderBySection = (a.snapshot?.questionOrderBySection || {}) as Record<string, any[]>;
+    const totalQuestions =
+      Object.values(orderBySection).reduce((sum, ids) => sum + (Array.isArray(ids) ? ids.length : 0), 0) ||
+      answers.length;
+
     return {
       _id: a._id,
       examId: !isPracticeTest ? id : null,
@@ -787,6 +841,10 @@ export async function listAttemptsForUser(userId: string, opts: { published?: bo
           ? Math.round(((totalScore || 0) / maxScore) * 10000) / 100
           : 0,
       rankInTest: a.rankInTest ?? null,
+      percentile: typeof a.percentile === 'number' ? a.percentile : null,
+      attemptedCount,
+      correctCount,
+      totalQuestions,
       status: a.status,
       resultPublished: a.resultPublished,
     };
