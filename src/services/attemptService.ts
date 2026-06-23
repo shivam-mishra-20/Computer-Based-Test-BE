@@ -75,20 +75,24 @@ export async function listAssignedExams(userId: string) {
 
   return exams.map((e: any) => {
     const a = attemptByExam.get(e._id.toString());
+    if (!a) return { ...e, attempt: null };
+    // Score stays hidden until results are published (the exams list must not
+    // reveal a score right after submission). Status/resultPublished are still
+    // sent so the client can show the correct "Awaiting results" / "View result"
+    // state.
+    const published = !!a.resultPublished;
     return {
       ...e,
-      attempt: a
-        ? {
-            _id: a._id,
-            status: a.status,
-            totalScore: a.totalScore,
-            maxScore: a.maxScore,
-            percentage: a.percentage,
-            rankInTest: a.rankInTest,
-            resultPublished: a.resultPublished,
-            submittedAt: a.submittedAt,
-          }
-        : null,
+      attempt: {
+        _id: a._id,
+        status: a.status,
+        totalScore: published ? a.totalScore : null,
+        maxScore: published ? a.maxScore : null,
+        percentage: published ? a.percentage : null,
+        rankInTest: published ? a.rankInTest : null,
+        resultPublished: published,
+        submittedAt: a.submittedAt,
+      },
     };
   });
 }
@@ -822,6 +826,19 @@ export async function listAttemptsForUser(userId: string, opts: { published?: bo
       Object.values(orderBySection).reduce((sum, ids) => sum + (Array.isArray(ids) ? ids.length : 0), 0) ||
       answers.length;
 
+    // Results (score, percentage, rank, percentile, correct count) stay HIDDEN
+    // until the teacher publishes them. Practice tests auto-publish, so they
+    // pass. Withholding server-side guarantees the student can't see a score
+    // pre-publish even if a client forgets to gate. (The web results page uses
+    // ?published=1 so it only ever receives published rows anyway.)
+    const published = !!a.resultPublished;
+    const livePercentage =
+      typeof a.percentage === 'number'
+        ? a.percentage
+        : maxScore && maxScore > 0
+        ? Math.round(((totalScore || 0) / maxScore) * 10000) / 100
+        : 0;
+
     return {
       _id: a._id,
       examId: !isPracticeTest ? id : null,
@@ -829,24 +846,17 @@ export async function listAttemptsForUser(userId: string, opts: { published?: bo
       examTitle: title,
       isPracticeTest,
       submittedAt: a.submittedAt,
-      totalScore,
-      maxScore,
-      // Effective percentage + per-test rank from the review/propagation engine.
-      // Fall back to a live computation for attempts graded before those fields
-      // existed (until a backfill recompute runs).
-      percentage:
-        typeof a.percentage === 'number'
-          ? a.percentage
-          : maxScore && maxScore > 0
-          ? Math.round(((totalScore || 0) / maxScore) * 10000) / 100
-          : 0,
-      rankInTest: a.rankInTest ?? null,
-      percentile: typeof a.percentile === 'number' ? a.percentile : null,
+      totalScore: published ? totalScore : null,
+      maxScore: published ? maxScore : null,
+      percentage: published ? livePercentage : null,
+      rankInTest: published ? a.rankInTest ?? null : null,
+      percentile: published && typeof a.percentile === 'number' ? a.percentile : null,
+      correctCount: published ? correctCount : null,
+      // Not a "result"/score — safe to show so the student knows what they did.
       attemptedCount,
-      correctCount,
       totalQuestions,
       status: a.status,
-      resultPublished: a.resultPublished,
+      resultPublished: published,
     };
   });
 }
