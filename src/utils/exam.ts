@@ -14,6 +14,7 @@ export function shuffleArray<T>(arr: T[]): T[] {
 export function sanitizeQuestion(q: IQuestion) {
   // Remove isCorrect flags and correct answers
   const options = q.options?.map((o) => ({ _id: o._id, text: o.text })) ?? undefined;
+  const anyQ = q as any;
   return {
     _id: (q as any)._id as Types.ObjectId,
     text: q.text,
@@ -22,6 +23,11 @@ export function sanitizeQuestion(q: IQuestion) {
     assertion: q.assertion,
     reason: q.reason,
     tags: q.tags,
+    // Subject for subject-wise grouping in the players/review. Class-specific
+    // questions (ClassQuestion collections) store it as a FLAT `subject` field;
+    // the generic Question bank uses `tags.subject`. Expose a single normalized
+    // value so clients don't need to know which model the exam drew from.
+    subject: anyQ.subject ?? anyQ.tags?.subject,
     explanation: undefined,
     diagramUrl: q.diagramUrl,
   };
