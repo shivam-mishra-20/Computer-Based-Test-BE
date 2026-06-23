@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { register, login, me, publicRegister, publicTeacherRegister, changePassword, updateProfile, uploadProfileImage, publicStudentBatchConfig, deleteAccount } from '../../controllers/authController';
+import { register, login, me, publicRegister, publicTeacherRegister, changePassword, updateProfile, uploadProfileImage, publicUploadProfileImage, publicStudentBatchConfig, deleteAccount } from '../../controllers/authController';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import { authLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
 import multer from 'multer';
@@ -25,6 +25,9 @@ const upload = multer({
 router.post('/register', authLimiter, register);
 router.post('/public-register', authLimiter, publicRegister);
 router.post('/public-register-teacher', authLimiter, publicTeacherRegister);
+// Public (pre-auth) profile photo upload for registration — server-side upload
+// avoids client-side Firebase Storage rule failures.
+router.post('/public-profile-image', uploadLimiter, upload.single('image'), publicUploadProfileImage);
 router.get('/public-student-batch-config', publicStudentBatchConfig);
 router.post('/login', authLimiter, login);
 router.get('/me', authMiddleware, me);

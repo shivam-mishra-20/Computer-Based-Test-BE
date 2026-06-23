@@ -489,9 +489,41 @@ export const uploadProfileImage = async (req: Request, res: Response) => {
     console.error('Upload profile image error:', err);
     // Return more helpful error message
     const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
-    res.status(500).json({ 
-      message: 'Failed to upload profile image', 
-      error: errorMessage 
+    res.status(500).json({
+      message: 'Failed to upload profile image',
+      error: errorMessage
     });
+  }
+};
+
+/**
+ * Public profile-image upload used DURING registration (no auth yet).
+ * The image is uploaded server-side via firebase-admin (service account), so it
+ * does NOT depend on client-side Firebase Storage security rules — which block
+ * unauthenticated writes and were causing the app's "could not complete
+ * registration" error when the rules were tightened. Returns just the URL; the
+ * caller passes it as `profileImage` to public-register.
+ */
+export const publicUploadProfileImage = async (req: Request, res: Response) => {
+  try {
+    const file = (req as any).file;
+    if (!file) {
+      return res.status(400).json({ message: 'No image file provided' });
+    }
+
+    const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    if (!allowedTypes.includes(file.mimetype)) {
+      return res.status(400).json({ message: 'Invalid file type. Only JPEG, PNG, GIF, and WebP are allowed.' });
+    }
+
+    const ext = (file.originalname?.split('.').pop() || 'jpg').toLowerCase();
+    const fileName = `registration-profiles/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const imageUrl = await uploadToFirebase(file.buffer, fileName, file.mimetype);
+
+    res.status(201).json({ profileImage: imageUrl });
+  } catch (err) {
+    console.error('Public profile image upload error:', err);
+    const errorMessage = err instanceof Error ? err.message : 'Unknown error occurred';
+    res.status(500).json({ message: 'Failed to upload profile image', error: errorMessage });
   }
 };
