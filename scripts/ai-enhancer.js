@@ -26,6 +26,16 @@ const CHUNK_SIZE  = parseInt(process.env.AI_ENHANCER_CHUNK_SIZE || '1200', 10);
 
 const ollama = new Ollama({ host: OLLAMA_HOST });
 
+// LLMs emit LaTeX with single backslashes inside JSON ("\frac"); JSON.parse then
+// mangles them (\f/\t/\b/\n are valid escapes). Double lone command backslashes
+// so \frac/\times/\beta survive parsing. Keeps \\, \uXXXX, \" and \/ intact.
+function fixLatexBackslashes(s) {
+  return String(s == null ? '' : s).replace(
+    /(?<!\\)\\(u[0-9a-fA-F]{4}|[a-zA-Z])/g,
+    (m, g) => (/^u[0-9a-fA-F]{4}$/.test(g) ? m : '\\\\' + g)
+  );
+}
+
 // Block types that represent ONE extractable question/example (one API call → one question).
 const QUESTION_BLOCK_TYPES = new Set(['example', 'question', 'sub_question']);
 // Block types that contain MANY questions (one API call → extract all).
@@ -54,7 +64,10 @@ const MATH_RULES = `MATH FORMATTING (CRITICAL):
 class AIEnhancer {
   constructor() {
     this.model = MODEL;
-    this.concurrentBatches = 1;
+    // Local Ollama: sequential, single-question calls (GPU/VRAM-safe).
+    this.maxConcurrency = 1;
+    this.maxBatchSize = 1;
+    this.maxRetries = parseInt(process.env.AI_ENHANCER_MAX_RETRIES || '2', 10);
   }
 
   // ── Prompt builders ─────────────────────────────────────────────────────────
@@ -109,6 +122,7 @@ CLASSIFICATION:
 - topic_name + sub_topic: infer from the block label / nearby heading
 - difficulty: easy | medium | hard, judged from complexity
 - marks: mcq/truefalse/fill=1, short=2, long=5, integer=2
+${this._metadataDirective(bookMetadata)}
 ${MATH_RULES}
 
 BLOCK TEXT:
@@ -144,6 +158,7 @@ Rules:
 - SKIP: Solution:, Answer:, Proof:, Given:, Note:, Remark:, Hint:, Therefore, Hence, Step N:
 - SKIP: definitions, theorems, activities, projects, summaries, learning outcomes, explanatory prose
 - SKIP: any fragment with no clear task
+${this._metadataDirective(bookMetadata)}
 ${MATH_RULES}
 
 TEXT:
@@ -151,9 +166,9 @@ ${inputText}
 JSON:`;
   }
 
-  // ── Ollama call ─────────────────────────────────────────────────────────────
+  // ── Raw model call (Ollama) — returns the raw JSON string ───────────────────
 
-  async callOllama(promptText) {
+  async _callRaw(promptText) {
     try {
       const response = await ollama.generate({
         model:   this.model,
@@ -163,20 +178,20 @@ JSON:`;
         options: {
           temperature:    0,
           num_ctx:        4096,
-          num_predict:    2048,
+          num_predict:    parseInt(process.env.AI_ENHANCER_NUM_PREDICT || '3072', 10),
           top_p:          0.9,
           repeat_penalty: 1.1,
         },
       });
-
-      return this._parseJsonResponse(response.response.trim(), '[AIEnhancer]');
+      return String(response.response || '').trim();
     } catch (error) {
       console.error('[AIEnhancer] Ollama error:', error.message);
-      return [];
+      return '';
     }
   }
 
   _parseJsonResponse(raw, tag) {
+    raw = fixLatexBackslashes(raw);
     let parsed;
     try {
       parsed = JSON.parse(raw);
@@ -199,6 +214,34 @@ JSON:`;
     }
     if (!Array.isArray(parsed.questions)) return [];
     return parsed.questions.filter(q => q && typeof q.question === 'string' && q.question.trim());
+  }
+
+  // Parse a BATCHED response: {"items":[{id, ...}]}. Returns Map<index0, item|null>
+  // where a present id maps to its item (or null when {skip:true}); a MISSING id
+  // is simply absent from the map (caller treats absence as fail-soft).
+  _parseBatchResponse(raw, count, tag) {
+    const result = new Map();
+    raw = fixLatexBackslashes(stripThink(raw || ''));
+    let parsed;
+    try { parsed = JSON.parse(raw); }
+    catch {
+      const start = raw.indexOf('{');
+      const end = raw.lastIndexOf('}');
+      if (start !== -1 && end !== -1) { try { parsed = JSON.parse(raw.slice(start, end + 1)); } catch { /* fall through */ } }
+    }
+    const items = parsed && (Array.isArray(parsed.items) ? parsed.items
+      : (Array.isArray(parsed.questions) ? parsed.questions : null));
+    if (!items) { console.warn(`${tag} batch parse failed:`, String(raw).slice(0, 160)); return result; }
+
+    let positional = 0;
+    for (const it of items) {
+      if (!it || typeof it !== 'object') continue;
+      const idx = Number.isFinite(it.id) ? ((it.id | 0) - 1) : positional++;
+      if (idx < 0 || idx >= count) continue;
+      if (it.skip === true) { result.set(idx, null); continue; }
+      if (typeof it.question === 'string' && it.question.trim()) result.set(idx, it);
+    }
+    return result;
   }
 
   // ── Question mapper ─────────────────────────────────────────────────────────
@@ -344,74 +387,218 @@ JSON:`;
     return chunks;
   }
 
+  // Req #1: honor user-provided metadata; tell the model NOT to reclassify it.
+  _metadataDirective(meta) {
+    const fixed = [];
+    if (meta.subject && meta.subject !== 'Unknown') fixed.push(`subject="${meta.subject}"`);
+    if (meta.chapter && meta.chapter !== 'General') fixed.push(`chapter="${meta.chapter}"`);
+    if (meta.topic) fixed.push(`topic="${meta.topic}"`);
+    if (meta.board && meta.board !== 'CBSE') fixed.push(`board="${meta.board}"`);
+    if (!fixed.length) return '';
+    return `USER-PROVIDED METADATA (use verbatim; do NOT reclassify these fields): ${fixed.join(', ')}.`;
+  }
+
+  // Batched prompt: enhance N single-question blocks in one request. One object
+  // per input id, ids preserved, {skip:true} for non-questions.
+  buildBatchPrompt(chunks, bookMetadata) {
+    const subject = bookMetadata.subject || 'Unknown';
+    const chapter = bookMetadata.chapter || bookMetadata.title || 'General';
+    const cls     = bookMetadata.class   || 'Unknown';
+    const board   = bookMetadata.board   || 'CBSE';
+    const blocks = chunks.map((c, i) => `[${i + 1}]\n${c.text}`).join('\n\n');
+    return `You are normalizing exam questions from an Indian NCERT/CBSE/JEE/NEET textbook (Subject: ${subject}, Chapter: ${chapter}, Class: ${cls}, Board: ${board}). Return ONLY valid JSON.
+
+There are ${chunks.length} input blocks below, each marked [n]. Each block contains ONE question. For EACH block, extract and clean that single question.
+
+Return JSON: {"items":[{"id":1,"question":"...","instructions":"","sub_questions":[],"options":[],"answer":"","question_type":"mcq|truefalse|fill|short|long|assertionreason|integer","topic_name":"","sub_topic":"","difficulty":"easy|medium|hard","marks":1}]}
+
+Rules:
+- EXACTLY one object per input id (1..${chunks.length}); keep ids in order.
+- If a block has no valid question (heading/solution/prose), return {"id":n,"skip":true}.
+- options: string array for mcq/truefalse, else []. answer: correct option text for mcq, else a brief answer (omit if unknown).
+- SUB-QUESTIONS: a stem with (i)(ii)(iii) parts is ONE question → put parts in "sub_questions"; (a)(b)(c)(d) right after a single stem are OPTIONS → "options".
+- SKIP solutions, proofs, definitions, theorems, activities, summaries, page headers/footers.
+${this._metadataDirective(bookMetadata)}
+${MATH_RULES}
+
+BLOCKS:
+${blocks}
+JSON:`;
+  }
+
+  _chunkMeta(chunk, bookMetadata) {
+    return {
+      ...bookMetadata,
+      chapter:     chunk.chapter || bookMetadata.chapter,
+      topic:       chunk.topic   || bookMetadata.topic,
+      parentLabel: chunk.parentLabel || null,
+      blockType:   chunk.blockType || null,
+    };
+  }
+
+  // A "batchable" chunk yields exactly ONE question (structured single-q block).
+  _isBatchable(chunk) {
+    return chunk._structured && QUESTION_BLOCK_TYPES.has(chunk.blockType);
+  }
+
+  // Group chunks into work units: batches of single-question blocks (size N),
+  // plus standalone units for multi-question / fallback chunks.
+  _buildUnits(chunks, batchSize) {
+    const units = [];
+    let batch = [];
+    const flush = () => { if (batch.length) { units.push({ batch: true, chunks: batch }); batch = []; } };
+    for (const chunk of chunks) {
+      if (batchSize > 1 && this._isBatchable(chunk)) {
+        batch.push(chunk);
+        if (batch.length >= batchSize) flush();
+      } else {
+        flush();
+        units.push({ batch: false, chunks: [chunk] });
+      }
+    }
+    flush();
+    return units;
+  }
+
+  // Bounded-concurrency worker pool.
+  async _pool(items, concurrency, worker) {
+    let next = 0;
+    const run = async () => { while (next < items.length) { const i = next++; await worker(items[i], i); } };
+    await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, items.length || 1)) }, run));
+  }
+
+  // Retry a raw call until non-empty or retries exhausted.
+  async _callRawRetry(callRaw, prompt) {
+    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+      const raw = await callRaw(prompt);
+      if (raw && raw.trim()) return raw;
+      if (attempt < this.maxRetries) await new Promise(r => setTimeout(r, 400 * (attempt + 1)));
+    }
+    return '';
+  }
+
+  // Process one unit → [{ chunk, raws }]. raws=[] → nothing extractable (drop);
+  // raws=null → AI failed for this block (fail-soft: keep raw text, needsReview).
+  async _runUnit(unit, bookMetadata, callRaw, cache, stats, tag) {
+    const out = [];
+    const toProcess = [];
+
+    for (const chunk of unit.chunks) {
+      if (cache) {
+        try {
+          const hit = await cache.get(chunk.text);
+          if (hit) { out.push({ chunk, raws: Array.isArray(hit) ? hit : [] }); stats.cached++; continue; }
+        } catch { /* ignore cache errors */ }
+      }
+      toProcess.push(chunk);
+    }
+    if (toProcess.length === 0) return out;
+
+    if (unit.batch && toProcess.length > 1) {
+      const meta = this._chunkMeta(toProcess[0], bookMetadata);
+      const raw = await this._callRawRetry(callRaw, this.buildBatchPrompt(toProcess, meta));
+      const byIdx = this._parseBatchResponse(raw, toProcess.length, tag);
+      for (let j = 0; j < toProcess.length; j++) {
+        let raws;
+        if (byIdx.has(j)) { const item = byIdx.get(j); raws = item ? [item] : []; }
+        else raws = null; // missing from response → fail-soft
+        out.push({ chunk: toProcess[j], raws });
+        if (cache && raws && raws.length) { try { await cache.set(toProcess[j].text, raws); } catch { /* ignore */ } }
+      }
+    } else {
+      for (const chunk of toProcess) {
+        const meta = this._chunkMeta(chunk, bookMetadata);
+        const prompt = chunk._structured ? this.buildStructuredPrompt(chunk, meta) : this.buildPrompt(chunk.text, meta);
+        const raw = await this._callRawRetry(callRaw, prompt);
+        const raws = raw ? this._parseJsonResponse(raw, tag) : null;
+        out.push({ chunk, raws });
+        if (cache && raws && raws.length) { try { await cache.set(chunk.text, raws); } catch { /* ignore */ } }
+      }
+    }
+    return out;
+  }
+
+  // Req #6 fail-soft: keep the raw block as a question flagged for manual review.
+  _fallbackQuestion(chunk, chunkMeta) {
+    const text = this.normalizeMath(String(chunk.text || '').trim()).trim();
+    if (!text || text.length < 8) return null;
+    return {
+      text,
+      type: 'short',
+      subject: chunkMeta.subject || 'Unknown',
+      topic: chunkMeta.topic || chunkMeta.chapter || 'General',
+      chapter: chunkMeta.chapter || 'Unknown',
+      board: chunkMeta.board || 'CBSE',
+      class: chunkMeta.class || 'Unknown',
+      difficulty: 'medium',
+      marks: 1,
+      source: 'Smart Import',
+      isActive: true,
+      needsReview: true,
+    };
+  }
+
   // ── Main enhancer ───────────────────────────────────────────────────────────
 
-  async enhanceQuestions(rawQuestions, bookMetadata) {
-    return this._enhance(rawQuestions, bookMetadata, (p) => this.callOllama(p), `[AIEnhancer] Ollama ${this.model}`);
+  async enhanceQuestions(rawQuestions, bookMetadata, opts = {}) {
+    return this._enhance(rawQuestions, bookMetadata, (p) => this._callRaw(p), `[AIEnhancer] Ollama ${this.model}`, opts);
   }
 
   /**
-   * Shared extraction loop for both Ollama and Gemini: chunk → AI → map →
-   * quality-gate → dedup. Emits Phase-9 structured logs.
-   * @param {(prompt:string)=>Promise<object[]>} callFn  provider call
+   * Parallel, batched extraction: chunk → (cache | batched/individual AI) → map →
+   * quality-gate → fail-soft → dedup.
+   * @param {(prompt:string)=>Promise<string>} callRaw  raw provider call
+   * @param {{concurrency?:number,batchSize?:number,onProgress?:Function,cache?:object}} opts
    */
-  async _enhance(rawQuestions, bookMetadata, callFn, tag) {
+  async _enhance(rawQuestions, bookMetadata, callRaw, tag, opts = {}) {
     const hasStructure = rawQuestions.some(q => q.blockType);
-    console.log(`\n${tag} — ${rawQuestions.length} raw block(s) (${hasStructure ? 'structured' : 'unstructured'})`);
+    const chunks = hasStructure ? this.splitStructuredBlocks(rawQuestions) : this.splitIntoChunks(rawQuestions);
 
-    const chunks = hasStructure
-      ? this.splitStructuredBlocks(rawQuestions)
-      : this.splitIntoChunks(rawQuestions);
-    console.log(`${tag} ${chunks.length} chunk(s) to process`);
+    const concurrency = Math.max(1, opts.concurrency ?? this.maxConcurrency ?? 1);
+    const batchSize   = Math.max(1, opts.batchSize   ?? this.maxBatchSize   ?? 1);
+    const onProgress  = typeof opts.onProgress === 'function' ? opts.onProgress : null;
+    const cache       = opts.cache || null;
 
+    console.log(`\n${tag} — ${rawQuestions.length} block(s) (${hasStructure ? 'structured' : 'unstructured'}) → ${chunks.length} chunk(s) | concurrency=${concurrency} batch=${batchSize}${cache ? ' cache=on' : ''}`);
+    if (onProgress) onProgress(0, chunks.length);
+
+    const units = this._buildUnits(chunks, batchSize);
     const all = [];
-    const stats = { extracted: 0, kept: 0, rejected: 0, examples: 0, subpart: 0 };
+    const stats = { extracted: 0, kept: 0, rejected: 0, fallback: 0, cached: 0 };
+    let done = 0;
 
-    for (let i = 0; i < chunks.length; i++) {
-      const chunk = chunks[i];
-      const label = chunk.blockLabel || `chunk ${i + 1}`;
-      console.log(`${tag} ${i + 1}/${chunks.length} [${chunk.blockType || 'text'}] "${String(label).slice(0, 50)}" (${chunk.text.length} chars)`);
-
-      const chunkMeta = {
-        ...bookMetadata,
-        chapter:     chunk.chapter || bookMetadata.chapter,
-        topic:       chunk.topic   || bookMetadata.topic,
-        parentLabel: chunk.parentLabel || null,
-        blockType:   chunk.blockType || null,
-      };
-
-      const prompt = chunk._structured
-        ? this.buildStructuredPrompt(chunk, chunkMeta)
-        : this.buildPrompt(chunk.text, chunkMeta);
-
-      const raw = await callFn(prompt);
-      stats.extracted += raw.length;
-
-      let kept = 0;
-      for (const rq of raw) {
-        const mapped = this.mapQuestion(rq, chunkMeta);
-        const gate = passesQualityGate(mapped);
-        if (!gate.pass) {
-          stats.rejected++;
-          if (stats.rejected <= 25) {
-            console.log(`${tag}   [Quality] ✗ score=${gate.score} (${gate.reasons.slice(0, 3).join('; ')}) :: "${mapped.text.slice(0, 45)}"`);
-          }
-          continue;
-        }
-        if (mapped.section === 'Example') stats.examples++;
-        if (mapped.hasSubParts) { stats.subpart++; console.log(`${tag}   [SubQ] parent + ${mapped.subParts.length} parts :: "${mapped.text.split('\n')[0].slice(0, 45)}"`); }
-        all.push(mapped);
-        kept++;
+    await this._pool(units, concurrency, async (unit) => {
+      let results;
+      try {
+        results = await this._runUnit(unit, bookMetadata, callRaw, cache, stats, tag);
+      } catch (e) {
+        console.warn(`${tag} unit failed → fail-soft: ${e && e.message}`);
+        results = unit.chunks.map(chunk => ({ chunk, raws: null }));
       }
-      stats.kept += kept;
-      console.log(`${tag}   → ${kept} kept / ${raw.length} extracted`);
-    }
+      for (const { chunk, raws } of results) {
+        const meta = this._chunkMeta(chunk, bookMetadata);
+        if (raws && raws.length) {
+          stats.extracted += raws.length;
+          for (const rq of raws) {
+            const mapped = this.mapQuestion(rq, meta);
+            const gate = passesQualityGate(mapped);
+            if (!gate.pass) { stats.rejected++; continue; }
+            all.push(mapped);
+            stats.kept++;
+          }
+        } else if (raws === null) {
+          const fb = this._fallbackQuestion(chunk, meta);
+          if (fb) { all.push(fb); stats.fallback++; }
+        }
+        // raws === [] → explicit skip / nothing extractable → drop silently.
+      }
+      done += unit.chunks.length;
+      if (onProgress) onProgress(done, chunks.length);
+    });
 
-    const unique  = this.deduplicateQuestions(all);
-    const dupes   = all.length - unique.length;
-    console.log(`${tag} ✅ ${unique.length} questions | gate-rejected ${stats.rejected}, dupes ${dupes}, examples ${stats.examples}, multi-part ${stats.subpart}`);
+    const unique = this.deduplicateQuestions(all);
+    console.log(`${tag} ✅ ${unique.length} questions | extracted ${stats.extracted}, kept ${stats.kept}, gate-rejected ${stats.rejected}, fail-soft ${stats.fallback}, cached ${stats.cached}, dupes ${all.length - unique.length}`);
 
-    // Strip in-memory-only helper fields before import.
     return unique.map(({ hasSubParts, subParts, _subTopic, ...q }) => q);
   }
 
@@ -449,38 +636,71 @@ JSON:`;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-class GeminiEnhancer extends AIEnhancer {
+// Strip nemotron/qwen <think>…</think> reasoning traces before JSON parsing.
+function stripThink(s) {
+  return String(s || '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/<think>[\s\S]*$/i, '')
+    .trim();
+}
+
+class NvidiaEnhancer extends AIEnhancer {
   constructor() {
     super();
-    const { GoogleGenerativeAI } = require('@google/generative-ai');
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new Error('[GeminiEnhancer] GEMINI_API_KEY env var is required');
-    this.genAI       = new GoogleGenerativeAI(apiKey);
-    this.geminiModel = process.env.GEMINI_MODEL || 'gemini-2.0-flash';
+    const OpenAI = require('openai');
+    const apiKey = process.env.NVIDIA_API_KEY;
+    if (!apiKey) throw new Error('[NvidiaEnhancer] NVIDIA_API_KEY env var is required');
+    this.client = new OpenAI({
+      apiKey,
+      baseURL: process.env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1',
+    });
+    this.nvModel   = process.env.NVIDIA_MODEL_PRIMARY || 'nvidia/llama-3.3-nemotron-super-49b-v1.5';
+    this.reasoning = (process.env.NVIDIA_REASONING || 'off').toLowerCase() === 'on' ? 'on' : 'off';
+    this.maxTokens = parseInt(process.env.NVIDIA_MAX_TOKENS || '4096', 10);
+    // Cloud: safe to fan out concurrent requests and batch questions per call.
+    this.maxConcurrency = Math.max(1, parseInt(process.env.AI_ENHANCER_CONCURRENCY || '6', 10));
+    this.maxBatchSize   = Math.max(1, parseInt(process.env.AI_ENHANCER_BATCH_SIZE || '4', 10));
   }
 
-  async callGeminiWithPrompt(promptText) {
+  // Raw streamed call — returns the raw text (streaming avoids undici's 300s
+  // headersTimeout on slow generations).
+  async _callRaw(promptText) {
     try {
-      const model  = this.genAI.getGenerativeModel({ model: this.geminiModel });
-      const result = await model.generateContent(promptText);
-      const raw    = result.response.text().trim();
-      return this._parseJsonResponse(raw, '[GeminiEnhancer]');
+      const stream = await this.client.chat.completions.create({
+        model: this.nvModel,
+        messages: [
+          { role: 'system', content: `detailed thinking ${this.reasoning}` },
+          { role: 'user', content: promptText },
+        ],
+        temperature: 0,
+        top_p: 0.95,
+        max_tokens: this.maxTokens,
+        stream: true,
+      });
+      let content = '';
+      for await (const chunk of stream) {
+        const d = chunk?.choices?.[0]?.delta?.content;
+        if (d) content += d;
+      }
+      return stripThink(content);
     } catch (error) {
-      console.error('[GeminiEnhancer] Gemini error:', error.message);
-      return [];
+      console.error('[NvidiaEnhancer] NVIDIA error:', error.message);
+      return '';
     }
   }
 
-  async enhanceQuestions(rawQuestions, bookMetadata) {
-    return this._enhance(rawQuestions, bookMetadata, (p) => this.callGeminiWithPrompt(p), `[GeminiEnhancer] ${this.geminiModel}`);
+  async enhanceQuestions(rawQuestions, bookMetadata, opts = {}) {
+    return this._enhance(rawQuestions, bookMetadata, (p) => this._callRaw(p), `[NvidiaEnhancer] ${this.nvModel}`, opts);
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 function createEnhancer(provider) {
-  if (provider === 'gemini') return new GeminiEnhancer();
-  return new AIEnhancer();
+  const p = String(provider || '').toLowerCase();
+  // 'gemini' kept as a legacy alias so old configs route to NVIDIA, not crash.
+  if (p === 'nvidia' || p === 'gemini') return new NvidiaEnhancer();
+  return new AIEnhancer(); // 'ollama' / local (default)
 }
 
-module.exports = { AIEnhancer, GeminiEnhancer, createEnhancer };
+module.exports = { AIEnhancer, NvidiaEnhancer, createEnhancer };

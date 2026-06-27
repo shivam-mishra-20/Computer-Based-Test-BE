@@ -5,6 +5,7 @@ import fs from 'fs';
 import { Types } from 'mongoose';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import { QuestionImportService } from '../../services/questionImportService';
+import { getProgress, stageLabel } from '../../services/importProgress';
 import { ImportBatch, ImportedQuestion } from '../../models/ImportedQuestion';
 import { successResponse, errorResponse } from '../../utils/response';
 import { ImportModel } from '../../models/Import';
@@ -60,7 +61,7 @@ const upload = multer({
  */
 router.post('/import-paper', authMiddleware, uploadLimiter, upload.single('questionPaper'), async (req, res) => {
   try {
-  const { subject, topic, ocrProvider = 'pdf-parse', mode, class: className, board, chapter, section, marks } = req.body;
+  const { subject, topic, ocrProvider = 'pdf-parse', mode, class: className, board, chapter, section, marks, provider } = req.body;
     const userId = (req as any).user.id;
     
     if (!req.file) {
@@ -70,8 +71,9 @@ router.post('/import-paper', authMiddleware, uploadLimiter, upload.single('quest
     // Validate file type
     const fileType = req.file.mimetype.startsWith('image/') ? 'image' : 'pdf';
     
-    // Start processing asynchronously with pdf-parse + Ollama qwen3:8b pipeline
-    const importPromise = QuestionImportService.importQuestionPaper(
+    // Create the batch + kick off the pipeline in the BACKGROUND, then return
+    // immediately. The client polls GET /import-paper/batch/:id for live progress.
+    const batch = await QuestionImportService.startImport(
       req.file.path,
       req.file.originalname,
       fileType,
@@ -84,25 +86,14 @@ router.post('/import-paper', authMiddleware, uploadLimiter, upload.single('quest
         chapter,
         section,
         marks: marks ? parseInt(marks) : undefined,
+        provider: provider === 'nvidia' ? 'nvidia' : provider === 'ollama' ? 'ollama' : undefined,
       }
     );
 
-    // Return immediate response with batch ID for tracking
-    importPromise.then(result => {
-      console.log(`Import completed for batch ${result.batchId}: ${result.processedQuestions} questions processed`);
-    }).catch(error => {
-      console.error('Import failed:', error);
-    });
-
-    // For now, await the result (in production, you might want to make this async)
-    const result = await importPromise;
-
     return successResponse(res, {
-      message: 'Question paper processed successfully',
-      batchId: result.batchId,
-      totalQuestions: result.totalQuestions,
-      processedQuestions: result.processedQuestions,
-      processingTime: result.processingTime
+      message: 'Processing started',
+      batchId: batch._id,
+      status: 'processing',
     });
 
   } catch (error) {
@@ -183,8 +174,34 @@ router.get('/import-paper/batch/:batchId', authMiddleware, async (req, res) => {
     const questions = await ImportedQuestion.find({ importBatch: batchId })
       .sort({ questionNumber: 1 });
 
+    // Merge LIVE progress (in-memory) into the response — no schema change.
+    const batchObj: any = (batch as any).toObject ? (batch as any).toObject() : batch;
+    const live = getProgress(batchId);
+    if (live) {
+      batchObj.stage = live.stage;
+      batchObj.stageLabel = stageLabel(live.stage);
+      batchObj.processingProgress = live.processingProgress;
+      batchObj.processedQuestions = live.processed || batchObj.processedQuestions || 0;
+      batchObj.totalQuestions = live.total || batchObj.totalQuestions || 0;
+      batchObj.etaSeconds = live.etaSeconds;
+      batchObj.questionsPerSecond = live.questionsPerSecond;
+      batchObj.elapsedSeconds = live.elapsedSeconds;
+      batchObj.totalProcessingTime = (live.elapsedSeconds || 0) * 1000;
+    } else {
+      // No live state (terminal long ago, or a different cluster worker): derive
+      // from persisted counters so the bar/percent are still sane (never NaN).
+      const total = batchObj.totalQuestions || 0;
+      const processed = batchObj.processedQuestions || 0;
+      batchObj.processingProgress = batchObj.status === 'completed'
+        ? 100
+        : (total ? Math.min(99, Math.round((processed / total) * 100)) : 0);
+      batchObj.stage = batchObj.status === 'completed' ? 'completed'
+        : batchObj.status === 'failed' ? 'failed' : 'enhancing';
+      batchObj.stageLabel = stageLabel(batchObj.stage);
+    }
+
     return successResponse(res, {
-      batch,
+      batch: batchObj,
       questions
     });
 

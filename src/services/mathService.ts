@@ -1,33 +1,11 @@
-import dotenv from 'dotenv';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-
-dotenv.config();
-
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
-
-let genAI: GoogleGenerativeAI | null = null;
-
-function getGemini() {
-  if (!GOOGLE_API_KEY) return null;
-  if (!genAI) genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
-  return genAI;
-}
+import { ai } from '../ai';
 
 /**
  * Converts mathematical expressions in text to proper LaTeX format
  * Ensures professional mathematical notation with correct symbols
  */
 export async function normalizeMathematicalExpressions(text: string): Promise<string> {
-  const g = getGemini();
-  if (!g) {
-    // Silently return original text if Gemini API is not configured
-    // LaTeX normalization is already handled by Vertex AI in import pipeline
-    return text;
-  }
-
   try {
-    const model = g.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
-
     const prompt = `You are a mathematical notation expert. Convert ALL mathematical expressions in the following text to proper LaTeX format wrapped in $ for inline math or $$ for display math.
 
 CRITICAL RULES:
@@ -88,8 +66,7 @@ TEXT TO PROCESS:
 ${text}
 """`;
 
-    const result = await model.generateContent(prompt);
-    const normalizedText = result.response.text();
+    const normalizedText = await ai.text(prompt, { label: 'math-normalize', temperature: 0 });
 
     return normalizedText.trim();
   } catch (error) {

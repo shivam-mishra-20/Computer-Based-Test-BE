@@ -4,13 +4,32 @@ import Exam from '../../models/Exam';
 import Attempt from '../../models/Attempt';
 import Doubt from '../../models/Doubt';
 import Lecture from '../../models/Lecture';
-import { authMiddleware } from '../../middlewares/authMiddleware';
+import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
+import { uploadAiContent } from '../../middlewares/uploadAiContent';
+import { aiLimiter } from '../../middlewares/rateLimiter';
+import {
+  generate as aiContentGenerate,
+  listHistory as aiContentListHistory,
+  getHistory as aiContentGetHistory,
+  deleteHistory as aiContentDeleteHistory,
+  regenerate as aiContentRegenerate,
+} from '../../controllers/aiContentController';
 
 interface AuthRequest extends Request {
   user?: IUser & { _id: any };
 }
 
 const router = Router();
+
+// ── AI Content Generator (PPT / Question Paper / future tools) ──────────────
+// Unified endpoint; an optional uploaded file (PDF/PPTX/DOCX/image) routes
+// through the Vision/extraction pipeline. Teachers & admins only.
+const aiGuards = [authMiddleware, requireRole('teacher', 'admin'), aiLimiter];
+router.post('/ai/generate', ...aiGuards, uploadAiContent.single('file'), aiContentGenerate);
+router.get('/ai/history', authMiddleware, requireRole('teacher', 'admin'), aiContentListHistory);
+router.get('/ai/history/:id', authMiddleware, requireRole('teacher', 'admin'), aiContentGetHistory);
+router.delete('/ai/history/:id', authMiddleware, requireRole('teacher', 'admin'), aiContentDeleteHistory);
+router.post('/ai/history/:id/regenerate', ...aiGuards, aiContentRegenerate);
 
 // GET - Teacher profile (read-only)
 router.get('/profile', authMiddleware, async (req: AuthRequest, res: Response) => {

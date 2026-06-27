@@ -395,7 +395,7 @@ export const updateProcessingRecord = async (req: Request, res: Response) => {
  */
 export const triggerProcessing = async (req: Request, res: Response) => {
   try {
-    const { folder = 'class_12', selectedFiles, aiProvider = 'ollama', geminiModel } = req.body;
+    const { folder = 'class_12', selectedFiles, aiProvider = 'ollama', nvidiaModel } = req.body;
 
     const normalizedSelectedFiles = Array.isArray(selectedFiles)
       ? Array.from(
@@ -477,11 +477,13 @@ export const triggerProcessing = async (req: Request, res: Response) => {
     if (normalizedSelectedFiles.length > 0) {
       pushLog(`Selected files: ${normalizedSelectedFiles.join(', ')}`);
     }
-    if (aiProvider === 'gemini') {
-      const resolvedGeminiModel = geminiModel || process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-      pushLog(`AI: Google Gemini ${resolvedGeminiModel} (cloud · JSON mode · 1200-char chunks)`);
+    // 'gemini' kept as a legacy alias so old dashboard configs route to NVIDIA.
+    const useNvidia = aiProvider === 'nvidia' || aiProvider === 'gemini';
+    if (useNvidia) {
+      const resolvedModel = nvidiaModel || process.env.NVIDIA_MODEL_PRIMARY || 'nvidia/llama-3.3-nemotron-super-49b-v1.5';
+      pushLog(`AI: NVIDIA ${resolvedModel} (cloud · JSON mode · 1200-char chunks)`);
     } else {
-      pushLog('AI: Ollama Qwen3:8b (local · JSON mode · 1200-char chunks)');
+      pushLog(`AI: Ollama ${process.env.OLLAMA_MODEL || 'qwen3:8b'} (local · JSON mode · 1200-char chunks)`);
     }
 
     // Spawn the automation runner script with piped stdio for real-time log capture
@@ -494,9 +496,13 @@ export const triggerProcessing = async (req: Request, res: Response) => {
         BACKEND_API_KEY: token,
         BACKEND_API_URL: process.env.BACKEND_URL || 'http://localhost:5000',
         OLLAMA_HOST: process.env.OLLAMA_HOST || 'http://localhost:11434',
-        AI_PROVIDER: aiProvider === 'gemini' ? 'gemini' : 'ollama',
-        GEMINI_API_KEY: process.env.GEMINI_API_KEY || '',
-        GEMINI_MODEL: geminiModel || process.env.GEMINI_MODEL || 'gemini-2.5-flash',
+        OLLAMA_MODEL: process.env.OLLAMA_MODEL || 'qwen3:8b',
+        AI_PROVIDER: useNvidia ? 'nvidia' : 'ollama',
+        NVIDIA_API_KEY: process.env.NVIDIA_API_KEY || '',
+        NVIDIA_BASE_URL: process.env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1',
+        NVIDIA_MODEL_PRIMARY: nvidiaModel || process.env.NVIDIA_MODEL_PRIMARY || 'nvidia/llama-3.3-nemotron-super-49b-v1.5',
+        NVIDIA_REASONING: process.env.NVIDIA_REASONING || 'off',
+        NVIDIA_MAX_TOKENS: process.env.NVIDIA_MAX_TOKENS || '4096',
       },
       detached: false,
       stdio: ['ignore', 'pipe', 'pipe'],

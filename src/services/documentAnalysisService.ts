@@ -1,17 +1,4 @@
-import dotenv from 'dotenv';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-
-dotenv.config();
-
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
-
-let genAI: GoogleGenerativeAI | null = null;
-
-function getGemini() {
-  if (!GOOGLE_API_KEY) return null;
-  if (!genAI) genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
-  return genAI;
-}
+import { ai } from '../ai';
 
 export interface DocumentAnalysisResult {
   isQuestionPaper: boolean;
@@ -36,15 +23,7 @@ export async function analyzeDocument(
   textContent: string,
   hasImages: boolean = false
 ): Promise<DocumentAnalysisResult> {
-  const g = getGemini();
-  if (!g) {
-    // Fallback heuristic analysis
-    return heuristicDocumentAnalysis(textContent, hasImages);
-  }
-
   try {
-    const model = g.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
-
     const prompt = `Analyze this document content and determine its type and characteristics.
 
 ANALYSIS CRITERIA:
@@ -86,20 +65,10 @@ DOCUMENT CONTENT (first 8000 characters):
 ${textContent.slice(0, 8000)}
 """`;
 
-    const result = await model.generateContent(prompt);
-    const responseText = result.response.text();
-    
-    let parsed: any;
-    try {
-      parsed = JSON.parse(responseText);
-    } catch {
-      const match = responseText.match(/\{[\s\S]*\}/);
-      if (!match) {
-        console.warn('Failed to parse document analysis response');
-        return heuristicDocumentAnalysis(textContent, hasImages);
-      }
-      parsed = JSON.parse(match[0]);
-    }
+    const parsed: any = await ai.chatJSON([{ role: 'user', content: prompt }], {
+      label: 'doc-analysis',
+      temperature: 0,
+    });
 
     return {
       isQuestionPaper: !!parsed.isQuestionPaper,

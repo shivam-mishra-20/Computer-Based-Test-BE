@@ -55,6 +55,7 @@ export class EnhancedPdfQuestionExtractor {
     class?: string;
     board?: string;
     chapter?: string;
+    provider?: 'nvidia' | 'ollama';
   };
 
   constructor(
@@ -245,7 +246,7 @@ export class EnhancedPdfQuestionExtractor {
     text: string,
     structure: DocumentStructure
   ): Promise<ExtractedQuestion[]> {
-    console.log('[Enhanced PDF] Extracting questions with Ollama (local)...');
+    console.log(`[Enhanced PDF] Extracting questions with ${this.options.provider === 'nvidia' ? 'NVIDIA (cloud)' : 'Ollama (local)'}...`);
 
     const allQuestions: ExtractedQuestion[] = [];
     const CHUNK_CHARS = 1200;
@@ -289,6 +290,7 @@ export class EnhancedPdfQuestionExtractor {
         class: structure.className,
         board: structure.board,
         startPage: chunk.startPage,
+        provider: this.options.provider,
       });
 
       const mapped = ollamaQuestions.map((q, idx) =>

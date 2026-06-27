@@ -1,9 +1,9 @@
-import type { VertexAI } from '@google-cloud/vertexai';
-import { getVertexClient } from '../lib/googleClients';
+import { ai, fixLatexBackslashes } from '../ai';
 
 /**
  * Answer Generation Service
- * Uses Vertex AI Gemini to solve questions of all types
+ * Uses the configured AI provider (NVIDIA primary, Ollama fallback) to solve
+ * questions of all types.
  */
 
 interface QuestionOption {
@@ -34,13 +34,6 @@ interface SolveResult {
   questionType: string;
 }
 
-let vertexAI: VertexAI | null = null;
-
-function getVertexAI(): VertexAI {
-  if (!vertexAI) vertexAI = getVertexClient();
-  return vertexAI;
-}
-
 /**
  * Determine if a question type is MCQ-based
  */
@@ -52,17 +45,6 @@ function isMCQType(type: string): boolean {
  * Use AI to solve any type of question
  */
 export async function solveQuestionWithAI(question: Question): Promise<SolveResult> {
-  const vertex = getVertexAI();
-  const model = vertex.getGenerativeModel({
-    model: 'gemini-2.5-flash',
-    generationConfig: {
-      temperature: 0.2, // Low for accuracy
-      topP: 0.95,
-      topK: 40,
-      maxOutputTokens: 2048,
-    },
-  });
-
   const contextInfo = [
     question.subject && `Subject: ${question.subject}`,
     question.topic && `Topic: ${question.topic}`,
@@ -141,11 +123,13 @@ IMPORTANT:
 
   console.log(`[AI Solve] Solving ${question.type}: "${question.text.substring(0, 80)}..."`);
 
-  const result = await model.generateContent({
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+  const result = await ai.chat([{ role: 'user', content: prompt }], {
+    temperature: 0.2, // Low for accuracy
+    maxTokens: 2048,
+    label: 'solve-question',
   });
 
-  const raw = result.response.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  const raw = fixLatexBackslashes(result.text || '');
   
   // Parse response
   let parsed: any;

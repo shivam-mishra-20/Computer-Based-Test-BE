@@ -1,27 +1,34 @@
 import { Types } from 'mongoose';
-import { getVisionClient as createVisionClient } from '../lib/googleClients';
-import dotenv from 'dotenv';
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import sharp from 'sharp';
+import { ai, fixLatexBackslashes } from '../ai';
 
-// Singleton instances
-let genAI: GoogleGenerativeAI | null = null;
-let visionClient: ReturnType<typeof createVisionClient> | null = null;
+/** Verbatim OCR prompt shared by image/page extraction. */
+const OCR_PROMPT = `Extract ALL text content from this image with MAXIMUM ACCURACY.
 
-function getGemini(): GoogleGenerativeAI {
-  if (!genAI) {
-    const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-    if (!apiKey) throw new Error('GEMINI_API_KEY is not set');
-    genAI = new GoogleGenerativeAI(apiKey);
+CRITICAL INSTRUCTIONS:
+- Extract text EXACTLY as it appears (verbatim) — do NOT paraphrase or summarize.
+- Preserve question numbers, options (A, B, C, D), and structure.
+- Keep mathematical expressions, equations, and formulas precise.
+- Include special characters, symbols, headers, and instructions.
+- Note diagrams/figures with placeholders: [DIAGRAM: brief description].
+
+Return ONLY the extracted text, nothing else.`;
+
+/** Detect an image MIME type from its bytes (defaults to image/png). */
+async function detectImageMime(buffer: Buffer): Promise<string> {
+  try {
+    const format = (await sharp(buffer).metadata()).format || 'png';
+    const map: Record<string, string> = {
+      jpeg: 'image/jpeg',
+      jpg: 'image/jpeg',
+      png: 'image/png',
+      webp: 'image/webp',
+      gif: 'image/gif',
+    };
+    return map[format] || 'image/png';
+  } catch {
+    return 'image/png';
   }
-  return genAI;
-}
-
-/**
- * Get or initialize Vision API client
- */
-function getVisionClient() {
-  if (!visionClient) visionClient = createVisionClient();
-  return visionClient;
 }
 
 export interface GeneratedQuestion {
@@ -57,10 +64,33 @@ export interface AIGenerationOptions {
   count: number;
   difficulty?: 'easy' | 'medium' | 'hard' | 'mixed';
   questionTypes?: Array<'mcq' | 'truefalse' | 'fill' | 'short' | 'long' | 'integer' | 'assertionreason'>;
-  model?: 'gemini-2.5-pro' | 'gemini-2.5-flash';
-  
+  model?: string; // optional model override (provider-agnostic; default from env)
+  /**
+   * 'auto' (default): reproduce existing questions if the source IS a question
+   * paper, else generate new ones. 'recreate': always reproduce verbatim.
+   * 'generate': always create new questions.
+   */
+  mode?: 'auto' | 'recreate' | 'generate';
+
   // User context
   createdBy: Types.ObjectId;
+}
+
+/**
+ * Heuristic: does the source text already contain exam questions (vs being
+ * study material)? Used to auto-pick recreate vs generate without a slow LLM call.
+ */
+export function looksLikeQuestionPaper(text: string): boolean {
+  const t = (text || '').slice(0, 12000);
+  let score = 0;
+  if (/\bQ\.?\s*\d+/i.test(t)) score += 2;                              // Q1, Q.1
+  if (/(^|\n)\s*\d+[.)]\s+\S/.test(t)) score += 2;                       // 1. / 1)
+  if (/\(?[A-Da-d][).]\s.*\(?[A-Da-d][).]\s/s.test(t)) score += 1;       // option labels
+  if (/\b(choose|select|tick|mark)\b.{0,25}\bcorrect\b/i.test(t)) score += 2;
+  if (/\[\s*\d+\s*marks?\s*\]|\(\s*\d+\s*m(arks?)?\s*\)/i.test(t)) score += 1;
+  if (/(answer the following|fill in the blank|true or false|assertion|reason)/i.test(t)) score += 1;
+  if ((t.match(/\?/g) || []).length >= 5) score += 1;
+  return score >= 3;
 }
 
 export interface AIGenerationResult {
@@ -69,7 +99,7 @@ export interface AIGenerationResult {
     totalGenerated: number;
     sourceType: 'text' | 'pdf' | 'image';
     extractedTextLength?: number;
-    ocrProvider?: 'google-vision';
+    ocrProvider?: 'nvidia-vision';
     processingTimeMs: number;
   };
 }
@@ -79,20 +109,17 @@ export interface AIGenerationResult {
  */
 export async function extractTextFromImage(buffer: Buffer): Promise<string> {
   try {
-    console.log('[AI Generation] Extracting text from image using Vision API...');
-    const client = getVisionClient();
-    
-    const [result] = await client.textDetection({
-      image: { content: buffer }
+    console.log('[AI Generation] Extracting text from image using NVIDIA vision OCR...');
+    const mimeType = await detectImageMime(buffer);
+    const extractedText = await ai.visionText(OCR_PROMPT, [{ data: buffer, mimeType }], {
+      label: 'ocr-image',
+      maxTokens: 8192,
     });
-    
-    const fullText = result.fullTextAnnotation;
-    const extractedText = fullText?.text || '';
-    
-    console.log(`[AI Generation] Vision API extracted ${extractedText.length} characters`);
+
+    console.log(`[AI Generation] NVIDIA vision extracted ${extractedText.length} characters`);
     return extractedText;
   } catch (error) {
-    console.error('[AI Generation] Vision API error:', error);
+    console.error('[AI Generation] Vision OCR error:', error);
     throw new Error(`Text extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
   }
 }
@@ -138,22 +165,13 @@ export async function generateQuestionsFromText(
   const startTime = Date.now();
   
   try {
-    const selectedModel = options.model || 'gemini-2.5-pro';
-    console.log(`[AI Generation] Using model: ${selectedModel}`);
-    console.log(`[AI Generation] Generating ${options.count} questions...`);
+    // Decide whether to REPRODUCE existing questions or GENERATE new ones.
+    const mode = options.mode || 'auto';
+    const recreate = mode === 'recreate' || (mode === 'auto' && looksLikeQuestionPaper(text));
+    console.log(`[AI Generation] Mode: ${recreate ? 'RECREATE (reproduce source questions)' : 'GENERATE (new questions)'}`);
+    console.log(`[AI Generation] ${recreate ? 'Reproducing' : 'Generating'} questions...`);
     console.log(`[AI Generation] Metadata: Class=${options.class}, Subject=${options.subject}, Topic=${options.topic || 'N/A'}`);
-    
-    const genAI = getGemini();
-    const model = genAI.getGenerativeModel({
-      model: selectedModel,
-      generationConfig: {
-        temperature: 0.7,
-        topP: 0.95,
-        topK: 40,
-        maxOutputTokens: 8192, // Maximum supported by Gemini models
-      },
-    });
-    
+
     // Build difficulty instruction
     let difficultyInstr = '';
     if (options.difficulty === 'mixed') {
@@ -199,17 +217,26 @@ ${options.section ? `- Section Type: ${options.section}` : ''}
 ${options.marks ? `- Marks per Question: ${options.marks}` : ''}
 
 🎯 TASK:
-Generate EXACTLY ${options.count} original, pedagogically sound questions based on the source material below.
+${recreate
+  ? `The source material below ALREADY CONTAINS exam questions. EXTRACT and REPRODUCE EVERY question present — exactly as written. Do NOT invent, add, remove, reorder, or reword questions.`
+  : `Generate EXACTLY ${options.count} original, pedagogically sound questions based on the source material below.`}
 
 📋 REQUIREMENTS:
-1. ${typeInstr}
+${recreate
+  ? `1. Reproduce the questions EXACTLY as they appear — same wording, same numbering/order.
+2. Keep each question's options and mark the SAME correct option shown in the source; if no answer is given, solve it correctly.
+3. Preserve question type (MCQ / fill / short / long / etc.) as in the source.
+4. Use proper LaTeX for ALL math (use DOUBLE backslashes in JSON: \\\\frac, \\\\sin, etc.).
+5. ENHANCE ONLY (non-destructive): fix OCR artifacts, broken spacing, and garbled characters — never change meaning or values.
+6. Extract ALL questions found; do not cap the count. Set needsReview=true for any question whose source text was garbled.`
+  : `1. ${typeInstr}
 2. ${difficultyInstr}
 3. Each question must be curriculum-appropriate for ${options.class} level
 4. Use proper LaTeX formatting for ALL mathematical expressions (use DOUBLE backslashes in JSON: \\\\frac, \\\\sin, etc.)
 5. MCQ questions must have 4 options with exactly ONE correct answer
 6. Ensure questions test understanding, not just rote memorization
 7. Set confidence=0.95 for clear questions, 0.7-0.8 for questions needing review
-8. Flag needsReview=true if confidence < 0.75
+8. Flag needsReview=true if confidence < 0.75`}
 
 ⚠️ JSON FORMATTING (CRITICAL):
 - Return ONLY valid JSON array - no markdown, no explanations
@@ -300,14 +327,18 @@ JSON SCHEMA:
 ${text.slice(0, 50000)}
 """
 
-Generate ${options.count} questions NOW. Return ONLY the JSON array.`;
+${recreate
+  ? 'Extract and reproduce ALL questions from the source NOW.'
+  : `Generate ${options.count} questions NOW.`} Return ONLY the JSON array.`;
 
-    const result = await model.generateContent({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    const result = await ai.chat([{ role: 'user', content: prompt }], {
+      temperature: 0.7,
+      maxTokens: 8192,
+      label: 'generate-questions',
     });
-    
-    const responseText = result.response.text() || '';
-    
+
+    const responseText = result.text || '';
+
     console.log(`[AI Generation] Received ${responseText.length} chars response`);
     
     // Parse JSON with robust error handling
@@ -335,9 +366,12 @@ Generate ${options.count} questions NOW. Return ONLY the JSON array.`;
  * Robust JSON parsing with multiple fallback strategies
  */
 async function parseGeneratedQuestions(responseText: string): Promise<GeneratedQuestion[]> {
-  // Clean response
-  let cleaned = responseText.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim();
-  
+  // Clean response. Repair single-backslash LaTeX (\frac, \times, \beta, …) BEFORE
+  // parsing — otherwise JSON.parse silently mangles those into \f/\t/\b escapes.
+  let cleaned = fixLatexBackslashes(
+    responseText.replace(/```json\s*/g, '').replace(/```\s*$/g, '').trim()
+  );
+
   // Check for truncation
   const isTruncated = !cleaned.endsWith(']') && !cleaned.endsWith('}]');
   if (isTruncated) {
@@ -410,7 +444,7 @@ export async function generateQuestionsFromPDF(
     metadata: {
       ...result.metadata,
       sourceType: 'pdf',
-      ocrProvider: 'google-vision',
+      ocrProvider: 'nvidia-vision',
     },
   };
 }
@@ -429,7 +463,7 @@ export async function generateQuestionsFromImage(
     metadata: {
       ...result.metadata,
       sourceType: 'image',
-      ocrProvider: 'google-vision',
+      ocrProvider: 'nvidia-vision',
     },
   };
 }

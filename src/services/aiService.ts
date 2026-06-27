@@ -1,56 +1,20 @@
 import dotenv from 'dotenv';
-import { GoogleGenerativeAI } from '@google/generative-ai';
-import type { VertexAI } from '@google-cloud/vertexai';
-import { getVertexClient } from '../lib/googleClients';
-import Groq from 'groq-sdk';
+import sharp from 'sharp';
 import type { Types } from 'mongoose';
 import type { Difficulty, IQuestion, QuestionType } from '../models/Question';
 import Guidance from '../models/Guidance';
+import { ai, fixLatexBackslashes } from '../ai';
 
 dotenv.config();
 
 /**
  * AI Service Architecture:
- * 
- * PRIMARY LLM: Vertex AI (Google Cloud) - gemini-2.5-pro
- * - Used for: Question generation, paper generation, solutions, refinement
- * - Advantages: Production-ready, service account auth, better quotas
- * - Location: us-central1
- * 
- * FALLBACK LLM: Google Generative AI SDK (legacy)
- * - Used for: PDF/Image OCR fallback only
- * - Note: Primary OCR uses Google Cloud Vision API in questionImportService
- * 
- * ALTERNATIVE: Groq (if configured)
- * - Fast inference for specific use cases
+ *
+ * All question/paper generation, refinement, solutions, and subjective grading
+ * run through the provider-agnostic `ai` facade (src/ai): NVIDIA (nemotron)
+ * primary with automatic Ollama fallback. OCR uses the NVIDIA vision model with
+ * a Tesseract.js fallback. No vendor SDK is referenced directly here.
  */
-
-const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY;
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GOOGLE_PROJECT = process.env.GOOGLE_CLOUD_PROJECT || 'cbt-vision-api';
-const GOOGLE_LOCATION = process.env.GOOGLE_CLOUD_LOCATION || 'us-central1';
-
-// Lazy singletons
-let genAI: GoogleGenerativeAI | null = null;
-let vertexAI: VertexAI | null = null;
-let groqClient: Groq | null = null;
-
-function getGemini() {
-  if (!GOOGLE_API_KEY) return null;
-  if (!genAI) genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
-  return genAI;
-}
-
-function getVertexAI(): VertexAI {
-  if (!vertexAI) vertexAI = getVertexClient();
-  return vertexAI;
-}
-
-function getGroq() {
-  if (!GROQ_API_KEY) return null;
-  if (!groqClient) groqClient = new Groq({ apiKey: GROQ_API_KEY });
-  return groqClient;
-}
 
 export type GenerateOptions = {
   subject?: string;
@@ -93,18 +57,6 @@ export async function generateSolutionsForPaper(paper: GeneratedPaperResult): Pr
   sections: { title: string; solutions: { solutionText: string }[] }[];
 }> {
   try {
-    const genAI = getGemini();
-    if (!genAI) throw new Error('Gemini initialized failed check GEMINI_API_KEY');
-    const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-pro',
-      generationConfig: {
-        temperature: 0.7,
-        topP: 0.95,
-        topK: 40,
-        maxOutputTokens: 8192,
-      },
-    });
-  
   const sections: { title: string; solutions: { solutionText: string }[] }[] = [];
   
   // Validate input
@@ -159,10 +111,12 @@ ${questionsText}
 
 Return ONLY the JSON object:`;
     
-    const result = await model.generateContent({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    const result = await ai.chat([{ role: 'user', content: prompt }], {
+      temperature: 0.7,
+      maxTokens: 8192,
+      label: 'paper-solutions',
     });
-    const raw = result.response.text() || '';
+    const raw = fixLatexBackslashes(result.text || '');
     let parsed: any;
     try {
       // Clean up the response - remove markdown code blocks if present
@@ -243,50 +197,10 @@ Return ONLY the JSON object:`;
   }
 }
 
-export async function extractTextFromPdf(buffer: Buffer, useVision = false): Promise<string> {
-  // Try advanced extraction with Gemini Vision if enabled
-  if (useVision) {
-    try {
-      const g = getGemini();
-      if (g) {
-        const model = g.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
-        const base64Pdf = buffer.toString('base64');
-        
-        const prompt = `Extract ALL text content from this PDF document with HIGH ACCURACY.
-        
-CRITICAL INSTRUCTIONS:
-- Preserve exact formatting, line breaks, and structure
-- Maintain question numbering and organization
-- Keep mathematical expressions intact (preserve symbols, equations, formulas)
-- Note locations of diagrams/figures with placeholders like [DIAGRAM: description]
-- Preserve tables and their structure
-- Do NOT paraphrase or summarize - extract verbatim
-- Include section headers, instructions, and all metadata
-
-Return ONLY the extracted text, nothing else.`;
-
-        const result = await model.generateContent([
-          {
-            inlineData: {
-              mimeType: 'application/pdf',
-              data: base64Pdf,
-            },
-          },
-          { text: prompt },
-        ]);
-        
-        const extractedText = result.response.text();
-        if (extractedText && extractedText.length > 100) {
-          console.log('✓ Used Gemini Vision for PDF text extraction');
-          return extractedText.slice(0, 200_000);
-        }
-      }
-    } catch (visionErr) {
-      console.warn('Gemini Vision extraction failed, falling back to pdf-parse:', visionErr);
-    }
-  }
-  
-  // Fallback to traditional pdf-parse
+export async function extractTextFromPdf(buffer: Buffer, _useVision = false): Promise<string> {
+  // Digital-text PDFs are parsed deterministically with pdf-parse. Scanned /
+  // image-only PDFs should be routed through the image OCR path, since the
+  // NVIDIA text model is not multimodal over raw PDF bytes.
   try {
     const pdfParse = (await import('pdf-parse')).default as any;
     const data = await pdfParse(buffer);
@@ -297,30 +211,22 @@ Return ONLY the extracted text, nothing else.`;
   }
 }
 
-// OCR: extract text from images using Gemini Vision (preferred) or Tesseract.js fallback
+// OCR: extract text from images using NVIDIA vision (preferred) or Tesseract.js fallback
 export async function extractTextFromImage(buffer: Buffer, useVision = true): Promise<string> {
-  // Try Gemini Vision first for better accuracy with mathematical content and diagrams
+  // Try NVIDIA vision first for better accuracy with mathematical content and diagrams
   if (useVision) {
     try {
-      const g = getGemini();
-      if (g) {
-        const model = g.getGenerativeModel({ model: 'gemini-2.0-flash-exp' });
-        
-        // Detect mime type
-        const sharp = await import('sharp');
-        const metadata = await sharp.default(buffer).metadata();
-        const format = metadata.format || 'png';
-        const mimeMap: Record<string, string> = {
-          jpeg: 'image/jpeg',
-          jpg: 'image/jpeg',
-          png: 'image/png',
-          webp: 'image/webp',
-        };
-        const mimeType = mimeMap[format] || 'image/png';
-        
-        const base64Image = buffer.toString('base64');
-        
-        const prompt = `Extract ALL text content from this image with MAXIMUM ACCURACY.
+      const metadata = await sharp(buffer).metadata();
+      const format = metadata.format || 'png';
+      const mimeMap: Record<string, string> = {
+        jpeg: 'image/jpeg',
+        jpg: 'image/jpeg',
+        png: 'image/png',
+        webp: 'image/webp',
+      };
+      const mimeType = mimeMap[format] || 'image/png';
+
+      const prompt = `Extract ALL text content from this image with MAXIMUM ACCURACY.
 
 CRITICAL INSTRUCTIONS:
 - Extract text EXACTLY as it appears (verbatim)
@@ -334,27 +240,19 @@ CRITICAL INSTRUCTIONS:
 
 Return ONLY the extracted text, nothing else.`;
 
-        const result = await model.generateContent([
-          {
-            inlineData: {
-              mimeType,
-              data: base64Image,
-            },
-          },
-          { text: prompt },
-        ]);
-        
-        const extractedText = result.response.text();
-        if (extractedText && extractedText.length > 50) {
-          console.log('✓ Used Gemini Vision for image OCR');
-          return extractedText.slice(0, 200_000);
-        }
+      const extractedText = await ai.visionText(prompt, [{ data: buffer, mimeType }], {
+        label: 'ocr-image',
+        maxTokens: 8192,
+      });
+      if (extractedText && extractedText.length > 50) {
+        console.log('✓ Used NVIDIA vision for image OCR');
+        return extractedText.slice(0, 200_000);
       }
     } catch (visionErr) {
-      console.warn('Gemini Vision OCR failed, falling back to Tesseract:', visionErr);
+      console.warn('NVIDIA vision OCR failed, falling back to Tesseract:', visionErr);
     }
   }
-  
+
   // Fallback to Tesseract.js
   try {
     const { createWorker } = await import('tesseract.js');
@@ -742,26 +640,16 @@ SOURCE MATERIAL (truncate if huge):\n"""\n${source.slice(0, 120_000)}\n"""`;
 
 export async function generatePaperFromTextGemini(source: string, blueprint: PaperBlueprint): Promise<GeneratedPaperResult> {
   try {
-    console.log('[AI Service] Generating paper from text with Gemini AI...');
-    const genAI = getGemini();
-    if (!genAI) throw new Error('Gemini AI not initialized. Check GEMINI_API_KEY');
-    const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-pro',
-      generationConfig: {
-        temperature: 0.7,
-        topP: 0.95,
-        topK: 40,
-        maxOutputTokens: 8192,
-      },
-    });
-    
+    console.log('[AI Service] Generating paper from text...');
     const prompt = buildPaperGenPrompt(source, blueprint);
     console.log(`[AI Service] Sending prompt (${prompt.length} chars)...`);
-    
-    const result = await model.generateContent({
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+
+    const result = await ai.chat([{ role: 'user', content: prompt }], {
+      temperature: 0.7,
+      maxTokens: 8192,
+      label: 'generate-paper',
     });
-    const raw = result.response.text() || '';
+    const raw = fixLatexBackslashes(result.text || '');
     console.log(`[AI Service] Received response (${raw.length} chars)`);
   let parsed: any;
   try {
@@ -974,18 +862,7 @@ export async function generatePaperFromTextEnforced(source: string, blueprint: P
 
 export async function refineQuestionGemini(original: Partial<IQuestion> & { notes?: string; desiredDifficulty?: Difficulty; constraints?: string }): Promise<Partial<IQuestion>> {
   try {
-    console.log('[AI Service] Refining question with Vertex AI...');
-    const vertexAI = getVertexAI();
-    const model = vertexAI.getGenerativeModel({
-      model: 'gemini-2.5-pro',
-      generationConfig: {
-        temperature: 0.7,
-        topP: 0.95,
-        topK: 40,
-        maxOutputTokens: 8192,
-      },
-    });
-  
+    console.log('[AI Service] Refining question...');
   const prompt = `Refine the following question maintaining its core concept. Apply improvements: clarity, difficulty targeting, remove ambiguity. If MCQ ensure exactly 4 options & one correct. If assertionreason, maintain structure & booleans. Return ONLY JSON with schema { "text": string, "type": string, "options": [{"text":string,"isCorrect":boolean}]|null, "correctAnswerText": string|null, "integerAnswer": number|null, "assertion": string|null, "reason": string|null, "assertionIsTrue": boolean|null, "reasonIsTrue": boolean|null, "reasonExplainsAssertion": boolean|null, "explanation": string|null }.
 Original JSON:
 ${JSON.stringify(original)}
@@ -993,10 +870,12 @@ DesiredDifficulty: ${original.desiredDifficulty || 'unchanged'}
 ExtraConstraints: ${original.constraints || 'none'}
 Notes: ${original.notes || 'none'}
 `; 
-  const result = await model.generateContent({
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+  const result = await ai.chat([{ role: 'user', content: prompt }], {
+    temperature: 0.7,
+    maxTokens: 8192,
+    label: 'refine-question',
   });
-  const raw = result.response.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  const raw = result.text || '';
   let parsed: any; try { parsed = JSON.parse(raw); } catch { const m = raw.match(/\{[\s\S]*\}/); if (!m) throw new Error('Failed to parse refined question'); parsed = JSON.parse(m[0]); }
   return {
     text: String(parsed.text || original.text || '').trim(),
@@ -1024,17 +903,6 @@ export async function generateQuestionsFromTextGemini(
     isQuestionPaper?: boolean;
   }
 ): Promise<Partial<IQuestion>[]> {
-  const vertexAI = getVertexAI();
-  const model = vertexAI.getGenerativeModel({
-    model: 'gemini-2.5-pro',
-    generationConfig: {
-      temperature: 0.8,
-      topP: 0.95,
-      topK: 40,
-      maxOutputTokens: 8192,
-    },
-  });
-  
   const hasDiagrams = opts.diagrams && opts.diagrams.length > 0;
   const diagramDescriptions = opts.diagrams?.map(d => d.description) || [];
   
@@ -1044,11 +912,13 @@ export async function generateQuestionsFromTextGemini(
     diagramDescriptions,
   });
   
-  console.log('[AI Service] Generating questions with Vertex AI...');
-  const result = await model.generateContent({
-    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+  console.log('[AI Service] Generating questions...');
+  const result = await ai.chat([{ role: 'user', content: prompt }], {
+    temperature: 0.8,
+    maxTokens: 8192,
+    label: 'generate-questions-legacy',
   });
-  const raw = result.response.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  const raw = result.text || '';
   console.log(`[AI Service] Received response (${raw.length} chars)`);
   
   let parsed: any;
@@ -1154,42 +1024,39 @@ export async function generateQuestionsFromTextGemini(
   return normalized.filter((q) => q.text && q.type);
 }
 
+// NOTE: name retained for back-compat with existing callers (attemptService,
+// aiController). Grading now runs through the NVIDIA/Ollama facade, not Groq.
 export async function gradeSubjectiveAnswerGroq(params: {
   questionText: string;
   studentAnswer: string;
   rubric?: string; // optional teacher rubric
 }): Promise<{ rubricScore: number; feedback: string }> {
-  const client = getGroq();
-  if (!client) throw new Error('Groq API key not configured');
   const system = `You are a strict but fair grader. Score the student's answer between 0 and 1 with up to two decimals. Provide brief, actionable feedback. Return STRICT JSON: { "rubricScore": number, "feedback": string }`;
   const user = `Question: ${params.questionText}\n\nStudent Answer: ${params.studentAnswer}\n\nRubric (optional): ${params.rubric || 'N/A'}\n\nRespond with JSON only.`;
-  const resp = await client.chat.completions.create({
-    model: 'llama-3.1-8b-instant',
-    temperature: 0.2,
-    messages: [
+  const parsed: any = await ai.chatJSON(
+    [
       { role: 'system', content: system },
       { role: 'user', content: user },
     ],
-    response_format: { type: 'json_object' } as any,
-  });
-  const raw = resp.choices?.[0]?.message?.content || '';
-  let parsed: any;
-  try { parsed = JSON.parse(raw); } catch { throw new Error('Failed to parse Groq grading response'); }
+    { temperature: 0.2, maxTokens: 1024, label: 'grade-subjective' }
+  );
   const score = Math.max(0, Math.min(1, Number(parsed.rubricScore)));
   const feedback = String(parsed.feedback || '').slice(0, 2000);
   return { rubricScore: isNaN(score) ? 0 : score, feedback };
 }
 
+// NOTE: name retained for back-compat. Summarization now runs through the facade.
 export async function summarizeWithGroq(text: string): Promise<string | null> {
-  const client = getGroq();
-  if (!client) return null;
-  const resp = await client.chat.completions.create({
-    model: 'llama-3.1-8b-instant',
-    temperature: 0.3,
-    messages: [
-      { role: 'system', content: 'Summarize the key insights in 3-5 bullets. Keep it concise.' },
-      { role: 'user', content: text.slice(0, 12000) },
-    ],
-  });
-  return resp.choices?.[0]?.message?.content || null;
+  try {
+    const out = await ai.chat(
+      [
+        { role: 'system', content: 'Summarize the key insights in 3-5 bullets. Keep it concise.' },
+        { role: 'user', content: text.slice(0, 12000) },
+      ],
+      { temperature: 0.3, maxTokens: 1024, label: 'summarize' }
+    );
+    return out.text || null;
+  } catch {
+    return null;
+  }
 }

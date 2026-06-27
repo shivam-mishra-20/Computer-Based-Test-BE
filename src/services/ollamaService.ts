@@ -5,9 +5,10 @@
  */
 
 import { Ollama } from 'ollama';
+import { getProvider } from '../ai';
 
 const OLLAMA_HOST = process.env.OLLAMA_HOST || 'http://localhost:11434';
-const MODEL = 'qwen3:8b';
+const MODEL = process.env.OLLAMA_MODEL || 'qwen3:8b';
 
 // Single shared client
 const ollama = new Ollama({ host: OLLAMA_HOST });
@@ -80,9 +81,27 @@ export async function extractQuestionsFromChunk(
     class?: string;
     board?: string;
     startPage?: number;
+    /** 'nvidia' = cloud (nemotron), 'ollama'/undefined = local qwen3:8b. */
+    provider?: 'nvidia' | 'ollama';
   }
 ): Promise<OllamaQuestion[]> {
   const prompt = buildPrompt(chunk, context);
+
+  // Cloud path: route the same prompt through the NVIDIA provider (streamed,
+  // robust JSON + LaTeX repair via the shared facade).
+  if (context.provider === 'nvidia') {
+    try {
+      const parsed = await getProvider('nvidia').chatJSON<OllamaResponse>(
+        [{ role: 'user', content: prompt }],
+        { json: true, temperature: 0, maxTokens: 4096, label: 'import-extract' }
+      );
+      if (!Array.isArray(parsed?.questions)) return [];
+      return parsed.questions.filter(q => q && typeof q.question === 'string' && q.question.trim());
+    } catch (error) {
+      console.error('[NVIDIA import] extraction error:', error instanceof Error ? error.message : error);
+      return [];
+    }
+  }
 
   try {
     const response = await ollama.generate({
@@ -219,14 +238,15 @@ export function mapOllamaToExtracted(
 export async function checkOllamaHealth(): Promise<{ ok: boolean; message: string }> {
   try {
     const list = await ollama.list();
-    const hasModel = list.models.some(m => m.name.startsWith('qwen3'));
+    const base = MODEL.split(':')[0];
+    const hasModel = list.models.some(m => m.name.startsWith(base));
     if (!hasModel) {
       return {
         ok: false,
-        message: `Model qwen3:8b not found. Run: ollama pull qwen3:8b. Available: ${list.models.map(m => m.name).join(', ')}`,
+        message: `Model ${MODEL} not found. Run: ollama pull ${MODEL}. Available: ${list.models.map(m => m.name).join(', ')}`,
       };
     }
-    return { ok: true, message: `Ollama running with qwen3:8b` };
+    return { ok: true, message: `Ollama running with ${MODEL}` };
   } catch (error) {
     return {
       ok: false,

@@ -1,0 +1,189 @@
+/**
+ * NVIDIA provider — talks to the NVIDIA API Catalog via its OpenAI-compatible
+ * endpoint using the `openai` SDK. One client serves both the text model
+ * (nemotron) and the vision model (VLM) for OCR / diagram analysis.
+ */
+import OpenAI from 'openai';
+import { aiConfig } from '../config';
+import { safeParse, stripReasoning } from '../json';
+import type {
+  AIProvider,
+  ChatMessage,
+  ChatOptions,
+  ChatResult,
+  HealthResult,
+  VisionImage,
+} from '../types';
+
+let client: OpenAI | null = null;
+
+function getClient(): OpenAI {
+  if (!aiConfig.nvidia.apiKey) {
+    throw new Error('NVIDIA_API_KEY is not set');
+  }
+  if (!client) {
+    client = new OpenAI({
+      apiKey: aiConfig.nvidia.apiKey,
+      baseURL: aiConfig.nvidia.baseURL,
+      timeout: aiConfig.nvidia.timeoutMs,
+      maxRetries: 0, // retries handled by withFallback / runBatch
+    });
+  }
+  return client;
+}
+
+function toUsage(u: any) {
+  return {
+    promptTokens: Number(u?.prompt_tokens || 0),
+    completionTokens: Number(u?.completion_tokens || 0),
+    totalTokens: Number(u?.total_tokens || 0),
+  };
+}
+
+/**
+ * Consume a streamed chat completion into text + usage. We stream (not because
+ * we surface tokens) but to keep the HTTP connection alive: with stream:false,
+ * NVIDIA withholds response headers until the whole completion is ready, and
+ * Node's undici fetch aborts at its 300s headersTimeout. Streaming sends headers
+ * immediately and tokens continuously, so long generations (minutes) complete.
+ */
+async function streamToText(stream: any): Promise<{ raw: string; usage: any }> {
+  let raw = '';
+  let usage: any;
+  for await (const chunk of stream) {
+    const delta = chunk?.choices?.[0]?.delta?.content;
+    if (delta) raw += delta;
+    if (chunk?.usage) usage = chunk.usage;
+  }
+  return { raw, usage };
+}
+
+function toDataUrl(img: VisionImage): string {
+  const b64 = Buffer.isBuffer(img.data)
+    ? img.data.toString('base64')
+    : String(img.data);
+  return `data:${img.mimeType};base64,${b64}`;
+}
+
+/**
+ * Inject the nemotron `detailed thinking on|off` directive. nemotron reads it
+ * from the system prompt; we merge it into the first system message (or add one).
+ */
+function withReasoningDirective(
+  messages: ChatMessage[],
+  reasoning: 'on' | 'off',
+): ChatMessage[] {
+  const directive = `detailed thinking ${reasoning}`;
+  const out = messages.map((m) => ({ ...m }));
+  const sys = out.find((m) => m.role === 'system');
+  if (sys) {
+    sys.content = `${directive}\n\n${sys.content}`;
+    return out;
+  }
+  return [{ role: 'system', content: directive }, ...out];
+}
+
+export class NvidiaProvider implements AIProvider {
+  readonly name = 'nvidia' as const;
+
+  async chat(
+    messages: ChatMessage[],
+    opts: ChatOptions = {},
+  ): Promise<ChatResult> {
+    const started = Date.now();
+    const model = opts.model || aiConfig.nvidia.modelPrimary;
+    const reasoning =
+      opts.reasoning || (aiConfig.nvidia.reasoning as 'on' | 'off');
+    const finalMessages = withReasoningDirective(messages, reasoning);
+
+    const stream = await getClient().chat.completions.create({
+      model,
+      messages: finalMessages as any,
+      temperature: opts.temperature ?? aiConfig.nvidia.temperature,
+      top_p: opts.topP ?? aiConfig.nvidia.topP,
+      max_tokens: opts.maxTokens ?? aiConfig.nvidia.maxTokens,
+      stream: true,
+      stream_options: { include_usage: true },
+    } as any);
+
+    const { raw, usage } = await streamToText(stream);
+    return {
+      text: stripReasoning(raw),
+      usage: toUsage(usage),
+      provider: this.name,
+      model,
+      latencyMs: Date.now() - started,
+    };
+  }
+
+  async chatJSON<T = any>(
+    messages: ChatMessage[],
+    opts: ChatOptions = {},
+  ): Promise<T> {
+    const res = await this.chat(messages, opts);
+    const parsed = safeParse<T>(res.text);
+    if (parsed === undefined) {
+      throw new Error(
+        `NVIDIA returned unparseable JSON: ${res.text.slice(0, 200)}`,
+      );
+    }
+    return parsed;
+  }
+
+  async vision(
+    prompt: string,
+    images: VisionImage[],
+    opts: ChatOptions = {},
+  ): Promise<ChatResult> {
+    const started = Date.now();
+    const model = opts.model || aiConfig.nvidia.modelVision;
+
+    const content: any[] = [{ type: 'text', text: prompt }];
+    for (const img of images) {
+      content.push({ type: 'image_url', image_url: { url: toDataUrl(img) } });
+    }
+
+    const stream = await getClient().chat.completions.create({
+      model,
+      messages: [{ role: 'user', content }] as any,
+      temperature: opts.temperature ?? 0.1,
+      top_p: opts.topP ?? aiConfig.nvidia.topP,
+      max_tokens: opts.maxTokens ?? aiConfig.nvidia.maxTokens,
+      stream: true,
+      stream_options: { include_usage: true },
+    } as any);
+
+    const { raw, usage } = await streamToText(stream);
+    return {
+      text: stripReasoning(raw),
+      usage: toUsage(usage),
+      provider: this.name,
+      model,
+      latencyMs: Date.now() - started,
+    };
+  }
+
+  async health(): Promise<HealthResult> {
+    if (!aiConfig.nvidia.apiKey) {
+      return { ok: false, message: 'NVIDIA_API_KEY is not set' };
+    }
+    try {
+      const res = await this.chat(
+        [{ role: 'user', content: 'Reply with the single word: ok' }],
+        {
+          maxTokens: 16,
+          label: 'health',
+        },
+      );
+      return {
+        ok: true,
+        message: `NVIDIA reachable (${aiConfig.nvidia.modelPrimary}): "${res.text.slice(0, 40)}"`,
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        message: `NVIDIA error: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+}

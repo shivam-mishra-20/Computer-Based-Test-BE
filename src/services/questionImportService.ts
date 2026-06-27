@@ -8,6 +8,10 @@ import { EnhancedQuestionData, saveValidatedQuestion } from './questionValidatio
 import { normalizeMathematicalExpressions } from './mathService';
 import { EnhancedPdfQuestionExtractor } from './enhancedPdfQuestionExtractor';
 import { extractQuestionsFromChunk, mapOllamaToExtracted } from './ollamaService';
+import { extractTextFromImage } from './aiService';
+import { runPdfEnhancerPipeline, runTextEnhancerPipeline } from './scriptsBridge';
+import * as progress from './importProgress';
+import { sha256, getFileCache, setFileCache } from './importCache';
 
 dotenv.config();
 
@@ -40,7 +44,49 @@ export interface ImportResult {
 }
 
 export class QuestionImportService {
-  
+
+  /**
+   * ASYNC entry point: create the batch, return it immediately, and run the full
+   * import in the BACKGROUND. The HTTP route returns the batchId so the client
+   * can poll GET /import-paper/batch/:id for live progress (see importProgress).
+   */
+  static async startImport(
+    filePath: string,
+    fileName: string,
+    fileType: 'pdf' | 'image',
+    uploadedBy: Types.ObjectId,
+    options: {
+      subject?: string; topic?: string; class?: string; board?: string;
+      chapter?: string; section?: string; marks?: number; provider?: 'nvidia' | 'ollama';
+    } = {}
+  ): Promise<any> {
+    const fileStats = fs.statSync(filePath);
+    const batch = new ImportBatch({
+      fileName: path.basename(filePath),
+      originalFileName: fileName,
+      fileType,
+      fileSize: fileStats.size,
+      status: 'processing',
+      processingStarted: new Date(),
+      ocrProvider: 'pdf-parse',
+      processingModel: options.provider === 'nvidia'
+        ? `nvidia-${process.env.NVIDIA_MODEL_PRIMARY || 'nemotron-super-49b'}`
+        : 'ollama-qwen3:8b-enhanced',
+      uploadedBy,
+    });
+    await batch.save();
+    progress.initProgress(batch._id);
+
+    // Fire-and-forget: progress + status live on the batch; never block the request.
+    this.importQuestionPaper(filePath, fileName, fileType, uploadedBy, { ...options, existingBatch: batch })
+      .catch((err) => {
+        console.error('[Import] Background import failed:', err instanceof Error ? err.message : err);
+        progress.failProgress(batch._id, err instanceof Error ? err.message : String(err));
+      });
+
+    return batch;
+  }
+
   /**
    * Main entry point for importing question papers - ENHANCED VERSION
    * Uses new robust extractor with deduplication and proper chapter detection
@@ -59,6 +105,8 @@ export class QuestionImportService {
       section?: string;
       marks?: number;
       useEnhancedExtractor?: boolean;
+      provider?: 'nvidia' | 'ollama';
+      existingBatch?: any;
     } = {}
   ): Promise<ImportResult> {
     const startTime = Date.now();
@@ -67,19 +115,20 @@ export class QuestionImportService {
     const useEnhanced = options.useEnhancedExtractor !== false && fileType === 'pdf';
 
     if (useEnhanced) {
-      console.log('[Import] Using ENHANCED PDF extractor (Ollama qwen3:8b + chunking + deduplication)');
+      console.log(`[Import] Using ENHANCED PDF extractor (${options.provider === 'nvidia' ? 'NVIDIA cloud' : 'Ollama qwen3:8b'} + chunking + deduplication)`);
       return await this.importWithEnhancedExtractor(filePath, fileName, uploadedBy, options);
     }
 
-    console.log('[Import] Using LEGACY extractor (Ollama qwen3:8b)');
-    
+    const aiLabel = options.provider === 'nvidia' ? 'NVIDIA cloud' : 'Ollama qwen3:8b';
+    console.log(`[Import] Using LEGACY extractor (${aiLabel})`);
+
     try {
       console.log(`[Import] Starting import for file: ${fileName}`);
-      console.log(`[Import] Pipeline: pdf-parse → Ollama qwen3:8b (local)`);
+      console.log(`[Import] Pipeline: OCR → ${aiLabel}`);
       
-      // Create import batch
+      // Use the pre-created batch (async flow) or create one (back-compat).
       const fileStats = fs.statSync(filePath);
-      const batch = new ImportBatch({
+      const batch = options.existingBatch || new ImportBatch({
         fileName: path.basename(filePath),
         originalFileName: fileName,
         fileType,
@@ -87,27 +136,35 @@ export class QuestionImportService {
         status: 'processing',
         processingStarted: new Date(),
         ocrProvider: 'pdf-parse',
-        processingModel: 'ollama-qwen3:8b',
+        processingModel: options.provider === 'nvidia'
+          ? `nvidia-${process.env.NVIDIA_MODEL_PRIMARY || 'nemotron-super-49b'}`
+          : 'ollama-qwen3:8b',
         uploadedBy
       });
-      
-      await batch.save();
-      console.log(`[Import] Batch created with ID: ${batch._id}`);
+      if (!options.existingBatch) await batch.save();
+      const batchId = batch._id as Types.ObjectId;
+      console.log(`[Import] Batch ${batchId}`);
+      progress.setStage(batchId, 'extracting');
 
       let extractedText: string;
       let totalPages = 1;
 
-      // Step 1: Extract text using pdf-parse (local)
-      console.log(`[Import] Step 1: Extracting text with pdf-parse (local)...`);
+      // Step 1: Extract text (OCR for images, pdf-parse for PDFs)
+      console.log(`[Import] Step 1: Extracting text...`);
 
       if (fileType === 'pdf') {
         const result = await this.extractTextFromPDF(filePath);
         extractedText = result.text;
         totalPages = result.pages;
       } else {
-        // For images, fall back to empty text (Ollama can only handle text)
-        console.warn('[Import] Image files not supported in legacy path without Vision API');
-        extractedText = '';
+        // Image: OCR via NVIDIA vision (cloud) or Tesseract (local).
+        const useVision = options.provider === 'nvidia';
+        console.log(`[Import] OCR image via ${useVision ? 'NVIDIA vision (cloud)' : 'Tesseract (local)'}...`);
+        const imgBuffer = await fs.promises.readFile(filePath);
+        const ocrText = await extractTextFromImage(imgBuffer, useVision);
+        extractedText = ocrText && ocrText.trim() ? `\n\n=== PAGE 1 ===\n${ocrText}` : '';
+        totalPages = 1;
+        batch.ocrProvider = useVision ? 'nvidia-vision' : 'tesseract';
       }
 
       console.log(`[Import] Extracted ${extractedText.length} characters from ${totalPages} page(s)`);
@@ -118,26 +175,50 @@ export class QuestionImportService {
       batch.totalPages = totalPages;
       await batch.save();
 
-      // Step 2: Structure questions using local Ollama qwen3:8b
-      console.log(`[Import] Step 2: Structuring questions with Ollama qwen3:8b...`);
-      const questions = await this.structureQuestionsWithOllama(
-        extractedText,
-        { subject: options.subject, topic: options.topic }
-      );
+      // Step 2: Per-question enhancement (split + LLM cleanup/classify).
+      console.log(`[Import] Step 2: Enhancing questions with ${aiLabel}...`);
+      progress.setStage(batchId, 'parsing');
+      let questions: any[];
+      try {
+        const result = await runTextEnhancerPipeline(
+          extractedText,
+          { subject: options.subject, topic: options.topic, chapter: options.chapter, class: options.class, board: options.board },
+          options.provider,
+          {
+            onProgress: (done, total) => {
+              progress.setStage(batchId, 'enhancing');
+              progress.setTotal(batchId, total);
+              progress.setProcessed(batchId, done);
+            },
+          }
+        );
+        questions = result.questions;
+      } catch (enhErr) {
+        console.warn('[Import] Enhancer pipeline failed, falling back to chunk structuring:', enhErr instanceof Error ? enhErr.message : enhErr);
+        questions = await this.structureQuestionsWithOllama(
+          extractedText,
+          { subject: options.subject, topic: options.topic, provider: options.provider }
+        );
+      }
 
-      console.log(`[Import] Ollama extracted ${questions.length} questions`);
+      console.log(`[Import] Extracted ${questions.length} questions`);
+      batch.totalQuestions = questions.length;
 
       // Step 3: Normalize mathematical expressions in all questions
+      progress.setStage(batchId, 'validating');
       console.log(`[Import] Step 3: Normalizing mathematical expressions...`);
       const normalizedQuestions = await this.normalizeQuestionsWithLaTeX(questions);
 
       // Step 4: Save questions to database with metadata
+      progress.setStage(batchId, 'saving');
       console.log(`[Import] Step 4: Saving questions to database...`);
       const savedQuestions = await this.saveQuestions(
-        normalizedQuestions, 
-        batch._id as Types.ObjectId, 
+        normalizedQuestions,
+        batchId,
         uploadedBy,
         {
+          subject: options.subject,
+          topic: options.topic,
           class: options.class,
           board: options.board,
           chapter: options.chapter,
@@ -182,6 +263,7 @@ export class QuestionImportService {
       batch.processedQuestions = savedQuestions.length;
       batch.totalProcessingTime = processingTime;
       await batch.save();
+      progress.completeProgress(batchId);
 
       console.log(`[Import] Import completed in ${processingTime}ms`);
 
@@ -198,16 +280,17 @@ export class QuestionImportService {
       // Handle errors and update batch
       const processingTime = Date.now() - startTime;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      
+
       // Try to update batch if it exists
       try {
-        const batch = await ImportBatch.findOne({ fileName: path.basename(filePath), uploadedBy }).sort({ createdAt: -1 });
+        const batch = options.existingBatch || await ImportBatch.findOne({ fileName: path.basename(filePath), uploadedBy }).sort({ createdAt: -1 });
         if (batch) {
           batch.status = 'failed';
           batch.processingErrors = batch.processingErrors || [];
           batch.processingErrors.push({ error: errorMessage, timestamp: new Date() });
           batch.totalProcessingTime = processingTime;
           await batch.save();
+          progress.failProgress(batch._id, errorMessage);
         }
       } catch (updateError) {
         console.error('Failed to update batch status:', updateError);
@@ -233,7 +316,9 @@ export class QuestionImportService {
       chapter?: string;
       section?: string;
       marks?: number;
-      model?: 'gemini-2.5-flash' | 'gemini-2.5-pro' | 'gemini-2.0-flash-thinking-exp-01-21';
+      model?: string; // optional model override (provider-agnostic)
+      provider?: 'nvidia' | 'ollama';
+      existingBatch?: any;
     }
   ): Promise<ImportResult> {
     const startTime = Date.now();
@@ -241,9 +326,9 @@ export class QuestionImportService {
     try {
       console.log(`[Enhanced Import] Starting import for file: ${fileName}`);
       
-      // Create import batch
+      // Use the pre-created batch (async flow) or create one (back-compat).
       const fileStats = fs.statSync(filePath);
-      const batch = new ImportBatch({
+      const batch = options.existingBatch || new ImportBatch({
         fileName: path.basename(filePath),
         originalFileName: fileName,
         fileType: 'pdf',
@@ -251,57 +336,94 @@ export class QuestionImportService {
         status: 'processing',
         processingStarted: new Date(),
         ocrProvider: 'pdf-parse',
-        processingModel: 'ollama-qwen3:8b-enhanced',
+        processingModel: options.provider === 'nvidia'
+          ? `nvidia-${process.env.NVIDIA_MODEL_PRIMARY || 'nemotron-super-49b'}`
+          : 'ollama-qwen3:8b-enhanced',
         uploadedBy
       });
-      
-      await batch.save();
-      console.log(`[Enhanced Import] Batch created with ID: ${batch._id}`);
+      if (!options.existingBatch) await batch.save();
+      const batchId = batch._id as Types.ObjectId;
+      console.log(`[Enhanced Import] Batch ${batchId}`);
 
-      // Read PDF buffer
+      progress.setStage(batchId, 'extracting');
       const pdfBuffer = await fs.promises.readFile(filePath);
+      const cacheKey = `${sha256(pdfBuffer)}:${options.provider || 'ollama'}`;
 
-      // Initialize enhanced extractor
-      const extractor = new EnhancedPdfQuestionExtractor(
-        pdfBuffer,
-        fileName,
-        uploadedBy,
-        {
-          subject: options.subject,
-          topic: options.topic,
-          class: options.class,
-          board: options.board,
-          chapter: options.chapter,
+      let questions: any[];
+      let structure: any;
+      let stats: any;
+
+      // Req #5: skip parse + AI entirely if this exact PDF was processed before.
+      const cached: any = await getFileCache(cacheKey);
+      if (cached && Array.isArray(cached.questions) && cached.questions.length) {
+        console.log(`[Enhanced Import] ✓ Cache HIT (${cached.questions.length} questions) — skipping parse + AI`);
+        questions = cached.questions;
+        structure = cached.structure || { totalPages: 1, chapters: [] };
+        stats = cached.stats || { total: questions.length, duplicatesRemoved: 0, withDiagrams: 0, byType: {}, byChapter: {} };
+        progress.setStage(batchId, 'enhancing');
+        progress.setTotal(batchId, questions.length);
+        progress.setProcessed(batchId, questions.length);
+      } else {
+        progress.setStage(batchId, 'parsing');
+        console.log(`[Enhanced Import] Deterministic split + parallel/batched per-question enhancement (${options.provider === 'nvidia' ? 'NVIDIA cloud' : 'Ollama local'})...`);
+        try {
+          const result = await runPdfEnhancerPipeline(
+            filePath,
+            { subject: options.subject, board: options.board, class: options.class, chapter: options.chapter, topic: options.topic },
+            options.provider,
+            {
+              onProgress: (done, total) => {
+                progress.setStage(batchId, 'enhancing');
+                progress.setTotal(batchId, total);
+                progress.setProcessed(batchId, done);
+              },
+            }
+          );
+          questions = result.questions;
+          structure = result.structure;
+          stats = result.stats;
+          // Cache for instant re-uploads of the same PDF.
+          setFileCache(cacheKey, { questions, structure, stats }).catch(() => {});
+          console.log(`[Enhanced Import] Pipeline produced ${questions.length} questions`);
+        } catch (pipelineErr) {
+          console.warn('[Enhanced Import] Pipeline failed, falling back to chunk extractor:', pipelineErr instanceof Error ? pipelineErr.message : pipelineErr);
+          const extractor = new EnhancedPdfQuestionExtractor(pdfBuffer, fileName, uploadedBy, {
+            subject: options.subject,
+            topic: options.topic,
+            class: options.class,
+            board: options.board,
+            chapter: options.chapter,
+            provider: options.provider,
+          });
+          const r = await extractor.extract();
+          questions = r.questions;
+          structure = r.structure;
+          stats = r.stats;
         }
-      );
+      }
 
-      // Extract questions (this handles everything including deduplication)
-      console.log('[Enhanced Import] Extracting questions with enhanced extractor...');
-      const { questions, structure, stats } = await extractor.extract();
-      
-      console.log(`[Enhanced Import] ✓ Extraction complete:`);
-      console.log(`  - Total questions: ${stats.total}`);
-      console.log(`  - Duplicates removed: ${stats.duplicatesRemoved}`);
-      console.log(`  - Chapters detected: ${structure.chapters.length}`);
-      console.log(`  - Questions with diagrams: ${stats.withDiagrams}`);
-      console.log(`  - By type:`, stats.byType);
-      console.log(`  - By chapter:`, stats.byChapter);
+      console.log(`[Enhanced Import] ✓ Extraction complete: ${stats.total} questions, by type: ${JSON.stringify(stats.byType)}`);
 
       // Update batch with metadata
-      batch.totalPages = structure.totalPages;
+      batch.totalPages = structure.totalPages || 0;
+      batch.totalQuestions = questions.length;
       await batch.save();
 
       // Normalize mathematical expressions
+      progress.setStage(batchId, 'validating');
       console.log('[Enhanced Import] Normalizing mathematical expressions...');
       const normalizedQuestions = await this.normalizeQuestionsWithLaTeX(questions);
 
       // Save questions to database
+      progress.setStage(batchId, 'saving');
       console.log('[Enhanced Import] Saving questions to database...');
       const savedQuestions = await this.saveQuestions(
         normalizedQuestions,
-        batch._id as Types.ObjectId,
+        batchId,
         uploadedBy,
         {
+          subject: options.subject,
+          topic: options.topic,
           class: options.class || structure.className,
           board: options.board || structure.board,
           chapter: options.chapter,
@@ -356,9 +478,10 @@ export class QuestionImportService {
       };
       
       await batch.save();
+      progress.completeProgress(batchId);
 
       console.log(`[Enhanced Import] ✓ Import completed in ${processingTime}ms`);
-      console.log(`[Enhanced Import] Success rate: ${Math.round((savedQuestions.length / questions.length) * 100)}%`);
+      console.log(`[Enhanced Import] Success rate: ${Math.round((savedQuestions.length / Math.max(1, questions.length)) * 100)}%`);
 
       return {
         success: true,
@@ -372,22 +495,23 @@ export class QuestionImportService {
     } catch (error) {
       const processingTime = Date.now() - startTime;
       const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-      
+
       console.error('[Enhanced Import] Import failed:', errorMessage);
-      
+
       // Try to update batch if it exists
       try {
-        const batch = await ImportBatch.findOne({ 
-          fileName: path.basename(filePath), 
-          uploadedBy 
+        const batch = options.existingBatch || await ImportBatch.findOne({
+          fileName: path.basename(filePath),
+          uploadedBy
         }).sort({ createdAt: -1 });
-        
+
         if (batch) {
           batch.status = 'failed';
           batch.processingErrors = batch.processingErrors || [];
           batch.processingErrors.push({ error: errorMessage, timestamp: new Date() });
           batch.totalProcessingTime = processingTime;
           await batch.save();
+          progress.failProgress(batch._id, errorMessage);
         }
       } catch (updateError) {
         console.error('[Enhanced Import] Failed to update batch status:', updateError);
@@ -432,7 +556,7 @@ export class QuestionImportService {
    */
   private static async structureQuestionsWithOllama(
     extractedText: string,
-    options: { subject?: string; topic?: string }
+    options: { subject?: string; topic?: string; provider?: 'nvidia' | 'ollama' }
   ): Promise<ExtractedQuestion[]> {
     const CHUNK_CHARS = 1200;
     const allQuestions: ExtractedQuestion[] = [];
@@ -460,6 +584,7 @@ export class QuestionImportService {
       const ollamaQuestions = await extractQuestionsFromChunk(chunks[i], {
         subject: options.subject,
         startPage: i + 1,
+        provider: options.provider,
       });
 
       const mapped = ollamaQuestions.map((q, idx) => {
@@ -578,6 +703,8 @@ export class QuestionImportService {
     batchId: Types.ObjectId,
     extractedBy: Types.ObjectId,
     metadata?: {
+      subject?: string;
+      topic?: string;
       class?: string;
       board?: string;
       chapter?: string;
@@ -601,8 +728,9 @@ export class QuestionImportService {
       return {
         text: q.text,
         type: q.type,
-        subject: q.subject || undefined,
-        topic: q.topic || undefined,
+        // Req #1: user-selected metadata wins; only fall back to AI when absent.
+        subject: metadata?.subject || q.subject || undefined,
+        topic: metadata?.topic || q.topic || undefined,
         difficulty: q.difficulty || 'medium',
         options: cleanedOptions,
         correctAnswerText: q.correctAnswerText,

@@ -82,7 +82,9 @@ export interface IImportBatch extends Document {
   }>;
   
   // OCR and AI metadata
-  ocrProvider: 'google-vision' | 'groq' | 'gemini' | 'tesseract';
+  // 'nvidia-vision' is the current provider; legacy values kept so historical
+  // records still validate.
+  ocrProvider: 'pdf-parse' | 'nvidia-vision' | 'tesseract' | 'google-vision' | 'groq' | 'gemini';
   processingModel: string;
   totalProcessingTime?: number; // milliseconds
   
@@ -190,8 +192,8 @@ const importBatchSchema = new Schema<IImportBatch>(
       timestamp: { type: Date, default: Date.now }
     }],
     
-  ocrProvider: { type: String, enum: ['google-vision', 'groq', 'gemini', 'tesseract'], default: 'google-vision' },
-    processingModel: { type: String, default: 'vertex-ai-gemini-2.5-flash' },
+  ocrProvider: { type: String, enum: ['pdf-parse', 'nvidia-vision', 'tesseract', 'google-vision', 'groq', 'gemini'], default: 'pdf-parse' },
+    processingModel: { type: String, default: 'nvidia-llama-3.3-nemotron-super-49b' },
     totalProcessingTime: { type: Number },
     
     uploadedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true }

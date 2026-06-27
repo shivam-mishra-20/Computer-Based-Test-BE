@@ -32,6 +32,7 @@ import resultRoutes from './routes/api/resultRoutes';
 import holidayRoutes from './routes/api/holidayRoutes';
 import metricsRoutes from './routes/api/metricsRoutes';
 import offlineResultsRoutes from './routes/api/offlineResultsRoutes';
+import roomAllocationRoutes from './routes/api/roomAllocationRoutes';
 import homeworkRoutes from './routes/api/homeworkRoutes';
 import studentProgressRoutes from './routes/api/studentProgressRoutes';
 import commentRoutes from './routes/api/commentRoutes';
@@ -258,6 +259,9 @@ app.use('/api/teacher', teacherRoutes);
 app.use('/api/results', resultRoutes);
 app.use('/api/metrics', metricsRoutes);
 app.use('/api/offline-results', offlineResultsRoutes);
+// Test room allocation (per offline test) — admin allocates Room 1–11, publishes,
+// and students are notified of their room.
+app.use('/api/room-allocations', roomAllocationRoutes);
 // Homework & Study Materials routes
 app.use('/api/homework', homeworkRoutes);
 app.use('/api/progress', studentProgressRoutes);
