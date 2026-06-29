@@ -4,6 +4,7 @@ import { createPaper, deletePaper, getPaper, listPapers, setPaperSolutions, upda
 import type { GeneratedPaperResult } from '../services/aiService';
 import { generateSolutionsForPaper } from '../services/aiService';
 import { buildPaperHtml } from '../utils/paperExport';
+import { htmlToPdfBuffer } from '../utils/launchBrowser';
 
 export const createPaperCtrl = async (req: Request, res: Response) => {
   try {
@@ -87,13 +88,7 @@ export const exportPdfCtrl = async (req: Request, res: Response) => {
   if (!doc) return res.status(404).json({ message: 'Paper not found' });
   const html = buildPaperHtml(doc as any, { includeSolutions });
   try {
-    // Lazy import puppeteer to avoid startup cost if not installed
-    const puppeteer = await import('puppeteer');
-    const browser = await puppeteer.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox'] } as any);
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-    const pdf = await page.pdf({ format: 'A4', printBackground: true, margin: { top: '12mm', right: '12mm', bottom: '12mm', left: '12mm' } });
-    await browser.close();
+    const pdf = await htmlToPdfBuffer(html);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${(doc.examTitle || 'paper').replace(/[^a-z0-9-_]+/gi, '_')}.pdf"`);
     return res.send(pdf);

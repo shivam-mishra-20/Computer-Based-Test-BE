@@ -34,9 +34,43 @@ function buildPrompt(opts: PaperOptions, sourceText?: string): string {
 }`);
   lines.push('');
   lines.push(`Requirements:`);
-  if (opts.marks) lines.push(`- Total marks must sum to ${opts.marks}.`);
-  if (opts.questionTypes?.length)
-    lines.push(`- Use these question types, grouped into sensible sections: ${opts.questionTypes.join(', ')}.`);
+
+  // An explicit section plan ("10 MCQs, 5 Short Answer…") takes precedence over
+  // the looser questionTypes hint and pins down exact counts/marks per section.
+  const spec = (opts.sectionSpec || []).filter(
+    (s) => s && s.type && Number(s.count) > 0,
+  );
+  if (spec.length) {
+    lines.push(
+      `- Produce EXACTLY ${spec.length} section(s), one per line below, in this order. ` +
+        `Each section must contain EXACTLY the stated number of questions of the stated type:`,
+    );
+    let computedTotal = 0;
+    spec.forEach((s, i) => {
+      const letter = String.fromCharCode(65 + i); // A, B, C…
+      const count = Math.floor(Number(s.count));
+      const marksEach = s.marksEach != null ? Number(s.marksEach) : undefined;
+      if (marksEach != null) computedTotal += count * marksEach;
+      lines.push(
+        `  - Section ${letter}: exactly ${count} "${s.type}" question(s)` +
+          (marksEach != null
+            ? ` worth ${marksEach} mark(s) each (set this section's marksPerQuestion to ${marksEach}).`
+            : `.`),
+      );
+    });
+    if (computedTotal > 0)
+      lines.push(`- Total marks must sum to ${computedTotal}.`);
+    else if (opts.marks)
+      lines.push(`- Total marks must sum to ${opts.marks}.`);
+    lines.push(
+      `- Do NOT add, merge, split, or reorder sections. Do NOT change the question counts.`,
+    );
+  } else {
+    if (opts.marks) lines.push(`- Total marks must sum to ${opts.marks}.`);
+    if (opts.questionTypes?.length)
+      lines.push(`- Use these question types, grouped into sensible sections: ${opts.questionTypes.join(', ')}.`);
+  }
+
   if (opts.difficulty) {
     const d = opts.difficulty;
     lines.push(
@@ -48,8 +82,9 @@ function buildPrompt(opts: PaperOptions, sourceText?: string): string {
   if (opts.board) lines.push(`- Board/Curriculum: ${opts.board}`);
   if (opts.chapter) lines.push(`- Chapter/Topic: ${opts.chapter}`);
   lines.push(`- Language: ${opts.language || 'English'}.`);
-  lines.push(`- Provide a brief "explanation" (answer) for every question.`);
+  lines.push(`- Provide a concise "explanation" (the answer / 1-2 line solution) for every question — do not pad it.`);
   lines.push(`- Use LaTeX delimited by $...$ for any mathematical notation.`);
+  lines.push(`- Output ONLY the JSON object. No markdown, no commentary, no trailing text.`);
   lines.push('');
   if (sourceText && sourceText.trim()) {
     lines.push(`Base the questions on this source material:`);
@@ -118,7 +153,10 @@ export async function generatePaperJSON(
   const raw = await ai.chatJSON<any>(messages, {
     model: pickModel('generation'),
     label: 'ai-content-paper',
-    maxTokens: 8192,
+    // Ceiling, not a target — the model stops when the paper is complete, so a
+    // higher cap costs nothing for small papers but lets large ones finish
+    // instead of truncating into invalid JSON.
+    maxTokens: 16384,
   });
   return coercePaper(raw, opts);
 }

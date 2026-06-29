@@ -1,55 +1,20 @@
 import { Request, Response } from 'express';
 import { buildPaperHtml } from '../utils/paperExport';
+import { htmlToPdfBuffer } from '../utils/launchBrowser';
 
 export const exportTempPdfCtrl = async (req: Request, res: Response) => {
   try {
     const { paper } = req.body;
     if (!paper) return res.status(400).json({ message: 'Paper data required' });
-    
+
     const html = buildPaperHtml(paper as any, { includeSolutions: true });
-    
-    let browser: any;
+
     try {
-      // Try serverless-friendly Chromium first
-      try {
-        const chromium = await import('@sparticuz/chromium');
-        const puppeteerCore = await import('puppeteer-core');
-        const executablePath = await chromium.default.executablePath();
-        if (executablePath) {
-          browser = await puppeteerCore.default.launch({
-            args: [...(chromium.default.args || []), '--no-sandbox', '--disable-setuid-sandbox'],
-            executablePath,
-            headless: true,
-          });
-        }
-      } catch {}
-
-      if (!browser) {
-        const puppeteer = await import('puppeteer');
-        browser = await puppeteer.default.launch({
-          headless: true,
-          args: ['--no-sandbox', '--disable-setuid-sandbox'],
-        });
-      }
-
-      const page = await browser.newPage();
-      await page.setContent(html, { waitUntil: 'networkidle0' });
-      const pdf = await page.pdf({ 
-        format: 'A4', 
-        printBackground: true, 
-        margin: { top: '12mm', right: '12mm', bottom: '12mm', left: '12mm' } 
-      });
-      await browser.close();
-      
+      const pdf = await htmlToPdfBuffer(html);
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename="${(paper.examTitle || 'paper').replace(/[^a-z0-9-_]+/gi, '_')}.pdf"`);
       return res.send(pdf);
     } catch (e: any) {
-      if (browser) {
-        try {
-          await browser.close();
-        } catch {}
-      }
       console.error('exportTempPdfCtrl: PDF generation failed', e);
       return res.status(500).json({ message: 'PDF generation failed. Please try again.' });
     }

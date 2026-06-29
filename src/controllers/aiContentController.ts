@@ -66,6 +66,16 @@ function toPptOptions(prompt: string | undefined, o: Record<string, any>): PptOp
 }
 
 function toPaperOptions(prompt: string | undefined, o: Record<string, any>): PaperOptions {
+  const sectionSpec = Array.isArray(o.sectionSpec)
+    ? o.sectionSpec
+        .map((s: any) => ({
+          type: String(s?.type ?? '').trim(),
+          count: Number(s?.count),
+          marksEach: s?.marksEach != null ? Number(s.marksEach) : undefined,
+        }))
+        .filter((s: any) => s.type && Number.isFinite(s.count) && s.count > 0)
+    : undefined;
+
   return {
     prompt,
     subject: o.subject,
@@ -80,6 +90,7 @@ function toPaperOptions(prompt: string | undefined, o: Record<string, any>): Pap
       : typeof o.questionTypes === 'string'
         ? o.questionTypes.split(',').map((t: string) => t.trim()).filter(Boolean)
         : undefined,
+    sectionSpec: sectionSpec && sectionSpec.length ? sectionSpec : undefined,
   };
 }
 

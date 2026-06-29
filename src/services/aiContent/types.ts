@@ -87,6 +87,16 @@ export interface PaperJSON {
   sections: PaperSection[];
 }
 
+/** One row of an explicit section plan, e.g. "10 MCQs at 1 mark each". */
+export interface PaperSectionSpec {
+  /** Question type, e.g. "MCQ", "Short Answer". */
+  type: string;
+  /** Number of questions to generate for this section. */
+  count: number;
+  /** Marks per question (optional). */
+  marksEach?: number;
+}
+
 export interface PaperOptions {
   prompt?: string;
   subject?: string;
@@ -98,6 +108,11 @@ export interface PaperOptions {
   /** e.g. { easy: 30, medium: 50, hard: 20 } — percentages. */
   difficulty?: { easy?: number; medium?: number; hard?: number };
   questionTypes?: string[];
+  /**
+   * Explicit per-section layout (overrides questionTypes when present). The
+   * model must produce exactly these sections, counts, and marks.
+   */
+  sectionSpec?: PaperSectionSpec[];
 }
 
 /** Result of rendering: bytes + naming + mime for storage/download. */

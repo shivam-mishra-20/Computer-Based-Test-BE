@@ -26,33 +26,51 @@ export function stripReasoning(raw: string): string {
   return t.trim();
 }
 
-/** Best-effort extraction of the first JSON object/array substring. */
-function sliceJson(text: string): string | null {
-  const firstObj = text.indexOf('{');
-  const firstArr = text.indexOf('[');
+/**
+ * String-aware extraction + truncation repair in one pass. Starting at the first
+ * `{`/`[`, it walks the text tracking string state (so braces inside LaTeX like
+ * `\frac{a}{b}` are never miscounted) and a stack of open structures. If the
+ * response ends mid-value (the 49B model frequently hits its token cap), it
+ * closes the dangling string, drops a trailing comma / fills a dangling colon,
+ * then closes every still-open `[`/`{` in the correct order. Returns a balanced
+ * JSON candidate, or null if no object/array start is present.
+ */
+function extractBalancedJson(text: string): string | null {
+  const objIdx = text.indexOf('{');
+  const arrIdx = text.indexOf('[');
   let start = -1;
-  let closeCh = '}';
-  if (firstArr !== -1 && (firstObj === -1 || firstArr < firstObj)) {
-    start = firstArr;
-    closeCh = ']';
-  } else if (firstObj !== -1) {
-    start = firstObj;
-  }
+  if (arrIdx !== -1 && (objIdx === -1 || arrIdx < objIdx)) start = arrIdx;
+  else if (objIdx !== -1) start = objIdx;
   if (start === -1) return null;
-  const end = text.lastIndexOf(closeCh);
-  if (end <= start) return null;
-  return text.slice(start, end + 1);
-}
 
-/** Auto-close unbalanced braces/brackets on a truncated response. */
-function repairTruncation(s: string): string {
-  const openBraces = (s.match(/\{/g) || []).length;
-  const closeBraces = (s.match(/\}/g) || []).length;
-  const openBrackets = (s.match(/\[/g) || []).length;
-  const closeBrackets = (s.match(/\]/g) || []).length;
-  let out = s;
-  for (let i = 0; i < openBraces - closeBraces; i++) out += '}';
-  for (let i = 0; i < openBrackets - closeBrackets; i++) out += ']';
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  let out = '';
+
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    out += ch;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '{') stack.push('}');
+    else if (ch === '[') stack.push(']');
+    else if (ch === '}' || ch === ']') {
+      if (stack.length && stack[stack.length - 1] === ch) stack.pop();
+      if (stack.length === 0) return out; // complete top-level structure
+    }
+  }
+
+  // Truncated mid-value — repair the tail, then close open structures.
+  if (inString) out += '"';
+  out = out.replace(/,\s*$/, '');        // dangling comma after last element
+  out = out.replace(/:\s*$/, ':null');   // key with no value yet
+  while (stack.length) out += stack.pop();
   return out;
 }
 
@@ -75,9 +93,9 @@ export function fixLatexBackslashes(s: string): string {
  * Parse arbitrary model output into a JS value with several fallbacks:
  * 0. repair single-backslash LaTeX so it isn't silently mangled
  * 1. strip reasoning/fences → direct parse
- * 2. slice the first {...}/[...] → parse
- * 3. repair truncation (auto-close) → parse
- * 4. strip control chars / trailing commas → parse
+ * 2. string-aware extract of the first {...}/[...], auto-closing a truncated
+ *    tail → parse
+ * 3. strip control chars / trailing commas → parse
  * Returns `undefined` if everything fails.
  */
 export function safeParse<T = any>(raw: string): T | undefined {
@@ -91,11 +109,8 @@ export function safeParse<T = any>(raw: string): T | undefined {
   const attempts: string[] = [];
   for (const base of bases) {
     attempts.push(base);
-    const sliced = sliceJson(base);
-    if (sliced) {
-      attempts.push(sliced);
-      attempts.push(repairTruncation(sliced));
-    }
+    const balanced = extractBalancedJson(base);
+    if (balanced) attempts.push(balanced);
   }
 
   for (const candidate of attempts) {
