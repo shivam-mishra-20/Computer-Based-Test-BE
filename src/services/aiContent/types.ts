@@ -81,6 +81,8 @@ export interface PaperSection {
 export interface PaperJSON {
   examTitle: string;
   subject?: string;
+  /** Class/grade — shown in the paper header. */
+  className?: string;
   totalMarks?: number;
   meta?: { durationMins?: number };
   generalInstructions?: string[];

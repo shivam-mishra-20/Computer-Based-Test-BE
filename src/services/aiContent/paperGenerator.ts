@@ -7,8 +7,38 @@ import { ai, pickModel } from '../../ai';
 import type { ChatMessage } from '../../ai';
 import type { PaperJSON, PaperOptions, PaperSection } from './types';
 
-const SYSTEM = `You are an experienced exam-setter who writes well-structured question papers.
+const SYSTEM = `You are an experienced school exam-setter who writes well-structured, curriculum-compliant question papers.
+You set questions STRICTLY within the syllabus of the given class, subject and chapter(s) — never above grade level and never out of syllabus.
 You ALWAYS respond with a single valid JSON object and nothing else — no markdown, no prose, no code fences.`;
+
+/**
+ * Hard syllabus-compliance constraints. These are the most important rules in
+ * the prompt, so they are stated first and in strong, imperative language.
+ */
+function syllabusBlock(opts: PaperOptions, hasSource: boolean): string[] {
+  const cls = opts.className || 'the selected class';
+  const lines: string[] = [];
+  lines.push(`STRICT SYLLABUS COMPLIANCE (highest priority — follow exactly):`);
+  lines.push(
+    `- Every question MUST fall within the syllabus of ${cls}` +
+      (opts.subject ? ` ${opts.subject}` : '') +
+      (opts.chapter ? `, limited to the chapter(s)/topic(s): ${opts.chapter}` : '') +
+      `.`,
+  );
+  lines.push(
+    `- Do NOT include out-of-syllabus content, topics from higher classes, or competitive/advanced-exam level questions.`,
+  );
+  lines.push(
+    `- Calibrate difficulty, depth, vocabulary and phrasing to a ${cls} student. Keep it age- and grade-appropriate.`,
+  );
+  if (hasSource) {
+    lines.push(
+      `- Base questions ONLY on the provided source material below (and the chapter scope above). Do not introduce concepts, facts, or terms that are not present in that material.`,
+    );
+  }
+  lines.push('');
+  return lines;
+}
 
 function buildPrompt(opts: PaperOptions, sourceText?: string): string {
   const lines: string[] = [];
@@ -33,6 +63,7 @@ function buildPrompt(opts: PaperOptions, sourceText?: string): string {
   ]
 }`);
   lines.push('');
+  lines.push(...syllabusBlock(opts, !!(sourceText && sourceText.trim())));
   lines.push(`Requirements:`);
 
   // An explicit section plan ("10 MCQs, 5 Short Answer…") takes precedence over
@@ -98,9 +129,15 @@ function buildPrompt(opts: PaperOptions, sourceText?: string): string {
   return lines.join('\n');
 }
 
-function coercePaper(raw: any, opts: PaperOptions): PaperJSON {
+type CleanSpec = NonNullable<PaperOptions['sectionSpec']>;
+
+const cleanSpec = (spec?: CleanSpec): CleanSpec =>
+  (spec || []).filter((s) => s && s.type && Number(s.count) > 0);
+
+/** Map raw model JSON → PaperSection[] (drops blank questions and empty sections). */
+function parseSections(raw: any): PaperSection[] {
   const sectionsIn: any[] = Array.isArray(raw?.sections) ? raw.sections : [];
-  const sections: PaperSection[] = sectionsIn
+  return sectionsIn
     .map((sec) => ({
       title: String(sec?.title ?? 'Section').trim(),
       instructions: sec?.instructions ? String(sec.instructions) : undefined,
@@ -119,10 +156,70 @@ function coercePaper(raw: any, opts: PaperOptions): PaperJSON {
         .filter((q: any) => q.text),
     }))
     .filter((s) => s.questions.length);
+}
 
-  if (!sections.length) {
-    throw new Error('The model did not return any questions. Try regenerating.');
+/**
+ * Align produced sections to the requested plan and clamp each to its count.
+ * LLMs overshoot ("give 25" → 29), so we never trust the count. Empty sections
+ * are KEPT here (so top-up rounds can target a deficit by index); callers drop
+ * empties when finalising.
+ *  - single spec: flatten all produced questions into one section.
+ *  - multi spec: align by order.
+ */
+function alignToSpec(sections: PaperSection[], spec: CleanSpec): PaperSection[] {
+  const clean = cleanSpec(spec);
+  if (!clean.length) return sections;
+
+  if (clean.length === 1) {
+    const sp = clean[0];
+    const all = sections.flatMap((s) => s.questions);
+    return [
+      {
+        title: sections[0]?.title || `${sp.type} Questions`,
+        instructions: sections[0]?.instructions,
+        marksPerQuestion: sp.marksEach ?? sections[0]?.marksPerQuestion,
+        questions: all.slice(0, Math.floor(Number(sp.count))),
+      },
+    ];
   }
+
+  return clean.map((sp, i) => {
+    const src = sections[i];
+    return {
+      title: src?.title || `${sp.type} Questions`,
+      instructions: src?.instructions,
+      marksPerQuestion: sp.marksEach ?? src?.marksPerQuestion,
+      questions: (src?.questions || []).slice(0, Math.floor(Number(sp.count))),
+    } as PaperSection;
+  });
+}
+
+function sumMarks(sections: PaperSection[]): number {
+  return sections.reduce(
+    (acc, s) => acc + (Number(s.marksPerQuestion) || 0) * s.questions.length,
+    0,
+  );
+}
+
+const normText = (t: string) =>
+  String(t || '').toLowerCase().replace(/\s+/g, ' ').trim();
+
+/** Build the final PaperJSON envelope from parsed/finalised sections. */
+function finalizePaper(
+  raw: any,
+  opts: PaperOptions,
+  sections: PaperSection[],
+  hasSpec: boolean,
+): PaperJSON {
+  // Total marks: trust the (clamped/topped-up) sections when we have a spec so
+  // the header matches the actual paper; otherwise use the model/requested value.
+  const specTotal = hasSpec ? sumMarks(sections) : 0;
+  const totalMarks =
+    specTotal > 0
+      ? specTotal
+      : raw?.totalMarks != null
+        ? Number(raw.totalMarks)
+        : opts.marks;
 
   return {
     examTitle:
@@ -130,8 +227,8 @@ function coercePaper(raw: any, opts: PaperOptions): PaperJSON {
       [opts.subject, opts.chapter].filter(Boolean).join(' — ') ||
       'Question Paper',
     subject: raw?.subject ? String(raw.subject) : opts.subject,
-    totalMarks:
-      raw?.totalMarks != null ? Number(raw.totalMarks) : opts.marks,
+    className: opts.className,
+    totalMarks,
     meta: raw?.meta?.durationMins
       ? { durationMins: Number(raw.meta.durationMins) }
       : undefined,
@@ -142,21 +239,152 @@ function coercePaper(raw: any, opts: PaperOptions): PaperJSON {
   };
 }
 
+function coercePaper(raw: any, opts: PaperOptions): PaperJSON {
+  const parsed = parseSections(raw);
+  if (!parsed.length) {
+    throw new Error('The model did not return any questions. Try regenerating.');
+  }
+
+  const clean = cleanSpec(opts.sectionSpec);
+  let sections = parsed;
+  if (clean.length) {
+    sections = alignToSpec(parsed, clean).filter((s) => s.questions.length);
+    if (!sections.length) {
+      throw new Error('The model did not return any questions. Try regenerating.');
+    }
+  }
+  return finalizePaper(raw, opts, sections, clean.length > 0);
+}
+
+/** One generation call → raw JSON. maxTokens is a ceiling, not a target. */
+function callModel(userContent: string, maxTokens: number): Promise<any> {
+  const messages: ChatMessage[] = [
+    { role: 'system', content: SYSTEM },
+    { role: 'user', content: userContent },
+  ];
+  return ai.chatJSON<any>(messages, {
+    model: pickModel('generation'),
+    label: 'ai-content-paper',
+    maxTokens,
+  });
+}
+
+/** Prompt for a focused top-up that fills only the missing questions. */
+function buildTopUpPrompt(
+  opts: PaperOptions,
+  sourceText: string | undefined,
+  deficits: { sp: CleanSpec[number]; need: number }[],
+  current: PaperSection[],
+): string {
+  const lines: string[] = [];
+  lines.push(
+    `Generate ADDITIONAL questions to complete a question paper. Respond with a single valid JSON object only:`,
+  );
+  lines.push(
+    `{ "sections": [ { "title": string, "marksPerQuestion": number, "questions": [ { "text": string, "options": [ {"text": string} ], "explanation": string } ] } ] }`,
+  );
+  lines.push('');
+  lines.push(...syllabusBlock(opts, !!(sourceText && sourceText.trim())));
+  lines.push(`Produce EXACTLY these additional questions — one section per line, in this order:`);
+  deficits.forEach((d, i) => {
+    const letter = String.fromCharCode(65 + i);
+    lines.push(
+      `  - Section ${letter}: ${d.need} more "${d.sp.type}" question(s)` +
+        (d.sp.marksEach != null ? ` worth ${d.sp.marksEach} mark(s) each.` : `.`),
+    );
+  });
+  lines.push(
+    `- They MUST be DIFFERENT from the existing questions listed below — do not repeat or merely rephrase them.`,
+  );
+  lines.push(`- Provide a concise "explanation" (answer) for each. Use LaTeX delimited by $...$ for math.`);
+  lines.push(`- Output ONLY the JSON object.`);
+
+  const existing = current.flatMap((s) => s.questions.map((q) => q.text)).slice(0, 150);
+  if (existing.length) {
+    lines.push('');
+    lines.push(`Existing questions (do NOT repeat these):`);
+    existing.forEach((t, i) => lines.push(`${i + 1}. ${t}`));
+  }
+  if (sourceText && sourceText.trim()) {
+    lines.push('');
+    lines.push(`Source material:`);
+    lines.push('"""');
+    lines.push(sourceText.slice(0, 40_000));
+    lines.push('"""');
+  } else if (opts.prompt) {
+    lines.push('');
+    lines.push(`Topic / instructions: ${opts.prompt}`);
+  }
+  return lines.join('\n');
+}
+
+// Bounded so a stubborn model can't loop/cost forever; 2 extra rounds is plenty.
+const MAX_TOPUP_ROUNDS = 2;
+
 export async function generatePaperJSON(
   opts: PaperOptions,
   sourceText?: string,
 ): Promise<PaperJSON> {
-  const messages: ChatMessage[] = [
-    { role: 'system', content: SYSTEM },
-    { role: 'user', content: buildPrompt(opts, sourceText) },
-  ];
-  const raw = await ai.chatJSON<any>(messages, {
-    model: pickModel('generation'),
-    label: 'ai-content-paper',
-    // Ceiling, not a target — the model stops when the paper is complete, so a
-    // higher cap costs nothing for small papers but lets large ones finish
-    // instead of truncating into invalid JSON.
-    maxTokens: 16384,
-  });
-  return coercePaper(raw, opts);
+  const raw = await callModel(buildPrompt(opts, sourceText), 16384);
+
+  const clean = cleanSpec(opts.sectionSpec);
+  // No explicit counts requested → nothing to enforce/top-up.
+  if (!clean.length) return coercePaper(raw, opts);
+
+  const parsed = parseSections(raw);
+  if (!parsed.length) {
+    throw new Error('The model did not return any questions. Try regenerating.');
+  }
+
+  // Aligned + clamped to the plan (never exceeds counts); empties kept so we can
+  // top them up by index.
+  const aligned = alignToSpec(parsed, clean);
+
+  for (let round = 0; round < MAX_TOPUP_ROUNDS; round++) {
+    const deficits = clean
+      .map((sp, i) => ({
+        i,
+        sp,
+        need: Math.floor(Number(sp.count)) - (aligned[i]?.questions.length || 0),
+      }))
+      .filter((d) => d.need > 0);
+    if (!deficits.length) break; // every section is exactly full
+
+    let topRaw: any;
+    try {
+      topRaw = await callModel(
+        buildTopUpPrompt(opts, sourceText, deficits, aligned),
+        8192,
+      );
+    } catch {
+      break; // top-up is best-effort — never fail the whole paper over it
+    }
+    const topSections = parseSections(topRaw);
+    if (!topSections.length) break;
+
+    deficits.forEach((d, di) => {
+      // Single-section plans flatten everything; multi-section align by order.
+      const candidates =
+        clean.length === 1
+          ? topSections.flatMap((s) => s.questions)
+          : topSections[di]?.questions || topSections.flatMap((s) => s.questions);
+      const target = aligned[d.i];
+      const cap = Math.floor(Number(d.sp.count));
+      const seen = new Set(target.questions.map((q) => normText(q.text)));
+      for (const q of candidates) {
+        if (target.questions.length >= cap) break;
+        const key = normText(q.text);
+        if (q.text && !seen.has(key)) {
+          target.questions.push(q);
+          seen.add(key);
+        }
+      }
+    });
+  }
+
+  const sections = aligned.filter((s) => s.questions.length > 0);
+  if (!sections.length) {
+    throw new Error('The model did not return any questions. Try regenerating.');
+  }
+  return finalizePaper(raw, opts, sections, true);
 }

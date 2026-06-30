@@ -130,3 +130,51 @@ export async function htmlToPdfBuffer(html: string): Promise<Buffer> {
     }
   }
 }
+
+export interface PdfRenderOptions {
+  margin?: { top?: string; right?: string; bottom?: string; left?: string };
+  /** Native Chromium running header (rendered in the top margin on every page). */
+  headerTemplate?: string;
+  /** Native Chromium running footer (rendered in the bottom margin on every page). */
+  footerTemplate?: string;
+}
+
+/**
+ * Like htmlToPdfBuffer but with control over page margins and Chromium's native
+ * running header/footer (which render in the margins and never overlap content,
+ * repeating on every page). Used by the branded question-paper exporter.
+ */
+export async function htmlToPdfBufferAdvanced(
+  html: string,
+  opts: PdfRenderOptions = {},
+): Promise<Buffer> {
+  let browser: any;
+  try {
+    browser = await launchBrowser();
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    const displayHeaderFooter = !!(opts.headerTemplate || opts.footerTemplate);
+    const pdf = await page.pdf({
+      format: 'A4',
+      printBackground: true,
+      displayHeaderFooter,
+      headerTemplate: opts.headerTemplate ?? '<div></div>',
+      footerTemplate: opts.footerTemplate ?? '<div></div>',
+      margin: {
+        top: opts.margin?.top ?? '12mm',
+        right: opts.margin?.right ?? '12mm',
+        bottom: opts.margin?.bottom ?? '12mm',
+        left: opts.margin?.left ?? '12mm',
+      },
+    });
+    return Buffer.isBuffer(pdf) ? pdf : Buffer.from(pdf);
+  } finally {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
