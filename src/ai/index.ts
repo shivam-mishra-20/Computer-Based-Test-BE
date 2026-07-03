@@ -22,6 +22,8 @@ export { pickModel } from './models';
 export type { AiTask } from './models';
 export { safeParse, parseArray, parseObject, stripReasoning, fixLatexBackslashes } from './json';
 export { logAICall, estimateCostUSD } from './logging';
+export { promptRegistry } from './promptRegistry';
+export type { PromptTemplate, PromptTask } from './promptRegistry';
 export type {
   AIProvider,
   ChatMessage,

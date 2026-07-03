@@ -36,6 +36,18 @@ function shouldRunCronJobs(): boolean {
   return cluster.worker?.id === 1;
 }
 
+/** The AI PPT pipeline worker runs EMBEDDED here by default so `npm start`
+ * alone is a complete deployment — without it, ppt generations sit 'queued'
+ * forever unless someone remembers to run the separate worker process. Same
+ * one-instance gating as cron (cluster fork 1 only) so cluster mode doesn't
+ * multiply queue concurrency. Set PPT_WORKER_EMBEDDED=false to opt out and
+ * run `npm run start:worker:ppt` as its own process instead. */
+function shouldRunEmbeddedPptWorker(): boolean {
+  if (process.env.PPT_WORKER_EMBEDDED === 'false') return false;
+  if (!cluster.isWorker) return true;
+  return cluster.worker?.id === 1;
+}
+
 const httpServer = http.createServer(app);
 
 // Initialize Socket.IO with Redis adapter
@@ -61,7 +73,14 @@ connectDB().then(async () => {
   } else {
     console.log(`ℹ️ [Worker ${WORKER_ID}] Skipping cron initialization on this worker`);
   }
-  
+
+  if (shouldRunEmbeddedPptWorker()) {
+    const { startPptPipelineWorker } = require('./workers/pptWorkerCore');
+    startPptPipelineWorker();
+    console.log(
+      `✅ [Worker ${WORKER_ID}] Embedded AI PPT worker started (set PPT_WORKER_EMBEDDED=false to run it separately)`,
+    );
+  }
 }).catch((err: any) => {
   console.error('Database connection failed at startup:', err);
 });
@@ -69,11 +88,20 @@ connectDB().then(async () => {
 // Graceful shutdown
 const shutdown = async (signal: string) => {
   console.log(`\n🛑 ${signal} received. Shutting down gracefully...`);
-  
+
   // Stop accepting new connections
   server.close(() => {
     console.log('✅ HTTP server closed');
   });
+
+  // Stop the embedded PPT worker (no-op when not started) so in-flight jobs
+  // release their locks cleanly instead of stalling.
+  try {
+    const { stopPptPipelineWorker } = require('./workers/pptWorkerCore');
+    await stopPptPipelineWorker();
+  } catch {
+    /* best-effort */
+  }
 
   // Close Redis connections
   await closeRedis();

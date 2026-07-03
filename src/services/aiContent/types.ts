@@ -60,6 +60,8 @@ export interface PptOptions {
   includeQuiz?: boolean;
   includeObjectives?: boolean;
   includeSummary?: boolean;
+  /** Saved BlueprintTemplate to use as the lecture-plan skeleton (phase 1). */
+  blueprintTemplateId?: string;
 }
 
 // ── Question paper ──────────────────────────────────────────────────────────

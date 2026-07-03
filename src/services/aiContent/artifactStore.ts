@@ -42,3 +42,27 @@ export async function deleteArtifact(storagePath?: string): Promise<void> {
     console.warn('[aiContent] Failed to delete artifact:', storagePath, err);
   }
 }
+
+/**
+ * Upload a source file to a PRIVATE staging path (no makePublic) so the async
+ * pipeline worker — a separate process — can download it back via the Admin
+ * SDK's own credentials. BullMQ job payloads carry only this storage ref, never
+ * raw file bytes, through Redis.
+ */
+export async function stageSourceFile(
+  buffer: Buffer,
+  storagePath: string,
+  contentType: string,
+): Promise<{ storagePath: string }> {
+  const blob = bucket.file(storagePath);
+  const blobStream = blob.createWriteStream({
+    metadata: { contentType },
+    resumable: false,
+  });
+  await new Promise<void>((resolve, reject) => {
+    blobStream.on('error', reject);
+    blobStream.on('finish', resolve);
+    blobStream.end(buffer);
+  });
+  return { storagePath };
+}

@@ -1,20 +1,14 @@
 /**
- * Unified AI Content service — the single seam the controller calls. It owns the
- * pipeline (extract → generate JSON → render artifact) and picks the right NVIDIA
- * model per task via the `ai` facade. Future tools (notes, worksheet, lesson
- * planner) add a method here and reuse the same extract/render building blocks.
+ * Unified AI Content service — the single seam the controller calls for
+ * SYNCHRONOUS features. Question paper generation lives here (extract →
+ * generate JSON → render PDF, one HTTP request). PPT generation is async —
+ * see services/aiOrchestrator + services/aiContent/ppt/pipelineDefinition.ts,
+ * run by src/workers/pptPipelineWorker.ts, not this facade.
  */
-import { generateSlideDeck } from './pptGenerator';
-import { renderPptx, buildDeckPreviewHtml } from './pptxRenderer';
 import { generatePaperJSON } from './paperGenerator';
 import { renderPaperPdf, buildPaperPreviewHtml } from './paperExport';
 import { extractFromUpload } from './documentExtractor';
-import type {
-  PaperOptions,
-  PptOptions,
-  RenderedArtifact,
-  UploadFile,
-} from './types';
+import type { PaperOptions, RenderedArtifact, UploadFile } from './types';
 
 export interface GenerationResult {
   feature: 'ppt' | 'question_paper';
@@ -50,44 +44,6 @@ export const aiContentService = {
   /** Read an uploaded document → plain text (Vision model for images/scans). */
   analyzeDocument(file: UploadFile) {
     return extractFromUpload(file);
-  },
-
-  /** Prompt/source → structured SlideDeck (no rendering). */
-  extractSlides(opts: PptOptions, sourceText?: string) {
-    return generateSlideDeck(opts, sourceText);
-  },
-
-  async generatePresentation(
-    opts: PptOptions,
-    file?: UploadFile,
-  ): Promise<GenerationResult> {
-    let sourceText: string | undefined;
-    let usedVision = false;
-    if (file) {
-      const ex = await extractFromUpload(file);
-      sourceText = ex.text;
-      usedVision = ex.usedVision;
-    }
-    const deck = await generateSlideDeck(opts, sourceText);
-    const buffer = await renderPptx(deck);
-    const fileName = buildFileName(
-      [opts.subject, opts.className, opts.chapter],
-      'Slides',
-    );
-    return {
-      feature: 'ppt',
-      title: deck.title,
-      contentJSON: deck as any,
-      previewHtml: buildDeckPreviewHtml(deck),
-      usedVision,
-      artifact: {
-        buffer,
-        fileName: `${fileName}.pptx`,
-        mimeType:
-          'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-        ext: 'pptx',
-      },
-    };
   },
 
   async generateQuestionPaper(
