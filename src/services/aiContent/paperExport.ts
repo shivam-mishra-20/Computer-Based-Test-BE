@@ -9,6 +9,7 @@ import fs from 'fs';
 import katex from 'katex';
 import { htmlToPdfBufferAdvanced } from '../../utils/launchBrowser';
 import { LOGO_DATA_URL } from './brandAssets';
+import { latexToUnicode } from './ppt/pptxBuilder';
 import type { PaperJSON } from './types';
 
 const INSTITUTE_NAME = 'Abhigyan Gurukul';
@@ -21,7 +22,33 @@ const esc = (x: unknown) =>
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
 
-/** Server-render inline/display LaTeX ($…$, $$…$$); fall back to escaped text. */
+/**
+ * Repair the LaTeX the model actually emits for fill-in-the-blank questions —
+ * the two shapes that break KaTeX (observed live in generated papers):
+ *   1. underscore runs as blanks, often inside \text{}:  \frac{\text{______}}{x}
+ *      (`_` is illegal in text mode; 2+ `_` is illegal math anywhere)
+ *   2. a \frac left with only ONE argument:  \sin\theta = \frac{___}
+ * Blanks become a printed rule (real answer line); missing \frac args get one;
+ * unbalanced braces are closed.
+ */
+function repairLatex(expr: string): string {
+  let e = expr;
+  // \text{ ____ } (blank wrapped in text mode) → a plain rule, no \text.
+  e = e.replace(/\\text\s*\{\s*_{2,}\s*\}/g, '\\rule{1.2cm}{0.4pt}');
+  // \frac{x} with no second argument (end of string or next char isn't `{`).
+  e = e.replace(/\\frac\s*\{([^{}]*)\}\s*(?=$|[^{])/g, '\\frac{$1}{\\rule{0.9cm}{0.4pt}}');
+  // Any remaining blank runs (inside or outside \text) → rule.
+  e = e.replace(/_{2,}/g, '\\rule{1.2cm}{0.4pt}');
+  // Close unbalanced braces (truncated output).
+  const opens = (e.match(/\{/g) || []).length;
+  const closes = (e.match(/\}/g) || []).length;
+  if (opens > closes) e += '}'.repeat(opens - closes);
+  return e;
+}
+
+/** Server-render inline/display LaTeX ($…$, $$…$$). Chain: strict render →
+ * repaired render → readable unicode fallback. NEVER the old behavior of
+ * throwOnError:false, which printed broken source in red in the final PDF. */
 function renderMath(text: string): string {
   const src = String(text ?? '');
   const re = /\$\$([\s\S]*?)\$\$|\$([^$]+?)\$/g;
@@ -32,14 +59,22 @@ function renderMath(text: string): string {
     out += esc(src.slice(last, m.index)).replace(/\n/g, '<br/>');
     const display = m[1] != null;
     const expr = (m[1] ?? m[2]) || '';
-    try {
-      out += katex.renderToString(expr, {
+    const tryRender = (x: string) =>
+      katex.renderToString(x, {
         displayMode: display,
-        throwOnError: false,
+        throwOnError: true, // we handle failure — never render red error text
+        strict: false,
         output: 'html',
       });
+    try {
+      out += tryRender(expr);
     } catch {
-      out += `<code>${esc(expr)}</code>`;
+      try {
+        out += tryRender(repairLatex(expr));
+      } catch {
+        // Last resort: readable plain text (θ, ², √…), never raw \commands.
+        out += `<em>${esc(latexToUnicode(expr).replace(/_{2,}/g, '______'))}</em>`;
+      }
     }
     last = m.index + m[0].length;
   }

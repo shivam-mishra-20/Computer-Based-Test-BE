@@ -7,7 +7,7 @@
  * Reviewer via `feedback`), the prompt asks for a targeted fix rather than a
  * full rewrite, mirroring paperGenerator.ts's existing top-up pattern.
  */
-import { ai, estimateCostUSD, pickModel, promptRegistry, safeParse } from '../../../ai';
+import { ai, aiConfig, estimateCostUSD, pickModel, promptRegistry, safeParse } from '../../../ai';
 import type {
   GeneratedSlide,
   KnowledgeNode,
@@ -36,7 +36,7 @@ const SLIDE_SCHEMA = `{
   "speakerNotes": string
 }`;
 
-function nodeToGroundingText(node: KnowledgeNode): string {
+export function nodeToGroundingText(node: KnowledgeNode): string {
   const parts: string[] = [`[${node.contentType}] ${node.title || node.topic}`];
   if (node.learningObjectives?.length) parts.push(...node.learningObjectives.map((o) => `- ${o}`));
   if (node.definitions?.length) parts.push(...node.definitions.map((d) => `${d.term}: ${d.definition}`));
@@ -93,7 +93,7 @@ function sectionSpecLines(brief: SlideBrief): string[] {
 
 promptRegistry.register({
   id: 'ppt.slideGenerate',
-  version: 'v2', // v2: blueprint section-spec contract + no-grounding synthesis branch
+  version: 'v3', // v3: per-layout content minimums + controlled expansion on thin grounding (v2 said "nothing beyond grounding", which produced thin slides)
   task: 'generation',
   description: 'Authors ONE slide per the approved blueprint section spec — grounded in its assigned knowledge nodes, or synthesized from the section topic when the teacher added a section with no extracted content.',
   render: (params: {
@@ -109,17 +109,42 @@ promptRegistry.register({
     lines.push('');
     lines.push(
       brief.modeInstructions.preserveWordingCloseToSource
-        ? '- Preserve the source wording closely — light grammar/formatting polish only, do not rewrite or condense.'
-        : '- You may rewrite/condense for a clear, concise slide (short bullets, ~14 words max each).',
+        ? '- This slide REBUILDS one page of the teacher\'s own presentation. Include EVERY piece of content from the grounding — every definition, formula, derivation step, solved example, question, table row and note. Reorganize into the layout, fix grammar/OCR artifacts, but do NOT rewrite, condense, summarize or drop anything, and do NOT add anything that is not in the grounding (no new examples, questions, tips or applications). Same meaning, same order, same information — only the presentation improves.'
+        : '- Write RICH, classroom-ready content: substantive points (each a complete thought, ~8-16 words), not one-line summaries. Fill the slide layout generously — a teacher should be able to teach several minutes from this one slide.',
     );
-    lines.push('- Use LaTeX delimited by $...$ for any mathematical/scientific notation.');
+    // Per-layout content minimums — thin slides are the #1 teacher complaint.
+    const MINIMUMS: Record<string, string> = {
+      content_bullets: '- Minimum content: 5-7 bullets. Each bullet = one complete teachable idea, not a fragment.',
+      objectives: '- Minimum content: 4-6 measurable objectives ("Define…", "Calculate…", "Explain why…").',
+      definition_card: '- Minimum content: 2-4 term+definition pairs; definitions precise and class-appropriate.',
+      formula_highlight: '- Every formula gets a plain-language description AND what each symbol means.',
+      example_box: '- Minimum content: 2-3 fully worked, concrete examples (real numbers/situations, not placeholders).',
+      solved_example: '- One complete problem with a full step-by-step numbered solution — every step shown, nothing skipped.',
+      mcq_card: '- Each question must be distinct (never repeat a question on the deck), have EXACTLY 4 plausible options, a correct answerIndex, and vary which option is correct.',
+      summary_card: '- Minimum content: 5-6 recap points covering every key idea taught in this section.',
+      homework: '- Minimum content: 4-6 concrete tasks of mixed difficulty, doable without the teacher.',
+      table: '- A real comparison/data table with 3+ rows — never a 1-row placeholder.',
+    };
+    // Content minimums drive richness in GENERATE mode only — in preserve
+    // (redesign) mode they would push the model to INVENT filler, the exact
+    // opposite of faithful recreation.
+    if (!brief.modeInstructions.preserveWordingCloseToSource && MINIMUMS[brief.layoutType]) {
+      lines.push(MINIMUMS[brief.layoutType]);
+    }
+    lines.push('- Accuracy is non-negotiable: every fact, formula, value and answer must be correct for this class level and board. If unsure of a specific number, state the concept without inventing the number.');
+    lines.push('- speakerNotes: 3-5 sentences the teacher can SAY while showing this slide (explanation + one question to ask the class).');
+    lines.push('- Use LaTeX delimited by $...$ for any mathematical/scientific notation. Fill-in blanks go OUTSIDE math as ______, never as underscores inside $...$.');
     lines.push(...sectionSpecLines(brief));
     if (brief.modeInstructions.extraTeacherInstruction) {
       lines.push(`- Teacher's note for this deck: ${brief.modeInstructions.extraTeacherInstruction}`);
     }
     lines.push('');
     if (groundingNodes.length) {
-      lines.push('Grounding content (the ONLY source of truth for this slide — do not add anything beyond this):');
+      lines.push(
+        brief.modeInstructions.preserveWordingCloseToSource
+          ? 'Grounding content (the ONLY source of truth for this slide — do not add anything beyond this):'
+          : 'Grounding content (the factual anchor for this slide). Teach THIS material — and where it is brief, elaborate it to meet the content minimums with standard curriculum knowledge of the same topic at this class level. Never contradict the grounding; never drift to a different topic:',
+      );
       lines.push('"""');
       lines.push(groundingNodes.map(nodeToGroundingText).join('\n\n'));
       lines.push('"""');
@@ -156,39 +181,61 @@ promptRegistry.register({
   },
 });
 
+/**
+ * Sanitize model/OCR output before it can reach a slide — observed artifacts:
+ * literal "\n"/"\t" escape sequences printed as text, LaTeX \( \) \[ \]
+ * delimiters (the renderers only understand $...$), markdown ** / __ / ` that
+ * pptx renders literally, and stray double-escaped backslashes.
+ */
+export function cleanText(v: unknown): string {
+  let s = String(v ?? '');
+  // Normalize LaTeX delimiters to the $-form every renderer here understands.
+  s = s.replace(/\\\(\s*/g, '$').replace(/\s*\\\)/g, '$');
+  s = s.replace(/\\\[\s*/g, '$').replace(/\s*\\\]/g, '$');
+  // Literal escape sequences that arrived as TEXT (backslash + letter), not
+  // as real control characters. Keep \\ (LaTeX) intact.
+  s = s.replace(/(?<!\\)\\n/g, ' ').replace(/(?<!\\)\\t/g, ' ');
+  // Markdown emphasis/code markers render literally in PPTX — strip markers,
+  // keep the content.
+  s = s.replace(/\*\*([^*]+)\*\*/g, '$1').replace(/__([^_]+)__/g, '$1').replace(/`([^`]+)`/g, '$1');
+  // Collapse runaway whitespace from OCR joins.
+  s = s.replace(/[ \t]{2,}/g, ' ').replace(/\n{3,}/g, '\n\n');
+  return s.trim();
+}
+
 function coerceSlide(raw: any, brief: SlideBrief): GeneratedSlide {
   return {
     slideIndex: brief.slideIndex,
     layoutType: brief.layoutType,
-    title: String(raw?.title ?? brief.title ?? '').trim() || brief.title,
-    subtitle: raw?.subtitle ? String(raw.subtitle) : undefined,
-    bullets: Array.isArray(raw?.bullets) ? raw.bullets.map(String).filter(Boolean) : undefined,
+    title: cleanText(raw?.title ?? brief.title ?? '') || brief.title,
+    subtitle: raw?.subtitle ? cleanText(raw.subtitle) : undefined,
+    bullets: Array.isArray(raw?.bullets) ? raw.bullets.map(cleanText).filter(Boolean) : undefined,
     definitionCard: Array.isArray(raw?.definitionCard)
-      ? raw.definitionCard.map((d: any) => ({ term: String(d?.term ?? ''), definition: String(d?.definition ?? '') })).filter((d: any) => d.term)
+      ? raw.definitionCard.map((d: any) => ({ term: cleanText(d?.term), definition: cleanText(d?.definition) })).filter((d: any) => d.term)
       : undefined,
     formulaBox: Array.isArray(raw?.formulaBox)
-      ? raw.formulaBox.map((f: any) => ({ expression: String(f?.expression ?? ''), description: f?.description ? String(f.description) : undefined })).filter((f: any) => f.expression)
+      ? raw.formulaBox.map((f: any) => ({ expression: cleanText(f?.expression), description: f?.description ? cleanText(f.description) : undefined })).filter((f: any) => f.expression)
       : undefined,
     exampleBox: Array.isArray(raw?.exampleBox)
-      ? raw.exampleBox.map((e: any) => ({ text: String(e?.text ?? '') })).filter((e: any) => e.text)
+      ? raw.exampleBox.map((e: any) => ({ text: cleanText(e?.text) })).filter((e: any) => e.text)
       : undefined,
     solvedExample: raw?.solvedExample?.problem
-      ? { problem: String(raw.solvedExample.problem), solution: String(raw.solvedExample.solution ?? '') }
+      ? { problem: cleanText(raw.solvedExample.problem), solution: cleanText(raw.solvedExample.solution ?? '') }
       : undefined,
     mcq: Array.isArray(raw?.mcq)
       ? raw.mcq
           .map((m: any) => ({
-            question: String(m?.question ?? ''),
-            options: Array.isArray(m?.options) ? m.options.map(String) : [],
+            question: cleanText(m?.question),
+            options: Array.isArray(m?.options) ? m.options.map(cleanText) : [],
             answerIndex: Number.isFinite(Number(m?.answerIndex)) ? Number(m.answerIndex) : 0,
           }))
           .filter((m: any) => m.question)
       : undefined,
     table:
       raw?.table && Array.isArray(raw.table.headers)
-        ? { headers: raw.table.headers.map(String), rows: Array.isArray(raw.table.rows) ? raw.table.rows.map((r: any) => (Array.isArray(r) ? r.map(String) : [])) : [] }
+        ? { headers: raw.table.headers.map(cleanText), rows: Array.isArray(raw.table.rows) ? raw.table.rows.map((r: any) => (Array.isArray(r) ? r.map(cleanText) : [])) : [] }
         : undefined,
-    speakerNotes: raw?.speakerNotes ? String(raw.speakerNotes) : undefined,
+    speakerNotes: raw?.speakerNotes ? cleanText(raw.speakerNotes) : undefined,
   };
 }
 
@@ -211,13 +258,47 @@ export const slideGenerator: SlideGenerator = {
       chapter: ctx.options.chapter,
       language: ctx.options.language,
     };
-    const res = await ai.chat(prompt.render({ brief, groundingNodes, feedback, context }), {
+    const messages = prompt.render({ brief, groundingNodes, feedback, context });
+    // Generated content (teacher reads AI-authored prose) → quality model.
+    // Preserve-wording/redesign slides reformat the page's own verbatim text —
+    // mechanical work the fast model does in seconds instead of minutes.
+    const isPreserve = !!brief.modeInstructions.preserveWordingCloseToSource;
+    const chatOpts = {
       label: `${prompt.id}@${prompt.version}`,
-      model: pickModel(prompt.task),
+      model: pickModel(isPreserve ? aiConfig.ppt.redesignSlideModel : aiConfig.ppt.slideModel),
       json: true,
-      maxTokens: 2048,
-    });
-    const parsed = safeParse<any>(res.text);
+      maxTokens: 4096, // room for the v3 per-layout content minimums
+    };
+    let res = await ai.chat(messages, chatOpts);
+    let parsed = safeParse<any>(res.text);
+    let retries = 0;
+    let tokensIn = res.usage.promptTokens;
+    let tokensOut = res.usage.completionTokens;
+    let costUsd = estimateCostUSD(res.provider, res.usage);
+
+    // ONE corrective retry before this slide degrades to the deterministic
+    // fallback: an empty or malformed sample happens (observed live on
+    // practice/mcq slides) and a single re-ask almost always fixes it. Echo
+    // the broken output back only when there IS output to fix.
+    if (parsed === undefined) {
+      const fixMessages = res.text.trim()
+        ? [
+            ...messages,
+            { role: 'assistant' as const, content: res.text.slice(0, 8000) },
+            {
+              role: 'user' as const,
+              content:
+                'Your previous reply was NOT valid JSON. Re-send the SAME slide as one complete, strictly valid JSON object — no markdown fences, no commentary, escape backslashes as \\\\ and inner quotes as \\".',
+            },
+          ]
+        : messages; // empty response — just re-sample
+      res = await ai.chat(fixMessages, chatOpts);
+      parsed = safeParse<any>(res.text);
+      retries = 1;
+      tokensIn += res.usage.promptTokens;
+      tokensOut += res.usage.completionTokens;
+      costUsd += estimateCostUSD(res.provider, res.usage);
+    }
     if (parsed === undefined) {
       throw new Error(`Slide generator returned unparseable JSON for "${brief.title}": ${res.text.slice(0, 150)}`);
     }
@@ -225,11 +306,11 @@ export const slideGenerator: SlideGenerator = {
     return {
       output: coerceSlide(parsed, brief),
       metrics: {
-        llmCalls: 1,
-        tokensIn: res.usage.promptTokens,
-        tokensOut: res.usage.completionTokens,
-        costUsd: estimateCostUSD(res.provider, res.usage),
-        retries: 0,
+        llmCalls: 1 + retries,
+        tokensIn,
+        tokensOut,
+        costUsd,
+        retries,
       },
       warnings: [],
     };

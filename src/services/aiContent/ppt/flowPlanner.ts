@@ -125,7 +125,8 @@ export function planPedagogicalFlow(
   graph: TeachingKnowledgeGraph,
   ctx: PipelineContext,
 ): { chunks: KnowledgeChunk[]; warnings: string[] } {
-  if (ctx.mode === 'teacher_enhancement' || ctx.mode === 'modernizer') {
+  if (ctx.mode === 'redesign') {
+    // Preserving the teacher's original lecture flow IS this mode's promise.
     return { chunks, warnings: [] };
   }
 

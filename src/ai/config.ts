@@ -53,18 +53,30 @@ export const aiConfig = {
     ),
     // Small/fast model for metadata, JSON formatting, validation, small rewrites.
     // Falls back to the generation model when unset.
+    // NOTE: nvidia/llama-3.1-nemotron-nano-8b-v1 (the old default) went dead on
+    // the NVIDIA API 2026-07 — requests hang forever with no response. Probe a
+    // replacement with scripts before changing this again.
     modelFast: str(
       process.env.NVIDIA_MODEL_FAST ??
         process.env.NVIDIA_MODEL_GENERATION ??
         process.env.NVIDIA_MODEL_PRIMARY,
-      'nvidia/llama-3.1-nemotron-nano-8b-v1',
+      'nvidia/nvidia-nemotron-nano-9b-v2',
     ),
     temperature: num(process.env.NVIDIA_TEMPERATURE, 0.2),
     topP: num(process.env.NVIDIA_TOP_P, 0.95),
     maxTokens: int(process.env.NVIDIA_MAX_TOKENS, 8192),
-    // The 49B model decodes ~10 tok/s, so large batches can run for minutes.
-    // Default 20 min so requests complete instead of aborting (override via env).
-    timeoutMs: int(process.env.NVIDIA_TIMEOUT_MS, 1200000),
+    // Absolute per-request wall-clock cap (backstop). The idle timeout below is
+    // the fast path; this only bounds a request that keeps trickling tokens
+    // forever. Lowered from the old 20-min default so nothing can hang for 20
+    // minutes; still generous for a long slide generation (override via env).
+    timeoutMs: int(process.env.NVIDIA_TIMEOUT_MS, 360000), // 6 min
+    // Idle timeout: abort if the model sends NO token for this long. A hung/
+    // stalled connection fails within seconds so the pipeline falls back or
+    // retries immediately, instead of blocking on the 20-min client timeout
+    // (the observed cause of multi-minute "Understanding Request" stages).
+    // Streaming generations send tokens continuously, so this never fires on a
+    // healthy-but-slow request. Per-task override via ChatOptions.idleTimeoutMs.
+    idleTimeoutMs: int(process.env.NVIDIA_IDLE_TIMEOUT_MS, 45000),
     maxRetries: int(process.env.NVIDIA_MAX_RETRIES, 1),
     concurrency: int(process.env.NVIDIA_CONCURRENCY, 3),
     /** nemotron "detailed thinking on|off" — keep 'off' for deterministic JSON. */
@@ -85,6 +97,35 @@ export const aiConfig = {
   cost: {
     inputPerM: num(process.env.NVIDIA_COST_INPUT_PER_M, 0),
     outputPerM: num(process.env.NVIDIA_COST_OUTPUT_PER_M, 0),
+  },
+
+  /** PPT fast-path tuning (v7). Internal planning stages default to the fast
+   * model (big speed win, output is teacher-reviewed anyway); the slides the
+   * teacher actually reads default to the quality model. All env-overridable. */
+  ppt: {
+    /** Model for knowledge extraction + the lecture outline: 'fast' | 'generation'. */
+    planningModel: (str(process.env.PPT_PLANNING_MODEL, 'fast') === 'generation'
+      ? 'generation'
+      : 'fast') as 'fast' | 'generation',
+    /** Model for slide content generation: 'fast' | 'generation'. */
+    slideModel: (str(process.env.PPT_SLIDE_MODEL, 'generation') === 'fast'
+      ? 'fast'
+      : 'generation') as 'fast' | 'generation',
+    /** Model for REDESIGN (preserve-wording) slides. Redesign is mechanical —
+     * reformat the page's own verbatim text into a layout, invent nothing —
+     * so the fast model handles it well, and on a 92-slide deck it's the
+     * difference between ~40 minutes and ~4. 'generation' restores max polish. */
+    redesignSlideModel: (str(process.env.PPT_REDESIGN_SLIDE_MODEL, 'fast') === 'generation'
+      ? 'generation'
+      : 'fast') as 'fast' | 'generation',
+    /** Parallel slide-generation calls (independent per-slide fan-out). */
+    slideConcurrency: int(process.env.PPT_SLIDE_CONCURRENCY, 6),
+    /** Per-slide hallucination reviewer adds a second LLM call per slide. Off
+     * by default for speed (grounded slides rarely need it); on for max quality. */
+    reviewSlides: str(process.env.PPT_REVIEW_SLIDES, 'off').toLowerCase() === 'on',
+    /** Cap knowledge-extraction batches (each is one LLM call over ~5k chars).
+     * Lowered from 12 — a lecture needs the chapter, not the whole book. */
+    extractMaxBatches: int(process.env.PPT_EXTRACT_MAX_BATCHES, 6),
   },
 };
 

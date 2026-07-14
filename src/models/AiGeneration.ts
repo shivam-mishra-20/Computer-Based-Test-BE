@@ -1,6 +1,31 @@
 import mongoose, { Schema, Document, Types } from 'mongoose';
 
 /**
+ * PPT mode is a fast-moving field: the app sends it, legacy values live in old
+ * rows, and new modes get added over time. A hard schema `enum` here turns any
+ * code/process skew (a running server behind the deployed code) into a
+ * user-facing "validation failed" hard error — this bit production three times.
+ *
+ * Instead the field is SELF-HEALING: a normalizing setter maps every possible
+ * value — new, legacy, or unknown — to one of the two canonical modes on
+ * assignment, so a save can NEVER be rejected for a bad mode. Kept inline (not
+ * imported from services/) to avoid a model→service layering dependency; it
+ * mirrors services/aiContent/ppt/modes.ts normalizePptMode (single behavior,
+ * two trivial call sites).
+ */
+const MODE_MAP: Record<string, string> = {
+  generate: 'generate',
+  redesign: 'redesign',
+  smart_generator: 'generate',
+  hybrid: 'generate',
+  modernizer: 'redesign',
+  teacher_enhancement: 'redesign',
+};
+function normalizeModeValue(raw: unknown): string {
+  return MODE_MAP[String(raw ?? '').trim()] || 'generate';
+}
+
+/**
  * History record for the Teacher AI Content Generator. One row per generation
  * (PPT, question paper, …). This is a brand-new collection — it does not touch
  * any existing schema. The rendered artifact is persisted to Firebase Storage
@@ -13,8 +38,16 @@ export type AiSource = 'prompt' | 'pdf' | 'pptx' | 'docx' | 'image';
  * 'awaiting_approval' = phase 1 (AI Lecture Planner) produced a Lecture
  * Blueprint; generation starts only after the teacher approves it. */
 export type AiStatus = 'queued' | 'processing' | 'awaiting_approval' | 'completed' | 'failed';
-/** Only meaningful for feature:'ppt'. Drives which pipeline behavior runs. */
-export type AiPptMode = 'modernizer' | 'smart_generator' | 'hybrid' | 'teacher_enhancement';
+/** Only meaningful for feature:'ppt'. v6 has exactly two modes; the legacy
+ * v4/v5 strings remain in the enum so historical rows stay valid — every code
+ * path normalizes via ppt/modes.ts normalizePptMode(). */
+export type AiPptMode =
+  | 'generate'
+  | 'redesign'
+  | 'modernizer'
+  | 'smart_generator'
+  | 'hybrid'
+  | 'teacher_enhancement';
 
 export interface AiPipelineStageMetrics {
   llmCalls: number;
@@ -43,6 +76,10 @@ export interface IAiGeneration extends Document {
   options: Record<string, any>;
   /** Structured AI output (slide deck / paper JSON) for preview + regenerate. */
   contentJSON?: Record<string, any>;
+  /** Slides finished so far in an in-flight generation phase — lets a BullMQ
+   * retry (or a worker restart) resume where it stopped instead of
+   * regenerating every slide. Cleared when the deck completes. */
+  partialSlides?: Record<string, any>[];
   /** Public URL of the rendered artifact in Firebase Storage. */
   artifactUrl?: string;
   /** Storage path inside the bucket (kept so Delete can remove the object). */
@@ -73,6 +110,8 @@ export interface IAiGeneration extends Document {
     currentStage: string;
     /** Fine-grained progress within the current stage, e.g. "Writing slide 7 of 15". */
     stageDetail?: string;
+    /** Overall completion 0-100 (stages done / total) — for lightweight polls. */
+    progressPercentage?: number;
     stages: AiPipelineStage[];
     warnings: string[];
   };
@@ -97,9 +136,11 @@ const aiGenerationSchema = new Schema<IAiGeneration>(
       enum: ['prompt', 'pdf', 'pptx', 'docx', 'image'],
       required: true,
     },
+    // Valid values: queued | processing | awaiting_approval | completed | failed.
+    // No enum — status is set only by our own worker/controller (never user
+    // input), and a hard enum would reject a future status under version skew.
     status: {
       type: String,
-      enum: ['queued', 'processing', 'awaiting_approval', 'completed', 'failed'],
       default: 'processing',
       index: true,
     },
@@ -107,6 +148,7 @@ const aiGenerationSchema = new Schema<IAiGeneration>(
     inputPrompt: { type: String },
     options: { type: Schema.Types.Mixed, default: {} },
     contentJSON: { type: Schema.Types.Mixed },
+    partialSlides: { type: Schema.Types.Mixed },
     artifactUrl: { type: String },
     storagePath: { type: String },
     pdfArtifactUrl: { type: String },
@@ -115,9 +157,11 @@ const aiGenerationSchema = new Schema<IAiGeneration>(
     mimeType: { type: String },
     usedVision: { type: Boolean, default: false },
     error: { type: String },
+    // No enum on purpose — a normalizing setter guarantees a canonical value,
+    // so a save is never rejected for a mode string (see normalizeModeValue).
     mode: {
       type: String,
-      enum: ['modernizer', 'smart_generator', 'hybrid', 'teacher_enhancement'],
+      set: normalizeModeValue,
     },
     knowledgeGraphId: { type: Schema.Types.ObjectId, ref: 'TeachingKnowledgeGraph' },
     knowledgeGraphReused: { type: Boolean, default: false },
@@ -126,6 +170,7 @@ const aiGenerationSchema = new Schema<IAiGeneration>(
     pipeline: {
       currentStage: { type: String },
       stageDetail: { type: String },
+      progressPercentage: { type: Number },
       stages: [
         {
           _id: false,

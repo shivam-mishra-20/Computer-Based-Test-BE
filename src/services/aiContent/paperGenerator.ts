@@ -115,6 +115,9 @@ function buildPrompt(opts: PaperOptions, sourceText?: string): string {
   lines.push(`- Language: ${opts.language || 'English'}.`);
   lines.push(`- Provide a concise "explanation" (the answer / 1-2 line solution) for every question — do not pad it.`);
   lines.push(`- Use LaTeX delimited by $...$ for any mathematical notation.`);
+  lines.push(
+    `- Fill-in-the-blank rules: write the blank as plain ______ OUTSIDE math (e.g. "The value of $\\cos 30^\\circ$ is ______."). If a blank must sit inside a formula, use \\rule{1.2cm}{0.4pt} in its place — NEVER underscores inside $...$, NEVER underscores inside \\text{}, and NEVER a \\frac with a missing argument.`,
+  );
   lines.push(`- Output ONLY the JSON object. No markdown, no commentary, no trailing text.`);
   lines.push('');
   if (sourceText && sourceText.trim()) {

@@ -62,6 +62,9 @@ export interface PptOptions {
   includeSummary?: boolean;
   /** Saved BlueprintTemplate to use as the lecture-plan skeleton (phase 1). */
   blueprintTemplateId?: string;
+  /** Teacher theme customization (colors/fonts/sizes/align/watermark) —
+   * whitelist-merged over the selected theme by resolveTheme(). */
+  themeOverrides?: Record<string, any>;
 }
 
 // ── Question paper ──────────────────────────────────────────────────────────

@@ -84,8 +84,17 @@ function extractBalancedJson(text: string): string | null {
  * \uXXXX unicode escapes, \" and \/ are left intact.
  */
 export function fixLatexBackslashes(s: string): string {
-  return s.replace(/(?<!\\)\\(u[0-9a-fA-F]{4}|[a-zA-Z])/g, (m, g) =>
-    /^u[0-9a-fA-F]{4}$/.test(g) ? m : '\\\\' + g
+  return (
+    s
+      .replace(/(?<!\\)\\(u[0-9a-fA-F]{4}|[a-zA-Z])/g, (m, g) =>
+        /^u[0-9a-fA-F]{4}$/.test(g) ? m : '\\\\' + g
+      )
+      // Backslash before a NON-letter that isn't a valid JSON escape start —
+      // LaTeX delimiters like \( \) \[ \] \{ \} and \% \$ etc. `\(` is an
+      // invalid JSON escape and JSON.parse rejects the whole document, which
+      // no other repair pass can recover from. (Valid escapes \" \\ \/ are
+      // excluded; letters were handled above.)
+      .replace(/(?<!\\)\\(?=[^"\\/a-zA-Z])/g, '\\\\')
   );
 }
 

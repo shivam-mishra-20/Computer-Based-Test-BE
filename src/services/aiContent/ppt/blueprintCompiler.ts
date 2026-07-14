@@ -94,7 +94,7 @@ export function compileBlueprint(
   ctx: PipelineContext,
 ): SlideBrief[] {
   const nodesById = new Map(graph.nodes.map((n) => [n.id, n]));
-  const preserveWording = ctx.mode === 'teacher_enhancement';
+  const preserveWording = ctx.mode === 'redesign';
 
   const briefs: SlideBrief[] = [
     {

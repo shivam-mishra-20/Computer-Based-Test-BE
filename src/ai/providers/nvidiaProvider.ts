@@ -46,14 +46,35 @@ function toUsage(u: any) {
  * NVIDIA withholds response headers until the whole completion is ready, and
  * Node's undici fetch aborts at its 300s headersTimeout. Streaming sends headers
  * immediately and tokens continuously, so long generations (minutes) complete.
+ *
+ * The idle watchdog is what makes a HUNG request fail fast: it aborts the
+ * stream if no token arrives for `idleMs`. Each token resets the timer, so a
+ * slow-but-progressing generation is never cut off — only a genuinely stalled
+ * connection (the cause of the multi-minute stages) is killed, letting
+ * withFallback move on immediately.
  */
-async function streamToText(stream: any): Promise<{ raw: string; usage: any }> {
+async function streamToText(
+  stream: any,
+  controller: AbortController,
+  idleMs: number,
+): Promise<{ raw: string; usage: any }> {
   let raw = '';
   let usage: any;
-  for await (const chunk of stream) {
-    const delta = chunk?.choices?.[0]?.delta?.content;
-    if (delta) raw += delta;
-    if (chunk?.usage) usage = chunk.usage;
+  let watchdog: NodeJS.Timeout | undefined;
+  const arm = () => {
+    if (watchdog) clearTimeout(watchdog);
+    watchdog = setTimeout(() => controller.abort(), idleMs);
+  };
+  try {
+    arm();
+    for await (const chunk of stream) {
+      arm(); // a token arrived — reset the idle deadline
+      const delta = chunk?.choices?.[0]?.delta?.content;
+      if (delta) raw += delta;
+      if (chunk?.usage) usage = chunk.usage;
+    }
+  } finally {
+    if (watchdog) clearTimeout(watchdog);
   }
   return { raw, usage };
 }
@@ -96,17 +117,22 @@ export class NvidiaProvider implements AIProvider {
       opts.reasoning || (aiConfig.nvidia.reasoning as 'on' | 'off');
     const finalMessages = withReasoningDirective(messages, reasoning);
 
-    const stream = await getClient().chat.completions.create({
-      model,
-      messages: finalMessages as any,
-      temperature: opts.temperature ?? aiConfig.nvidia.temperature,
-      top_p: opts.topP ?? aiConfig.nvidia.topP,
-      max_tokens: opts.maxTokens ?? aiConfig.nvidia.maxTokens,
-      stream: true,
-      stream_options: { include_usage: true },
-    } as any);
+    const controller = new AbortController();
+    const idleMs = opts.idleTimeoutMs ?? aiConfig.nvidia.idleTimeoutMs;
+    const stream = await getClient().chat.completions.create(
+      {
+        model,
+        messages: finalMessages as any,
+        temperature: opts.temperature ?? aiConfig.nvidia.temperature,
+        top_p: opts.topP ?? aiConfig.nvidia.topP,
+        max_tokens: opts.maxTokens ?? aiConfig.nvidia.maxTokens,
+        stream: true,
+        stream_options: { include_usage: true },
+      } as any,
+      { signal: controller.signal },
+    );
 
-    const { raw, usage } = await streamToText(stream);
+    const { raw, usage } = await streamToText(stream, controller, idleMs);
     return {
       text: stripReasoning(raw),
       usage: toUsage(usage),
@@ -143,17 +169,22 @@ export class NvidiaProvider implements AIProvider {
       content.push({ type: 'image_url', image_url: { url: toDataUrl(img) } });
     }
 
-    const stream = await getClient().chat.completions.create({
-      model,
-      messages: [{ role: 'user', content }] as any,
-      temperature: opts.temperature ?? 0.1,
-      top_p: opts.topP ?? aiConfig.nvidia.topP,
-      max_tokens: opts.maxTokens ?? aiConfig.nvidia.maxTokens,
-      stream: true,
-      stream_options: { include_usage: true },
-    } as any);
+    const controller = new AbortController();
+    const idleMs = opts.idleTimeoutMs ?? aiConfig.nvidia.idleTimeoutMs;
+    const stream = await getClient().chat.completions.create(
+      {
+        model,
+        messages: [{ role: 'user', content }] as any,
+        temperature: opts.temperature ?? 0.1,
+        top_p: opts.topP ?? aiConfig.nvidia.topP,
+        max_tokens: opts.maxTokens ?? aiConfig.nvidia.maxTokens,
+        stream: true,
+        stream_options: { include_usage: true },
+      } as any,
+      { signal: controller.signal },
+    );
 
-    const { raw, usage } = await streamToText(stream);
+    const { raw, usage } = await streamToText(stream, controller, idleMs);
     return {
       text: stripReasoning(raw),
       usage: toUsage(usage),

@@ -31,6 +31,13 @@ export interface ChatOptions {
   model?: string;
   /** Short feature label used in structured logs (e.g. 'generate', 'classify'). */
   label?: string;
+  /**
+   * Idle timeout (ms): abort the request if the provider sends NO token for
+   * this long. A stalled/hung request fails fast so the pipeline can fall back
+   * or retry, while a genuinely slow-but-progressing generation (tokens still
+   * arriving) is never cut off. Defaults per task via config.idleTimeoutMs.
+   */
+  idleTimeoutMs?: number;
 }
 
 export interface Usage {

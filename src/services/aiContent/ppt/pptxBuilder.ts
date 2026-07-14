@@ -49,7 +49,10 @@ const LATEX_SYMBOL_MAP: [RegExp, string][] = [
 export function latexToUnicode(s: string): string {
   let out = String(s ?? '')
     .replace(/\$\$([\s\S]*?)\$\$/g, '$1')
-    .replace(/\$([^$]+?)\$/g, '$1');
+    .replace(/\$([^$]+?)\$/g, '$1')
+    // \( \) / \[ \] delimiters (models emit these despite the $-only rule;
+    // legacy stored slides may carry them too).
+    .replace(/\\[()[\]]/g, '');
   for (const [pattern, replacement] of LATEX_SYMBOL_MAP) {
     out = out.replace(pattern, replacement);
   }
@@ -77,6 +80,7 @@ function addHeading(slide: any, text: string, theme: ThemeJSON, glyph?: string):
     x: CONTENT_X, y: HEADING_Y, w: CONTENT_W, h: HEADING_H,
     fontSize: theme.typography.headingSizePt, bold: true,
     color: theme.colors.accentPrimary, fontFace: theme.typography.headingFont,
+    align: theme.align || 'left',
   });
 }
 
@@ -298,6 +302,13 @@ export const pptxBuilder: PptRenderer = {
       const slide = pptx.addSlide({ masterName: 'MASTER' });
       slide.background = { color: theme.colors.bg };
       renderSlideByLayout(slide, s, theme);
+      if (theme.watermarkText) {
+        slide.addText(theme.watermarkText, {
+          x: SLIDE_W - 3.4, y: 7.05, w: 3.2, h: 0.35,
+          fontSize: 9, color: theme.colors.muted, align: 'right',
+          fontFace: theme.typography.bodyFont, transparency: 40,
+        });
+      }
       if (s.speakerNotes) slide.addNotes(latexToUnicode(s.speakerNotes));
     }
 

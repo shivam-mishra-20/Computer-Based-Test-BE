@@ -22,7 +22,9 @@ const VALID_INTENTS: ResolvedIntent['intent'][] = ['teach', 'revise', 'assess', 
 export function clampSlideCount(raw: unknown): number {
   const n = Number(raw);
   if (!Number.isFinite(n) || n <= 0) return 10;
-  return Math.min(Math.max(Math.round(n), 3), 30);
+  // Ceiling matches BLUEPRINT_LIMITS.maxTotalSlides — redesign mode mirrors
+  // the uploaded deck's page count, which can be far beyond a fresh lecture.
+  return Math.min(Math.max(Math.round(n), 3), 160);
 }
 
 promptRegistry.register({

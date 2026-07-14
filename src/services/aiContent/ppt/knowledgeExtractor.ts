@@ -16,7 +16,7 @@
  * Pedagogical Flow Planner stage (Phase 3), not extraction.
  */
 import crypto from 'crypto';
-import { ai, estimateCostUSD, pickModel, promptRegistry, safeParse } from '../../../ai';
+import { ai, aiConfig, estimateCostUSD, pickModel, promptRegistry, safeParse } from '../../../ai';
 import AiGeneration from '../../../models/AiGeneration';
 import TeachingKnowledgeGraphModel from '../../../models/TeachingKnowledgeGraph';
 import type { LayoutBlock } from './layoutAnalyzer';
@@ -38,13 +38,65 @@ const VALID_CONTENT_TYPES: ContentType[] = [
   'solved_example', 'mcq', 'homework', 'summary', 'table', 'note',
 ];
 const BATCH_CHAR_SIZE = 5000;
-const MAX_BATCHES = 12; // bounds worst-case cost/latency on very large source docs
+// Batch cap is config-driven (default 6): a lecture needs the relevant
+// chapter, not the whole 125-page book pushed through the model.
+const MAX_BATCHES = () => aiConfig.ppt.extractMaxBatches;
+// Extraction/synthesis/augmentation run on the planning model (fast by
+// default) — the output is teacher-reviewed in the blueprint, so speed wins.
+const planningModel = () => pickModel(aiConfig.ppt.planningModel);
 // Bumped whenever extraction/synthesis/augmentation prompt behavior changes
 // meaningfully enough that a previously-cached TeachingKnowledgeGraph should
 // no longer be served — part of the cache key (see contentHashOf), per the
 // architecture doc's §19 flagged risk ("cache key must include
 // extractionPromptVersion, not just contentHash").
-const EXTRACTION_VERSION = 'v1';
+// v2: redesign mode became deterministic page-mirroring (below) — bumping
+// invalidates cached graphs built by the old LLM-summarizing redesign path.
+const EXTRACTION_VERSION = 'v2';
+
+/**
+ * Page-mirror extraction — REDESIGN mode only, zero LLM calls. The uploaded
+ * document is the source of truth: every page becomes exactly one node
+ * carrying that page's full (noise-cleaned) text verbatim, in page order.
+ * Nothing is summarized, merged, dropped or invented — the redesign pipeline
+ * exists to rebuild the SAME presentation with better visuals, and any LLM
+ * "understanding" pass here was rewriting teachers' content.
+ */
+function buildPageMirrorNodes(layoutBlocks: LayoutBlock[]): {
+  nodes: KnowledgeNode[];
+  llmCalls: number;
+  tokensIn: number;
+  tokensOut: number;
+  costUsd: number;
+} {
+  const byPage = new Map<number, LayoutBlock[]>();
+  for (const b of layoutBlocks) {
+    if (!b.text?.trim()) continue;
+    const list = byPage.get(b.pageIndex) || [];
+    list.push(b);
+    byPage.set(b.pageIndex, list);
+  }
+  const nodes: KnowledgeNode[] = [...byPage.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([pageIndex, blocks]) => {
+      const ordered = [...blocks].sort((a, b) => ((a as any).order ?? 0) - ((b as any).order ?? 0));
+      const heading = ordered.find((b) => b.role === 'heading')?.text?.trim();
+      const firstLine = (ordered[0]?.text || '').split('\n')[0].trim();
+      const title = (heading || firstLine || `Slide ${pageIndex + 1}`).slice(0, 100);
+      return {
+        id: `page-${pageIndex}`,
+        topic: title,
+        contentType: 'explanation' as const,
+        title,
+        // Full page text, block order preserved — nodeToGroundingText renders
+        // explanations verbatim, so the slide generator sees everything.
+        explanations: [ordered.map((b) => b.text.trim()).join('\n\n')],
+        provenance: [{ sourceType: 'pdf_page' as const, pageIndex }],
+        confidence: 1,
+        keep: true,
+      };
+    });
+  return { nodes, llmCalls: 0, tokensIn: 0, tokensOut: 0, costUsd: 0 };
+}
 
 const EXTRACTION_SYSTEM = `You are a precise educational content EXTRACTOR.
 You extract structured knowledge units from the exact source content given to you.
@@ -52,7 +104,9 @@ You NEVER invent, add, embellish, or infer facts, examples, or questions that ar
 If the source doesn't contain something (e.g. no MCQs), simply omit that field — do not fabricate it.
 You ALWAYS respond with a single valid JSON object and nothing else.`;
 
-const SYNTHESIS_SYSTEM = `You are an expert teacher creating structured knowledge units for a classroom lecture, strictly within the given syllabus scope.
+const SYNTHESIS_SYSTEM = `You are an experienced teacher creating structured knowledge units for a full classroom lecture, strictly within the given syllabus scope.
+You EXPAND, never summarize: rich step-by-step explanations, multiple worked examples, varied practice questions, real-life applications, interesting facts, and memory tips — the kind of depth a great teacher brings to class.
+You never repeat the same point twice in different words.
 You ALWAYS respond with a single valid JSON object and nothing else.`;
 
 const AUGMENT_SYSTEM = `You are an expert teacher adding a small amount of NEW supplementary content to an already-extracted lecture, per a specific instruction from the teacher.
@@ -127,7 +181,8 @@ promptRegistry.register({
         `Generate structured educational knowledge units for a lecture. Return EXACTLY this JSON schema:`,
         UNIT_SCHEMA,
         '',
-        `Generate a coherent, complete set of units: objectives, definitions, explanations, formulae (if relevant), examples, solved examples, MCQs, a summary, and homework — enough content for roughly ${Math.min(Math.max(Number(params.opts.numSlides) || 8, 3), 30)} slides.`,
+        `Generate a coherent, COMPREHENSIVE set of units: objectives, definitions, step-by-step explanations, formulae (if relevant), multiple examples, solved examples, varied practice questions, real-life applications, interesting facts/memory tips (as "note" units), a summary, and homework.`,
+        `Target volume: at least ${Math.min(Math.max(Math.round((Number(params.opts.numSlides) || 10) * 1.5), 8), 45)} distinct units — enough rich material to fill ${Math.min(Math.max(Number(params.opts.numSlides) || 10, 3), 40)} slides WITHOUT stretching thin content. Split large topics into multiple focused sub-topic units rather than one shallow unit.`,
         `STRICT SYLLABUS COMPLIANCE: stay within the syllabus of the given class/subject/chapter; do not include out-of-syllabus, higher-class, or advanced-exam-level content; calibrate difficulty to the class level.`,
         params.opts.subject ? `Subject: ${params.opts.subject}` : '',
         params.opts.className ? `Class/Grade: ${params.opts.className}` : '',
@@ -296,7 +351,7 @@ async function extractFromLayoutBlocks(
   opts: PptOptions,
 ): Promise<{ nodes: KnowledgeNode[]; tokensIn: number; tokensOut: number; costUsd: number; llmCalls: number }> {
   const fullText = layoutBlocks.map((b) => b.text).join('\n\n');
-  const batches = chunkText(fullText, BATCH_CHAR_SIZE, MAX_BATCHES);
+  const batches = chunkText(fullText, BATCH_CHAR_SIZE, MAX_BATCHES());
   const prompt = promptRegistry.get<any>('ppt.knowledgeExtract');
 
   const nodes: KnowledgeNode[] = [];
@@ -308,7 +363,7 @@ async function extractFromLayoutBlocks(
   for (let i = 0; i < batches.length; i++) {
     const res = await ai.chat(
       prompt.render({ batchText: batches[i], batchIndex: i, totalBatches: batches.length, runningTopics, opts }),
-      { label: `${prompt.id}@${prompt.version}`, model: pickModel(prompt.task), json: true, maxTokens: 8192 },
+      { label: `${prompt.id}@${prompt.version}`, model: planningModel(), json: true, maxTokens: 8192 },
     );
     llmCalls++;
     tokensIn += res.usage.promptTokens;
@@ -336,7 +391,7 @@ async function synthesizeFromPrompt(
   const prompt = promptRegistry.get<{ opts: PptOptions }>('ppt.knowledgeSynthesize');
   const res = await ai.chat(prompt.render({ opts }), {
     label: `${prompt.id}@${prompt.version}`,
-    model: pickModel(prompt.task),
+    model: planningModel(),
     json: true,
     maxTokens: 8192,
   });
@@ -368,7 +423,7 @@ async function augmentFromInstruction(
   const prompt = promptRegistry.get<{ existingTopics: string[]; opts: PptOptions }>('ppt.knowledgeAugment');
   const res = await ai.chat(prompt.render({ existingTopics, opts }), {
     label: `${prompt.id}@${prompt.version}`,
-    model: pickModel(prompt.task),
+    model: planningModel(),
     json: true,
     maxTokens: 4096,
   });
@@ -410,12 +465,20 @@ export const knowledgeExtractor: KnowledgeExtractor = {
       return { output: cached.graph as TeachingKnowledgeGraph, metrics: emptyMetrics(), warnings: [] };
     }
 
+    // Redesign = faithful page-mirror (deterministic, no LLM): the uploaded
+    // file's pages ARE the content plan. Generate mode keeps real extraction.
     const result = hasSource
-      ? await extractFromLayoutBlocks(layoutBlocks, input.options)
+      ? ctx.mode === 'redesign'
+        ? buildPageMirrorNodes(layoutBlocks)
+        : await extractFromLayoutBlocks(layoutBlocks, input.options)
       : await synthesizeFromPrompt(input.options);
 
     if (!result.nodes.length) {
-      throw new Error('The model did not return any knowledge units. Try regenerating.');
+      throw new Error(
+        ctx.mode === 'redesign' && hasSource
+          ? 'No readable content was found in the uploaded file. If it is a scanned document, make sure the pages are clear.'
+          : 'The model did not return any knowledge units. Try regenerating.',
+      );
     }
 
     // Mode 3 (Hybrid): a file was extracted AND the teacher gave free-text
@@ -426,7 +489,7 @@ export const knowledgeExtractor: KnowledgeExtractor = {
     // Skipped for other modes and when there's no instruction text to act on
     // (Mode 2/prompt-only already generates everything via synthesis above).
     let augmented: Awaited<ReturnType<typeof augmentFromInstruction>> | null = null;
-    if (hasSource && ctx.mode === 'hybrid' && input.options.prompt?.trim()) {
+    if (hasSource && ctx.mode === 'generate' && input.options.prompt?.trim()) {
       augmented = await augmentFromInstruction(result.nodes, input.options);
     }
     const allNodes = augmented?.nodes.length ? [...result.nodes, ...augmented.nodes] : result.nodes;

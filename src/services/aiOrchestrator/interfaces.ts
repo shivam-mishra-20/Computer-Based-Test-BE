@@ -30,7 +30,10 @@ export function emptyMetrics(): StageResult<never>['metrics'] {
   return { llmCalls: 0, tokensIn: 0, tokensOut: 0, costUsd: 0, retries: 0 };
 }
 
-export type PptMode = 'modernizer' | 'smart_generator' | 'hybrid' | 'teacher_enhancement';
+/** v6: exactly two modes. Legacy v4/v5 strings (smart_generator/hybrid →
+ * 'generate'; modernizer/teacher_enhancement → 'redesign') are normalized at
+ * every entry point via ppt/modes.ts normalizePptMode(). */
+export type PptMode = 'generate' | 'redesign';
 
 export interface PipelineContext {
   generationId: string;
@@ -332,6 +335,10 @@ export interface ThemeJSON {
     muted: string;
   };
   typography: { headingFont: string; bodyFont: string; headingSizePt: number; bodySizePt: number };
+  /** Text alignment for headings/bullets (teacher customization). */
+  align?: 'left' | 'center';
+  /** Faint corner watermark text on every slide (teacher customization). */
+  watermarkText?: string;
   cardStyles: Record<
     'definition' | 'formula' | 'example' | 'mcq' | 'summary' | 'question',
     { fill: string; border: string; iconId?: string }

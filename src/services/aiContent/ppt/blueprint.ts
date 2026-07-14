@@ -78,9 +78,13 @@ export interface LectureBlueprint {
 // ── Limits (enforced by coerceBlueprint) ────────────────────────────────────
 
 export const BLUEPRINT_LIMITS = {
-  maxSections: 24,
+  // Redesign mode mirrors the uploaded deck 1:1 (a 92-slide PDF → 92 slides,
+  // one 1-slide section per page), so BOTH caps must fit real-world decks —
+  // maxSections must be ≥ maxTotalSlides or coercion trims mirrored pages.
+  // The app form still limits generate-mode requests to 40; these are ceilings.
+  maxSections: 160,
   maxSlidesPerSection: 10,
-  maxTotalSlides: 40, // incl. title slide
+  maxTotalSlides: 160, // incl. title slide
   minTotalSlides: 3,
   maxQuestionCount: 20,
   maxExampleCount: 5,
@@ -253,6 +257,92 @@ export function coerceBlueprint(raw: any): LectureBlueprint {
     sections: sections.map((s) => ({ ...s, estimatedMins: estimateSectionMins(s) })),
   };
   return bp;
+}
+
+// ── Exact slide-count fitting ────────────────────────────────────────────────
+
+/** Expansion sections appended (cycling) when a plan is short of the target —
+ * the "expand like an experienced teacher" inventory: practice, activities,
+ * real-life applications, revision, interesting facts & memory tips. */
+const EXPANSION_SECTION_FACTORIES: (() => Omit<BlueprintSection, 'id'>)[] = [
+  () => ({ kind: 'practice', title: 'Practice Questions', slideCount: 1, questionTypes: ['MCQ'], difficulty: 'mixed', questionCount: 4 }),
+  () => ({ kind: 'concept', title: 'Real-Life Applications', slideCount: 1, explanationDepth: 'standard', exampleCount: 2 }),
+  () => ({ kind: 'activity', title: 'Classroom Activity', slideCount: 1, activityDescription: 'A short hands-on activity to reinforce the concepts taught so far.' }),
+  () => ({ kind: 'revision', title: 'Rapid Revision', slideCount: 1, questionTypes: ['MCQ', 'True/False'], difficulty: 'mixed', questionCount: 4 }),
+  () => ({ kind: 'concept', title: 'Interesting Facts & Memory Tips', slideCount: 1, explanationDepth: 'brief', exampleCount: 1 }),
+];
+
+/**
+ * Force a blueprint proposal to sum to EXACTLY `targetTotal` slides (incl.
+ * the title slide). The requested slide count is mandatory — a teacher asking
+ * for 25 slides gets a 25-slide plan to review, never 3.
+ *
+ *   Short → first widen concept sections (round-robin, +1 up to the per-
+ *   section cap), then append expansion sections (practice / applications /
+ *   activity / revision / facts, cycling) until the target is met.
+ *   Long  → shrink the largest sections down (never below 1), then drop
+ *   trailing expansion-style sections as a last resort.
+ *
+ * Runs on the PROPOSAL only — the teacher can still edit the plan to any
+ * size before approving; approval takes their word as final.
+ */
+export function fitBlueprintToTarget(bp: LectureBlueprint, targetTotal: number): LectureBlueprint {
+  const target = Math.min(
+    Math.max(Math.round(targetTotal), BLUEPRINT_LIMITS.minTotalSlides),
+    BLUEPRINT_LIMITS.maxTotalSlides,
+  );
+  const sections = bp.sections.map((s) => ({ ...s }));
+  const total = () => 1 + sections.reduce((s, x) => s + x.slideCount, 0);
+
+  // Grow: widen concept sections first (they carry the teaching load)…
+  let guard = 0;
+  while (total() < target && guard++ < 200) {
+    const growable = sections.filter(
+      (s) => s.kind === 'concept' && s.slideCount < BLUEPRINT_LIMITS.maxSlidesPerSection,
+    );
+    if (!growable.length) break;
+    // Widen the currently-thinnest concept section for even coverage.
+    growable.sort((a, b) => a.slideCount - b.slideCount)[0].slideCount += 1;
+    // Concept sections shouldn't balloon past ~40% of the deck — leave room
+    // for the expansion inventory below.
+    const conceptShare = sections.filter((s) => s.kind === 'concept').reduce((s, x) => s + x.slideCount, 0);
+    if (conceptShare > Math.ceil(target * 0.5)) break;
+  }
+  // …then append expansion sections, inserted BEFORE summary/homework so the
+  // deck still ends the way a lecture ends. Stop at the section cap — anything
+  // appended past it would just be trimmed away by coerceBlueprint below.
+  let factoryIdx = 0;
+  guard = 0;
+  while (total() < target && sections.length < BLUEPRINT_LIMITS.maxSections && guard++ < 200) {
+    const section = { id: newSectionId(), ...EXPANSION_SECTION_FACTORIES[factoryIdx % EXPANSION_SECTION_FACTORIES.length]() };
+    factoryIdx++;
+    const tailIdx = sections.findIndex((s) => s.kind === 'summary' || s.kind === 'homework');
+    if (tailIdx >= 0) sections.splice(tailIdx, 0, section);
+    else sections.push(section);
+  }
+  // …and if the section cap stopped expansion (large redesigns: a 92-page
+  // deck condensed into ≤60 sections), widen ANY section thinnest-first —
+  // capacity is maxSections × maxSlidesPerSection, far above maxTotalSlides.
+  guard = 0;
+  while (total() < target && guard++ < 800) {
+    const widenable = sections.filter((s) => s.slideCount < BLUEPRINT_LIMITS.maxSlidesPerSection);
+    if (!widenable.length) break;
+    widenable.sort((a, b) => a.slideCount - b.slideCount)[0].slideCount += 1;
+  }
+
+  // Shrink: reduce the fattest sections one slide at a time…
+  guard = 0;
+  while (total() > target && guard++ < 400) {
+    const shrinkable = sections.filter((s) => s.slideCount > 1);
+    if (!shrinkable.length) break;
+    shrinkable.sort((a, b) => b.slideCount - a.slideCount)[0].slideCount -= 1;
+  }
+  // …then drop whole sections from the tail (keeping at least one).
+  while (total() > target && sections.length > 1) {
+    sections.pop();
+  }
+
+  return coerceBlueprint({ ...bp, sections });
 }
 
 /** Which section kind a knowledge node's content type naturally belongs to —

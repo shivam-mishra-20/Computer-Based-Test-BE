@@ -40,38 +40,64 @@ function buildFileName(parts: (string | undefined)[], label: string): string {
   return cleaned.join('_') || `${label}_${datePart()}`;
 }
 
+/** The expensive half of question-paper generation (document extraction +
+ * LLM question generation) with NO PDF rendering — callers checkpoint the
+ * returned paper JSON to Mongo BEFORE rendering, so a Chromium/render failure
+ * at the last step never throws away minutes of successful AI output. */
+export interface PaperContentResult {
+  paper: Record<string, any>;
+  title: string;
+  usedVision: boolean;
+  fileName: string; // without extension
+}
+
+export async function generatePaperContent(
+  opts: PaperOptions,
+  file?: UploadFile,
+  onProgress?: (detail: string) => void,
+): Promise<PaperContentResult> {
+  let sourceText: string | undefined;
+  let usedVision = false;
+  if (file) {
+    onProgress?.('Reading your document…');
+    const ex = await extractFromUpload(file);
+    sourceText = ex.text;
+    usedVision = ex.usedVision;
+  }
+  onProgress?.('Generating questions… this is the longest step');
+  const paper = await generatePaperJSON(opts, sourceText);
+  return {
+    paper: paper as any,
+    title: paper.examTitle,
+    usedVision,
+    fileName: buildFileName([opts.subject, opts.className, opts.chapter], 'QuestionPaper'),
+  };
+}
+
 export const aiContentService = {
   /** Read an uploaded document → plain text (Vision model for images/scans). */
   analyzeDocument(file: UploadFile) {
     return extractFromUpload(file);
   },
 
+  generatePaperContent,
+
   async generateQuestionPaper(
     opts: PaperOptions,
     file?: UploadFile,
   ): Promise<GenerationResult> {
-    let sourceText: string | undefined;
-    let usedVision = false;
-    if (file) {
-      const ex = await extractFromUpload(file);
-      sourceText = ex.text;
-      usedVision = ex.usedVision;
-    }
-    const paper = await generatePaperJSON(opts, sourceText);
+    const content = await generatePaperContent(opts, file);
+    const paper = content.paper as any;
     const buffer = await renderPaperPdf(paper);
-    const fileName = buildFileName(
-      [opts.subject, opts.className, opts.chapter],
-      'QuestionPaper',
-    );
     return {
       feature: 'question_paper',
-      title: paper.examTitle,
-      contentJSON: paper as any,
+      title: content.title,
+      contentJSON: paper,
       previewHtml: buildPaperPreviewHtml(paper),
-      usedVision,
+      usedVision: content.usedVision,
       artifact: {
         buffer,
-        fileName: `${fileName}.pdf`,
+        fileName: `${content.fileName}.pdf`,
         mimeType: 'application/pdf',
         ext: 'pdf',
       },

@@ -129,7 +129,11 @@ export const ai = {
     return res.text;
   },
 
-  /** Chat whose text is parsed into JSON of type T (with fallback + repair). */
+  /** Chat whose text is parsed into JSON of type T (with fallback + repair).
+   * If every repair pass in safeParse fails (e.g. an unescaped quote inside a
+   * string — unfixable mechanically), ONE corrective retry shows the model its
+   * own broken output and asks for strictly valid JSON. Without this, a single
+   * bad sample kills an entire multi-minute generation. */
   async chatJSON<T = any>(
     messages: ChatMessage[],
     opts: ChatOptions = {},
@@ -138,10 +142,33 @@ export const ai = {
       (p) => p.chat(messages, { ...opts, json: true }),
       opts.label,
     );
-    const parsed = safeParse<T>(res.text);
+    let parsed = safeParse<T>(res.text);
+    if (parsed !== undefined) return parsed;
+
+    console.warn(
+      `[ai] chatJSON parse failed (label=${opts.label || '-'}, provider=${res.provider}) — running one corrective retry`,
+    );
+    const fixMessages: ChatMessage[] = [
+      ...messages,
+      { role: 'assistant', content: res.text.slice(0, 12000) },
+      {
+        role: 'user',
+        content:
+          'Your previous reply was NOT valid JSON and could not be parsed. ' +
+          'Re-send the SAME content as one complete, strictly valid JSON document. ' +
+          'Rules: no markdown fences, no commentary before or after the JSON; ' +
+          'escape every backslash inside strings as \\\\ (e.g. "\\\\frac"); ' +
+          'escape double quotes inside strings as \\"; no trailing commas.',
+      },
+    ];
+    const retry = await run(
+      (p) => p.chat(fixMessages, { ...opts, json: true }),
+      `${opts.label || 'chatJSON'}:jsonfix`,
+    );
+    parsed = safeParse<T>(retry.text);
     if (parsed === undefined) {
       throw new Error(
-        `AI returned unparseable JSON (${res.provider}): ${res.text.slice(0, 200)}`,
+        `AI returned unparseable JSON (${retry.provider}): ${retry.text.slice(0, 200)}`,
       );
     }
     return parsed;

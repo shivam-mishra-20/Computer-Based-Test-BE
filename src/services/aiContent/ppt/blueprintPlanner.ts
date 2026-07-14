@@ -6,18 +6,18 @@
  *   1. TEMPLATE (options.blueprintTemplateId): the saved template's section
  *      structure is reused as-is; concept-section topics are filled from the
  *      extracted content in order. No LLM call.
- *   2. GENERATIVE modes (smart_generator / hybrid): one generation-model call
+ *   2. GENERATE mode: one generation-model call
  *      plans the lecture the way a teacher would — concept → practice on it →
  *      next concept → quiz → revision → homework — grounded on the topics the
  *      knowledge graph actually contains. Deterministic fallback on failure.
- *   3. PRESERVATION modes (modernizer / teacher_enhancement): fully
+ *   3. REDESIGN mode: fully
  *      deterministic derivation in source order (their whole promise is that
  *      AI never re-decides the teacher's flow) — the teacher can still edit.
  *
  * The proposal is ALWAYS passed through coerceBlueprint before leaving this
  * stage, so downstream code (and the client) only ever sees a valid plan.
  */
-import { ai, estimateCostUSD, pickModel, promptRegistry, safeParse } from '../../../ai';
+import { ai, aiConfig, estimateCostUSD, pickModel, promptRegistry, safeParse } from '../../../ai';
 import BlueprintTemplate from '../../../models/BlueprintTemplate';
 import { emptyMetrics } from '../../aiOrchestrator/interfaces';
 import type {
@@ -29,7 +29,9 @@ import type {
   TeachingKnowledgeGraph,
 } from '../../aiOrchestrator/interfaces';
 import {
+  BLUEPRINT_LIMITS,
   coerceBlueprint,
+  fitBlueprintToTarget,
   newSectionId,
   sectionKindOf,
   type BlueprintSection,
@@ -250,7 +252,9 @@ async function aiPlanBlueprint(
   const template = promptRegistry.get<any>('ppt.blueprintPlan');
   const res = await ai.chat(
     template.render({ topics, intent, extraInstruction: ctx.options.prompt }),
-    { label: `${template.id}@${template.version}`, model: pickModel(template.task), json: true, maxTokens: 4096 },
+    // Outline uses the fast planning model by default — it's structure, not
+    // final prose, and the teacher reviews/edits it in the blueprint editor.
+    { label: `${template.id}@${template.version}`, model: pickModel(aiConfig.ppt.planningModel), json: true, maxTokens: 4096 },
   );
   const parsed = safeParse<{ sections?: any[] }>(res.text);
   const rawSections = Array.isArray(parsed?.sections) ? parsed!.sections! : [];
@@ -347,6 +351,10 @@ export async function planBlueprint(
   chunks: KnowledgeChunk[],
   intent: ResolvedIntent,
   ctx: PipelineContext,
+  /** Page count of the uploaded source document, when there is one. Redesign
+   * mode with no explicit slide count mirrors this 1:1 — a 92-page deck must
+   * come back as 92 slides, not a 40-slide summary. */
+  sourcePageCount?: number,
 ): Promise<StageResult<LectureBlueprint>> {
   // 1. Saved template wins — the teacher explicitly chose a structure.
   const templateId = (ctx.options as any).blueprintTemplateId;
@@ -354,6 +362,7 @@ export async function planBlueprint(
     try {
       const tpl = await BlueprintTemplate.findOne({ _id: templateId, ownerId: ctx.ownerId }).lean();
       if (tpl) {
+        // A template's own structure defines the size — do NOT refit it.
         return {
           output: applyTemplate(tpl.blueprint, graph, chunks, intent),
           metrics: emptyMetrics(),
@@ -366,24 +375,86 @@ export async function planBlueprint(
   }
 
   // 2. Generative modes: real AI lecture planning, deterministic fallback.
-  if (ctx.mode === 'smart_generator' || ctx.mode === 'hybrid') {
+  // The requested slide count is MANDATORY: every proposal is fitted to sum
+  // exactly to it (short plans get expansion sections — practice, real-life
+  // applications, activities, revision, facts; long plans shrink). The
+  // teacher can still resize while editing; approval takes their word.
+  //
+  // Redesign with NO explicit count mirrors the uploaded document: the target
+  // becomes its page count (the point of redesign is recreating the deck,
+  // not shortening it). An explicit numSlides from the form still wins.
+  const requestedSlides = Number((ctx.options as any).numSlides);
+  const target =
+    ctx.mode === 'redesign' && !(Number.isFinite(requestedSlides) && requestedSlides > 0) && sourcePageCount && sourcePageCount > 0
+      ? Math.min(Math.max(Math.round(sourcePageCount), BLUEPRINT_LIMITS.minTotalSlides), BLUEPRINT_LIMITS.maxTotalSlides)
+      : intent.targetSlideCount;
+  const fit = (bp: LectureBlueprint) => fitBlueprintToTarget(bp, target);
+
+  if (ctx.mode === 'generate') {
     try {
       const planned = await aiPlanBlueprint(graph, chunks, intent, ctx);
-      if (planned) return { output: planned.blueprint, metrics: planned.metrics, warnings: [] };
+      if (planned) return { output: fit(planned.blueprint), metrics: planned.metrics, warnings: [] };
     } catch (err: any) {
       return {
-        output: deriveBlueprintFromContent(graph, chunks, intent),
+        output: fit(deriveBlueprintFromContent(graph, chunks, intent)),
         metrics: emptyMetrics(),
         warnings: [`AI lecture planning fell back to a content-derived plan: ${err?.message || 'unknown error'}`],
       };
     }
     return {
-      output: deriveBlueprintFromContent(graph, chunks, intent),
+      output: fit(deriveBlueprintFromContent(graph, chunks, intent)),
       metrics: emptyMetrics(),
       warnings: ['AI lecture planning returned nothing usable — proposed a content-derived plan instead.'],
     };
   }
 
-  // 3. Preservation modes: content order IS the plan.
-  return { output: deriveBlueprintFromContent(graph, chunks, intent), metrics: emptyMetrics(), warnings: [] };
+  // 3. Redesign mode: the uploaded document IS the plan — one section per
+  // source page, in page order (page-mirror nodes from knowledgeExtractor).
+  // NOTHING is invented: no practice/revision/tips/expansion sections, no
+  // re-fitting. The only reshaping allowed is an EXPLICIT numSlides from the
+  // teacher, which re-fits the mirrored plan to their requested count.
+  const pageNodes = graph.nodes.filter((n) => n.id.startsWith('page-'));
+  if (pageNodes.length) {
+    // A short first page is the deck's own title page — fold it into the
+    // title slide so an N-page deck comes back as EXACTLY N slides. A
+    // content-heavy first page stays a real slide (never drop content).
+    const firstText = (pageNodes[0].explanations || []).join(' ');
+    const firstIsTitlePage = pageNodes.length > 1 && firstText.trim().length < 200;
+    const contentNodes = firstIsTitlePage ? pageNodes.slice(1) : pageNodes;
+    const title =
+      (firstIsTitlePage && (pageNodes[0].title || '').trim()) ||
+      graph.deckTitle ||
+      intent.chapter ||
+      intent.subject ||
+      'Presentation';
+
+    const mirrored = coerceBlueprint({
+      title,
+      subject: graph.subject ?? intent.subject,
+      className: graph.className ?? intent.className,
+      chapter: graph.chapter ?? intent.chapter,
+      language: graph.language ?? intent.language,
+      sections: contentNodes.map((n) => ({
+        id: newSectionId(),
+        kind: 'concept',
+        title: n.title || n.topic,
+        slideCount: 1,
+        knowledgeNodeIds: [n.id],
+      })),
+    });
+    const explicitCount = Number.isFinite(requestedSlides) && requestedSlides > 0;
+    return {
+      output: explicitCount ? fitBlueprintToTarget(mirrored, target) : mirrored,
+      metrics: emptyMetrics(),
+      warnings: [],
+    };
+  }
+
+  // Redesign without page-mirror nodes (e.g. prompt-only redesign, which has
+  // no document to mirror): fall back to the content-derived, fitted plan.
+  return {
+    output: fit(deriveBlueprintFromContent(graph, chunks, intent)),
+    metrics: emptyMetrics(),
+    warnings: [],
+  };
 }

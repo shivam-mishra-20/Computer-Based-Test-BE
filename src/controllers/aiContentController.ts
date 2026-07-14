@@ -19,14 +19,15 @@ import {
   buildDeckPreviewHtml,
   renderPaperPdf,
   buildPaperPreviewHtml,
-  type GenerationResult,
 } from '../services/aiContent';
+import { pptFeaturesEnabled, PPT_DISABLED_MESSAGE } from '../config/features';
 import { uploadArtifact, deleteArtifact, stageSourceFile } from '../services/aiContent/artifactStore';
 import { enqueuePptPipelineJob, cancelPptPipelineJob } from '../queues/pptPipelineQueue';
 import { pptxBuilder, buildSlidesPreviewHtml } from '../services/aiContent/ppt/pptxBuilder';
 import { resolveTheme } from '../services/aiContent/ppt/theme/themeRegistry';
 import { renderSlidesPdf } from '../services/aiContent/ppt/pdfExport';
 import { coerceBlueprint } from '../services/aiContent/ppt/blueprint';
+import { normalizePptMode } from '../services/aiContent/ppt/modes';
 import BlueprintTemplate from '../models/BlueprintTemplate';
 import type { AiPptMode } from '../models/AiGeneration';
 import type {
@@ -70,6 +71,7 @@ function toPptOptions(prompt: string | undefined, o: Record<string, any>): PptOp
     includeObjectives: !!(o.includeObjectives ?? o.objectives),
     includeSummary: !!(o.includeSummary ?? o.summary),
     blueprintTemplateId: typeof o.blueprintTemplateId === 'string' && o.blueprintTemplateId ? o.blueprintTemplateId : undefined,
+    themeOverrides: o.themeOverrides && typeof o.themeOverrides === 'object' ? o.themeOverrides : undefined,
   };
 }
 
@@ -126,32 +128,44 @@ async function runAndStore(params: {
   });
 
   try {
-    // Only ever reached with feature:'question_paper' — feature:'ppt' always
-    // takes the async enqueuePptGeneration path (see generate()/regenerate()).
-    const result: GenerationResult = await aiContentService.generateQuestionPaper(
+    // Only ever reached with feature:'question_paper' AND PAPER_ASYNC=off —
+    // feature:'ppt' always takes the async enqueuePptGeneration path, and
+    // papers default to enqueuePaperGeneration (see generate()/regenerate()).
+    // Split into generate → CHECKPOINT → render → upload so a Chromium/render
+    // failure at the end never throws away minutes of successful AI output.
+    const content = await aiContentService.generatePaperContent(
       toPaperOptions(prompt, options),
       file,
     );
 
-    const storagePath = `ai-content/${owner.toString()}/${doc._id.toString()}.${result.artifact.ext}`;
-    const stored = await uploadArtifact(
-      result.artifact.buffer,
-      storagePath,
-      result.artifact.mimeType,
-      { feature, createdBy: owner.toString() },
-    );
+    doc.title = content.title;
+    doc.contentJSON = content.paper as any;
+    doc.usedVision = content.usedVision;
+    doc.fileName = `${content.fileName}.pdf`;
+    await doc.save(); // checkpoint: questions survive any render/upload failure
+
+    let buffer: Buffer;
+    try {
+      buffer = await renderPaperPdf(content.paper as any);
+    } catch (renderErr: any) {
+      throw new Error(
+        `PDF export failed: ${renderErr?.message || renderErr}. Your questions are saved — use Regenerate to retry the PDF without re-generating them.`,
+      );
+    }
+
+    const storagePath = `ai-content/${owner.toString()}/${doc._id.toString()}.pdf`;
+    const stored = await uploadArtifact(buffer, storagePath, 'application/pdf', {
+      feature,
+      createdBy: owner.toString(),
+    });
 
     doc.status = 'completed';
-    doc.title = result.title;
-    doc.contentJSON = result.contentJSON;
     doc.artifactUrl = stored.url;
     doc.storagePath = stored.storagePath;
-    doc.fileName = result.artifact.fileName;
-    doc.mimeType = result.artifact.mimeType;
-    doc.usedVision = result.usedVision;
+    doc.mimeType = 'application/pdf';
     await doc.save();
 
-    return { generation: doc.toObject(), previewHtml: result.previewHtml };
+    return { generation: doc.toObject(), previewHtml: buildPaperPreviewHtml(content.paper as any) };
   } catch (err: any) {
     const message = err?.message || 'Generation failed';
     console.error(`[aiContent] ${feature} generation failed:`, err);
@@ -164,11 +178,10 @@ async function runAndStore(params: {
   }
 }
 
-const VALID_PPT_MODES: AiPptMode[] = ['modernizer', 'smart_generator', 'hybrid', 'teacher_enhancement'];
-
 function resolvePptMode(req: Request, options: Record<string, any>): AiPptMode {
-  const raw = String(req.body?.mode || options.mode || '').trim();
-  return (VALID_PPT_MODES as string[]).includes(raw) ? (raw as AiPptMode) : 'smart_generator';
+  // Accepts v6 modes AND legacy v4/v5 strings (old app builds) — everything
+  // maps onto 'generate' | 'redesign'.
+  return normalizePptMode(req.body?.mode || options.mode);
 }
 
 /**
@@ -224,6 +237,54 @@ async function enqueuePptGeneration(params: {
   return { generation: doc.toObject() };
 }
 
+/** Question papers run async by default (same queue/worker as ppt): a 5–15 min
+ * generation must not ride a single mobile XHR — networks drop, the app
+ * backgrounds, the request times out while the server keeps working. The
+ * synchronous runAndStore path is kept behind PAPER_ASYNC=off as a rollback. */
+const paperAsyncEnabled = () => (process.env.PAPER_ASYNC || 'on').toLowerCase() !== 'off';
+
+async function enqueuePaperGeneration(params: {
+  req: Request;
+  source: AiSource;
+  prompt?: string;
+  options: Record<string, any>;
+  file?: UploadFile;
+}): Promise<{ generation: any }> {
+  const { req, source, prompt, options, file } = params;
+  const owner = userId(req);
+
+  const doc = await AiGeneration.create({
+    feature: 'question_paper',
+    source,
+    status: 'queued',
+    inputPrompt: prompt,
+    options,
+    createdBy: owner,
+    pipeline: { currentStage: '', stages: [], warnings: [] },
+  });
+
+  let stagedFileRef: { storagePath: string; mimeType: string; originalName: string } | undefined;
+  if (file) {
+    const ext = (file.originalname.toLowerCase().split('.').pop() || 'bin');
+    const storagePath = `ai-content/staging/${doc._id.toString()}/source.${ext}`;
+    await stageSourceFile(file.buffer, storagePath, file.mimetype);
+    stagedFileRef = { storagePath, mimeType: file.mimetype, originalName: file.originalname };
+  }
+
+  const jobId = await enqueuePptPipelineJob({
+    generationId: doc._id.toString(),
+    ownerId: owner.toString(),
+    feature: 'question_paper',
+    mode: 'generate', // required field; unused by the paper generator
+    stagedFileRef,
+    options: toPaperOptions(prompt, options) as any,
+  });
+  doc.jobId = jobId;
+  await doc.save();
+
+  return { generation: doc.toObject() };
+}
+
 export const generate = async (req: Request, res: Response) => {
   try {
     const feature = String(req.body?.feature || '') as AiFeature;
@@ -254,13 +315,22 @@ export const generate = async (req: Request, res: Response) => {
       });
     }
 
-    // feature:'ppt' runs the async multi-stage pipeline (queued job, 202);
-    // feature:'question_paper' stays fully synchronous — unchanged contract.
+    // Both features run async (queued job, 202) — the app polls/listens for
+    // completion. Papers can be forced synchronous with PAPER_ASYNC=off.
     if (feature === 'ppt') {
+      // Feature-flagged off (see config/features.ts). Question papers below
+      // are unaffected. 503 = temporarily unavailable, not a client error.
+      if (!pptFeaturesEnabled()) {
+        return res.status(503).json({ success: false, message: PPT_DISABLED_MESSAGE });
+      }
       const out = await enqueuePptGeneration({ req, source, prompt, options, file });
       return res.status(202).json({ success: true, ...out, queued: true });
     }
 
+    if (paperAsyncEnabled()) {
+      const out = await enqueuePaperGeneration({ req, source, prompt, options, file });
+      return res.status(202).json({ success: true, ...out, queued: true });
+    }
     const out = await runAndStore({ req, feature, source, prompt, options, file });
     return res.status(201).json({ success: true, ...out });
   } catch (err: any) {
@@ -310,6 +380,9 @@ export const cancel = async (req: Request, res: Response) => {
  */
 export const approveBlueprint = async (req: Request, res: Response) => {
   try {
+    if (!pptFeaturesEnabled()) {
+      return res.status(503).json({ success: false, message: PPT_DISABLED_MESSAGE });
+    }
     const owner = userId(req);
     const doc = await AiGeneration.findOne({ _id: req.params.id, createdBy: owner });
     if (!doc) return res.status(404).json({ success: false, message: 'Not found' });
@@ -339,7 +412,7 @@ export const approveBlueprint = async (req: Request, res: Response) => {
     const jobId = await enqueuePptPipelineJob({
       generationId: doc._id.toString(),
       ownerId: owner.toString(),
-      mode: (doc.mode as AiPptMode) || 'smart_generator',
+      mode: normalizePptMode(doc.mode),
       phase: 'generation',
       options: toPptOptions(doc.inputPrompt, (doc.options as Record<string, any>) || {}),
     });
@@ -360,6 +433,9 @@ export const approveBlueprint = async (req: Request, res: Response) => {
  * template later fills topics from the new lecture's own content. */
 export const saveBlueprintTemplate = async (req: Request, res: Response) => {
   try {
+    if (!pptFeaturesEnabled()) {
+      return res.status(503).json({ success: false, message: PPT_DISABLED_MESSAGE });
+    }
     const owner = userId(req);
     let blueprint;
     try {
@@ -385,6 +461,11 @@ export const saveBlueprintTemplate = async (req: Request, res: Response) => {
 /** GET /ai/blueprint-templates */
 export const listBlueprintTemplates = async (req: Request, res: Response) => {
   try {
+    // Feature off → behave as "no templates" (the PPT UI is hidden anyway);
+    // an empty list is friendlier than an error if anything still calls this.
+    if (!pptFeaturesEnabled()) {
+      return res.json({ success: true, items: [] });
+    }
     const owner = userId(req);
     const items = await BlueprintTemplate.find({ ownerId: owner }).sort({ createdAt: -1 }).limit(50).lean();
     return res.json({ success: true, items });
@@ -397,6 +478,9 @@ export const listBlueprintTemplates = async (req: Request, res: Response) => {
 /** DELETE /ai/blueprint-templates/:id */
 export const deleteBlueprintTemplate = async (req: Request, res: Response) => {
   try {
+    if (!pptFeaturesEnabled()) {
+      return res.status(503).json({ success: false, message: PPT_DISABLED_MESSAGE });
+    }
     const owner = userId(req);
     const tpl = await BlueprintTemplate.findOneAndDelete({ _id: req.params.id, ownerId: owner });
     if (!tpl) return res.status(404).json({ success: false, message: 'Not found' });
@@ -415,7 +499,7 @@ export const listHistory = async (req: Request, res: Response) => {
     if (feature && VALID_FEATURES.includes(feature)) filter.feature = feature;
 
     const items = await AiGeneration.find(filter)
-      .select('-contentJSON -blueprint') // keep the list light; fetch full doc on demand
+      .select('-contentJSON -blueprint -partialSlides') // keep the list light; fetch full doc on demand
       .sort({ createdAt: -1 })
       .limit(50)
       .lean();
@@ -429,6 +513,20 @@ export const listHistory = async (req: Request, res: Response) => {
 export const getHistory = async (req: Request, res: Response) => {
   try {
     const owner = userId(req);
+
+    // Lightweight progress poll (?light=1): the frontend poller uses this while
+    // a generation is running — it needs only status + pipeline progress, never
+    // the (potentially large) rendered contentJSON or a rebuilt preview. The
+    // poller does ONE full (non-light) fetch once the job reaches a terminal
+    // state to get previewHtml. Default (no flag) = full response, unchanged.
+    if (req.query.light) {
+      const light = await AiGeneration.findOne({ _id: req.params.id, createdBy: owner })
+        .select('-contentJSON -partialSlides')
+        .lean();
+      if (!light) return res.status(404).json({ success: false, message: 'Not found' });
+      return res.json({ success: true, generation: light });
+    }
+
     const doc = await AiGeneration.findOne({ _id: req.params.id, createdBy: owner }).lean();
     if (!doc) return res.status(404).json({ success: false, message: 'Not found' });
 
@@ -478,6 +576,9 @@ export const deleteHistory = async (req: Request, res: Response) => {
  */
 export const exportPdf = async (req: Request, res: Response) => {
   try {
+    if (!pptFeaturesEnabled()) {
+      return res.status(503).json({ success: false, message: PPT_DISABLED_MESSAGE });
+    }
     const owner = userId(req);
     const doc = await AiGeneration.findOne({ _id: req.params.id, createdBy: owner });
     if (!doc) return res.status(404).json({ success: false, message: 'Not found' });
@@ -524,11 +625,20 @@ export const regenerate = async (req: Request, res: Response) => {
     const prev = await AiGeneration.findOne({ _id: req.params.id, createdBy: owner }).lean();
     if (!prev) return res.status(404).json({ success: false, message: 'Not found' });
 
+    // Regenerating a PPT is disabled while the feature is off; regenerating a
+    // question paper is unaffected.
+    if (prev.feature === 'ppt' && !pptFeaturesEnabled()) {
+      return res.status(503).json({ success: false, message: PPT_DISABLED_MESSAGE });
+    }
+
     const hasInputs = !!(prev.inputPrompt || (prev.options && Object.keys(prev.options).length));
 
-    // No re-runnable inputs (e.g. a file-only source we no longer hold) → just
-    // re-render the stored structured content into a fresh artifact.
-    if (!hasInputs && prev.contentJSON) {
+    // Re-render only (no LLM) when: (a) there are no re-runnable inputs, or
+    // (b) a question paper FAILED after its questions were checkpointed — the
+    // render/upload died (e.g. no Chromium), so recovery means retrying just
+    // the PDF, never re-spending minutes of LLM time on the same questions.
+    const renderFailedPaper = prev.feature === 'question_paper' && prev.status === 'failed';
+    if ((!hasInputs || renderFailedPaper) && prev.contentJSON) {
       const newDoc = await AiGeneration.create({
         feature: prev.feature,
         source: prev.source,
@@ -553,7 +663,7 @@ export const regenerate = async (req: Request, res: Response) => {
             const rendered = await pptxBuilder.render(cj.slides, theme, {
               generationId: newDoc._id.toString(),
               ownerId: owner.toString(),
-              mode: (prev.mode as any) || 'smart_generator',
+              mode: normalizePptMode(prev.mode),
               options: (prev.options as any) || {},
             });
             buffer = rendered.output.buffer;
@@ -617,7 +727,7 @@ export const regenerate = async (req: Request, res: Response) => {
         const jobId = await enqueuePptPipelineJob({
           generationId: newDoc._id.toString(),
           ownerId: owner2.toString(),
-          mode: (prev.mode as AiPptMode) || 'smart_generator',
+          mode: normalizePptMode(prev.mode),
           phase: 'generation',
           options: toPptOptions(prev.inputPrompt, (prev.options as Record<string, any>) || {}),
         });
@@ -635,6 +745,15 @@ export const regenerate = async (req: Request, res: Response) => {
       return res.status(202).json({ success: true, ...out, queued: true });
     }
 
+    if (paperAsyncEnabled()) {
+      const out = await enqueuePaperGeneration({
+        req,
+        source: 'prompt',
+        prompt: prev.inputPrompt,
+        options: (prev.options as Record<string, any>) || {},
+      });
+      return res.status(202).json({ success: true, ...out, queued: true });
+    }
     const out = await runAndStore({
       req,
       feature: prev.feature as AiFeature,

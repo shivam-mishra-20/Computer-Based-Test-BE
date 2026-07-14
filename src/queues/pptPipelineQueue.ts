@@ -13,7 +13,12 @@ import IORedis from 'ioredis';
 // Redis key namespacing) — a colon here throws at construction time, which
 // crashes the whole server on boot since this module is imported transitively
 // from app.ts, not just when a PPT generation actually runs.
-export const PPT_PIPELINE_QUEUE_NAME = 'ai-ppt-pipeline';
+//
+// AI_QUEUE_NAME env override: local dev and production share the same Redis,
+// so without distinct names a stale deployed worker steals (and fails) jobs
+// enqueued by a newer local server, and vice versa. Set a distinct value in
+// the local .env (e.g. ai-pipeline-dev); leave production on the default.
+export const PPT_PIPELINE_QUEUE_NAME = (process.env.AI_QUEUE_NAME || 'ai-ppt-pipeline').replace(/:/g, '-');
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
@@ -26,7 +31,14 @@ export const bullmqConnection = new IORedis(REDIS_URL, {
 export interface PptPipelineJobData {
   generationId: string;
   ownerId: string;
-  mode: 'modernizer' | 'smart_generator' | 'hybrid' | 'teacher_enhancement';
+  /** Which generator this job runs. Absent = 'ppt' (legacy queued jobs).
+   * 'question_paper' jobs skip the ppt pipeline entirely — the worker runs
+   * the paper generator (extract → questions → checkpoint → PDF → upload)
+   * with the same retry/parking/cancel semantics. */
+  feature?: 'ppt' | 'question_paper';
+  /** v6 modes; legacy v4/v5 strings may arrive on old queued jobs — the
+   * worker normalizes via normalizePptMode(). */
+  mode: string;
   /** 'planning' (default when absent, incl. pre-blueprint legacy jobs) runs
    * the AI Lecture Planner and stops at status 'awaiting_approval';
    * 'generation' compiles the doc's APPROVED blueprint into the deck. */

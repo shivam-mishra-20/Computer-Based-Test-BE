@@ -87,7 +87,70 @@ const LEGACY: Record<string, ThemeJSON> = {
 
 export const THEMES: Record<string, ThemeJSON> = { professional: PROFESSIONAL, ...LEGACY };
 
-export function resolveTheme(id?: string): ThemeJSON {
+const HEX_RE = /^[0-9a-fA-F]{6}$/;
+
+function cleanHex(raw: unknown): string | undefined {
+  const v = String(raw ?? '').replace(/^#/, '').trim();
+  return HEX_RE.test(v) ? v.toUpperCase() : undefined;
+}
+
+/** Teacher theme customization — every field optional, everything validated.
+ * Unknown keys are ignored; bad hex/sizes fall back to the base theme. */
+export interface ThemeOverrides {
+  backgroundColor?: string;
+  headingColor?: string;
+  bodyColor?: string;
+  accentColor?: string;
+  cardColor?: string;
+  borderColor?: string;
+  fontFamily?: string;
+  headingSizePt?: number;
+  bodySizePt?: number;
+  align?: 'left' | 'center';
+  watermarkText?: string;
+}
+
+export function applyThemeOverrides(base: ThemeJSON, overrides?: Record<string, any>): ThemeJSON {
+  if (!overrides || typeof overrides !== 'object') return base;
+  const o = overrides as ThemeOverrides;
+  const theme: ThemeJSON = JSON.parse(JSON.stringify(base));
+  theme.id = `${base.id}-custom`;
+
+  const bg = cleanHex(o.backgroundColor);
+  const heading = cleanHex(o.headingColor);
+  const body = cleanHex(o.bodyColor);
+  const accent = cleanHex(o.accentColor);
+  const card = cleanHex(o.cardColor);
+  const border = cleanHex(o.borderColor);
+
+  if (bg) theme.colors.bg = bg;
+  if (heading) theme.colors.title = heading;
+  if (body) theme.colors.body = body;
+  if (accent) theme.colors.accentPrimary = accent;
+  if (card) theme.colors.surface = card;
+  for (const key of Object.keys(theme.cardStyles) as (keyof ThemeJSON['cardStyles'])[]) {
+    if (card) theme.cardStyles[key].fill = card;
+    if (border || accent) theme.cardStyles[key].border = border || accent!;
+  }
+
+  if (typeof o.fontFamily === 'string' && o.fontFamily.trim()) {
+    const font = o.fontFamily.trim().slice(0, 40);
+    theme.typography.headingFont = font;
+    theme.typography.bodyFont = font;
+  }
+  const hSize = Number(o.headingSizePt);
+  if (Number.isFinite(hSize)) theme.typography.headingSizePt = Math.min(Math.max(Math.round(hSize), 18), 44);
+  const bSize = Number(o.bodySizePt);
+  if (Number.isFinite(bSize)) theme.typography.bodySizePt = Math.min(Math.max(Math.round(bSize), 10), 28);
+
+  if (o.align === 'left' || o.align === 'center') theme.align = o.align;
+  if (typeof o.watermarkText === 'string' && o.watermarkText.trim()) {
+    theme.watermarkText = o.watermarkText.trim().slice(0, 60);
+  }
+  return theme;
+}
+
+export function resolveTheme(id?: string, overrides?: Record<string, any>): ThemeJSON {
   const key = (id || 'professional').toLowerCase();
-  return THEMES[key] || PROFESSIONAL;
+  return applyThemeOverrides(THEMES[key] || PROFESSIONAL, overrides);
 }

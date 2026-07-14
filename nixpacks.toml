@@ -1,6 +1,15 @@
-# Nixpacks configuration
-# We install runtime libraries for canvas just in case they aren't fully covered by the Puppeteer provider.
+# Nixpacks configuration (Railway builds this image).
+#
+# chromium (nix): a real system browser for HTML→PDF export (question papers,
+# PPT PDF export) — utils/launchBrowser.ts finds it on PATH / the nix profile.
+# The Ubuntu apt "chromium" package is a snap stub that doesn't work in
+# containers, so it MUST come from nix, not aptPkgs. "..." keeps the default
+# nix package set (node etc.) — overriding without it would drop them.
+#
+# aptPkgs: runtime libraries for canvas (PDF rasterization) + fonts so
+# Chromium-rendered PDFs don't show empty boxes (Latin, Devanagari, math).
 [phases.setup]
+nixPkgs = ["...", "chromium"]
 aptPkgs = [
     "libcairo2",
     "libpango-1.0-0",
@@ -8,5 +17,9 @@ aptPkgs = [
     "libjpeg62-turbo",
     "libgif7",
     "librsvg2-2",
-    "libpixman-1-0"
+    "libpixman-1-0",
+    "fonts-liberation",
+    "fonts-noto-core",
+    "fonts-noto-devanagari",
+    "fonts-noto-color-emoji"
 ]

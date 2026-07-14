@@ -45,6 +45,7 @@ export function cleanContent(
   for (const page of doc.pages) {
     const vision = visionByPage.get(page.pageIndex);
     if (vision) {
+      let pageBlockCount = 0;
       for (const region of vision.regions) {
         if (region.label !== 'KEEP') continue;
         if (!region.verbatimText || !region.verbatimText.trim()) continue;
@@ -59,6 +60,22 @@ export function cleanContent(
             pageIndex: page.pageIndex,
             bbox: region.bbox,
             visionRegionId: region.regionId,
+          },
+        });
+        pageBlockCount++;
+      }
+      // Vision classified the page but yielded no usable text (flaky VLM or a
+      // page that's all diagrams) — fall back to the page's OCR/text layer so
+      // real content is never lost to a classification hiccup.
+      if (pageBlockCount === 0 && page.text && page.text.trim()) {
+        blocks.push({
+          pageIndex: page.pageIndex,
+          text: page.text.trim(),
+          source: 'text_layer',
+          confidence: 0.8,
+          provenance: {
+            sourceType: doc.sourceType === 'pdf' ? 'pdf_page' : 'image',
+            pageIndex: page.pageIndex,
           },
         });
       }

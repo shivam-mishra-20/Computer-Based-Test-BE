@@ -30,6 +30,9 @@ import {
   SLIDE_GENERATION_STAGE,
 } from '../services/aiContent/ppt/pipelineDefinition';
 import { coerceBlueprint, type LectureBlueprint } from '../services/aiContent/ppt/blueprint';
+import { pptFeaturesEnabled, PPT_DISABLED_MESSAGE } from '../config/features';
+import { generatePaperContent, renderPaperPdf } from '../services/aiContent';
+import { normalizePptMode } from '../services/aiContent/ppt/modes';
 import { resolveTheme } from '../services/aiContent/ppt/theme/themeRegistry';
 import type {
   GeneratedSlide,
@@ -81,6 +84,99 @@ function deleteStagedFile(stagedFileRef: PptPipelineJobData['stagedFileRef']): v
     .catch(() => {});
 }
 
+/**
+ * Question-paper job — the same generator the old synchronous path ran, now
+ * executed in the background with real progress stages and a crash-safe
+ * checkpoint: the paper JSON is saved to the doc BEFORE PDF rendering, so a
+ * Chromium/render failure (or a BullMQ retry) never re-spends the LLM — the
+ * retry (or a later Regenerate) picks up at the render step.
+ */
+async function processPaperJob(job: Job<PptPipelineJobData>, doc: any): Promise<void> {
+  const { generationId, ownerId, options, stagedFileRef } = job.data;
+
+  const STAGES = ['source_analysis', 'question_generation', 'pdf_rendering', 'uploading'] as const;
+  const STAGE_PCT: Record<(typeof STAGES)[number], number> = {
+    source_analysis: 5,
+    question_generation: 15,
+    pdf_rendering: 80,
+    uploading: 92,
+  };
+  if (!doc.pipeline) doc.pipeline = { currentStage: '', stages: [], warnings: [] } as any;
+  doc.pipeline.stages = STAGES.map((name) => ({ name, status: 'pending' }));
+
+  const setStage = async (name: (typeof STAGES)[number], status: 'running' | 'done', detail?: string) => {
+    const row = doc.pipeline.stages.find((s: any) => s.name === name);
+    if (row) {
+      row.status = status;
+      if (status === 'running') row.startedAt = new Date();
+      else row.finishedAt = new Date();
+    }
+    doc.pipeline.currentStage = name;
+    doc.pipeline.stageDetail = detail || '';
+    doc.pipeline.progressPercentage = status === 'done' && name === 'uploading' ? 100 : STAGE_PCT[name];
+    await doc.save();
+    emitProgress(ownerId, {
+      generationId,
+      status: 'processing',
+      stage: name,
+      stageStatus: status,
+      stageDetail: detail,
+      progressPercentage: doc.pipeline.progressPercentage,
+    });
+  };
+
+  // ── 1+2. Extract + generate — SKIPPED when a prior attempt already
+  // checkpointed the paper JSON (render-failure retries cost zero LLM calls).
+  let paper = (doc.contentJSON as Record<string, any>) || undefined;
+  let fileNameBase = (doc.fileName || '').replace(/\.pdf$/i, '');
+  if (paper && Array.isArray(paper.sections) && doc.title) {
+    console.log(`[paperJob][${generationId}] reusing checkpointed paper JSON — skipping generation`);
+    await setStage('source_analysis', 'done');
+    await setStage('question_generation', 'done', 'Reusing already-generated questions');
+  } else {
+    await setStage('source_analysis', 'running', stagedFileRef ? 'Reading your document…' : '');
+    const file = await loadStagedFile(stagedFileRef);
+    await setStage('source_analysis', 'done');
+
+    await setStage('question_generation', 'running', 'Generating questions… this is the longest step');
+    const content = await generatePaperContent(options as any, file);
+    paper = content.paper;
+    fileNameBase = content.fileName;
+    // ── CHECKPOINT: questions survive anything that goes wrong after this. ──
+    doc.title = content.title;
+    doc.contentJSON = paper as any;
+    doc.usedVision = content.usedVision;
+    doc.fileName = `${content.fileName}.pdf`;
+    await setStage('question_generation', 'done');
+  }
+
+  await setStage('pdf_rendering', 'running', 'Building the PDF…');
+  let buffer: Buffer;
+  try {
+    buffer = await renderPaperPdf(paper as any);
+  } catch (err: any) {
+    throw new Error(`PDF export failed: ${err?.message || err}. Your questions are saved — Regenerate retries the PDF without re-generating them.`);
+  }
+  await setStage('pdf_rendering', 'done');
+
+  await setStage('uploading', 'running', 'Saving your paper…');
+  const storagePath = `ai-content/${ownerId}/${generationId}.pdf`;
+  const stored = await uploadArtifact(buffer, storagePath, 'application/pdf', {
+    feature: 'question_paper',
+    createdBy: ownerId,
+  });
+
+  doc.status = 'completed';
+  doc.artifactUrl = stored.url;
+  doc.storagePath = stored.storagePath;
+  doc.fileName = doc.fileName || `${fileNameBase || 'QuestionPaper'}.pdf`;
+  doc.mimeType = 'application/pdf';
+  await setStage('uploading', 'done');
+
+  emitProgress(ownerId, { generationId, status: 'completed', artifactUrl: stored.url });
+  deleteStagedFile(stagedFileRef);
+}
+
 async function processJob(job: Job<PptPipelineJobData>): Promise<void> {
   const { generationId, ownerId, mode, options, stagedFileRef } = job.data;
 
@@ -102,31 +198,81 @@ async function processJob(job: Job<PptPipelineJobData>): Promise<void> {
   await doc.save();
   emitProgress(ownerId, { generationId, status: 'processing', stage: 'starting' });
 
+  // Overall % is driven by the orchestrator's stage index/total; the last
+  // stage-boundary percent is the floor for mid-stage detail ticks. For the
+  // long slide-generation stage we blend the per-slide fraction into the gap
+  // up to the NEXT stage boundary so the bar advances smoothly through it.
+  let stageFloorPct = 0;
+  let stageCeilPct = 0;
+
   // Fine-grained mid-stage progress (e.g. "Writing slide 7 of 15"): socket
   // events fire on every tick; Mongo writes are throttled so a 25-slide burst
   // doesn't hammer the shared cluster. Poll-based clients read stageDetail.
   let lastDetailPersist = 0;
   const progress = (detail: string, current?: number, total?: number) => {
-    emitProgress(ownerId, { generationId, status: 'processing', stageDetail: detail, current, total });
+    let percent: number | undefined;
+    if (current != null && total && total > 0) {
+      percent = Math.round(stageFloorPct + (stageCeilPct - stageFloorPct) * (current / total));
+    }
+    emitProgress(ownerId, { generationId, status: 'processing', stageDetail: detail, current, total, progressPercentage: percent });
     const now = Date.now();
     if (now - lastDetailPersist > 800) {
       lastDetailPersist = now;
-      AiGeneration.updateOne({ _id: generationId }, { $set: { 'pipeline.stageDetail': detail } }).catch(() => {});
+      const set: Record<string, unknown> = { 'pipeline.stageDetail': detail };
+      if (percent != null) set['pipeline.progressPercentage'] = percent;
+      AiGeneration.updateOne({ _id: generationId }, { $set: set }).catch(() => {});
     }
   };
 
   try {
-    const ctx: PipelineContext = { generationId, ownerId, mode, options: options as any, progress };
-    const onStageProgress = (stage: { name: string; status: string }) => {
+    // Question-paper jobs run their own (much simpler) generator — same
+    // queue, same retry/parking/final-failure semantics as ppt jobs below.
+    if (job.data.feature === 'question_paper') {
+      await processPaperJob(job, doc);
+      return;
+    }
+
+    // PPT feature temporarily disabled (config/features.ts): no NEW ppt jobs
+    // are enqueued (the controller 503s), but a stale ppt job may still sit in
+    // the queue from before the flag flipped. Retire it cleanly — mark the doc,
+    // free its staged file, and DON'T throw (no retry storm). Question-paper
+    // processing above is unaffected.
+    if (!pptFeaturesEnabled()) {
+      console.log(`[pptWorker] PPT features disabled — skipping ppt job ${job.id} (generation ${generationId})`);
+      doc.status = 'failed';
+      doc.error = PPT_DISABLED_MESSAGE;
+      await doc.save();
+      emitProgress(ownerId, { generationId, status: 'failed', error: PPT_DISABLED_MESSAGE });
+      deleteStagedFile(stagedFileRef);
+      return;
+    }
+
+    // Legacy queued jobs may still carry v4/v5 mode strings — normalize once here.
+    const ctx: PipelineContext = {
+      generationId,
+      ownerId,
+      mode: normalizePptMode(mode),
+      options: options as any,
+      progress,
+    };
+    const onStageProgress = (
+      stage: { name: string; status: string },
+      _ctx: PipelineContext,
+      meta: { index: number; total: number; percent: number },
+    ) => {
+      // Track the % window this stage occupies so mid-stage ticks can blend.
+      stageFloorPct = Math.round(((meta.index - 1) / meta.total) * 100);
+      stageCeilPct = Math.round((meta.index / meta.total) * 100);
       emitProgress(ownerId, {
         generationId,
         status: 'processing',
         stage: stage.name,
         stageStatus: stage.status,
+        progressPercentage: meta.percent,
       });
       // A stage transition makes the previous stage's detail line stale.
       AiGeneration.updateOne({ _id: generationId }, { $set: { 'pipeline.stageDetail': '' } }).catch(() => {});
-      job.updateProgress({ stage: stage.name, status: stage.status }).catch(() => {});
+      job.updateProgress({ stage: stage.name, status: stage.status, percent: meta.percent }).catch(() => {});
     };
 
     if (job.data.phase === 'generation') {
@@ -141,12 +287,16 @@ async function processJob(job: Job<PptPipelineJobData>): Promise<void> {
       }
       const graph = graphDoc.graph as TeachingKnowledgeGraphShape;
 
-      const definition = buildPptGenerationPipeline(blueprint, graph);
+      const definition = buildPptGenerationPipeline(
+        blueprint,
+        graph,
+        String(doc.knowledgeGraphId || generationId),
+      );
       const { outputs } = await AiOrchestratorService.run(definition, ctx, { onProgress: onStageProgress });
 
       const slides = outputs[SLIDE_GENERATION_STAGE] as GeneratedSlide[];
       const render = outputs[RENDERING_STAGE] as RenderedArtifact & { previewHtml: string };
-      const theme = resolveTheme((options as any)?.theme);
+      const theme = resolveTheme((options as any)?.theme, (options as any)?.themeOverrides);
 
       const storagePath = `ai-content/${ownerId}/${generationId}.${render.ext}`;
       const stored = await uploadArtifact(render.buffer, storagePath, render.mimeType, {

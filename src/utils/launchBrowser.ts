@@ -1,14 +1,19 @@
 /**
  * Single Chromium launch path shared by every HTML→PDF exporter (AI content
  * papers, manual paper export, temp export). Resolution order:
- *   1. @sparticuz/chromium + puppeteer-core  — serverless/Railway (Linux).
- *   2. puppeteer-core against a locally-installed Chrome/Edge — dev machines
- *      (Windows/macOS/Linux). Edge ships with Windows, so this "just works"
- *      locally without the heavy full `puppeteer` package.
+ *   1. puppeteer-core against an installed Chrome/Edge/Chromium — dev machines
+ *      (Edge ships with Windows) AND servers whose image installs chromium
+ *      (see nixpacks.toml). System binaries have all their shared libs
+ *      resolved by the OS package manager, so they're the most reliable tier.
+ *   2. @sparticuz/chromium + puppeteer-core — serverless-style fallback when
+ *      no system browser exists in the container.
  *   3. full `puppeteer` (only if it happens to be installed).
  * Override the binary explicitly with PUPPETEER_EXECUTABLE_PATH / CHROME_PATH.
+ * Every failed tier is logged with its real cause — a missing-Chromium error
+ * in production must never be a mystery again.
  */
 import fs from 'fs';
+import path from 'path';
 
 function exists(p?: string | null): p is string {
   try {
@@ -16,6 +21,31 @@ function exists(p?: string | null): p is string {
   } catch {
     return false;
   }
+}
+
+const LINUX_BROWSER_NAMES = [
+  'chromium',
+  'chromium-browser',
+  'google-chrome',
+  'google-chrome-stable',
+  'microsoft-edge',
+];
+
+/** Scan PATH for a browser binary — finds Nix-profile/Homebrew/apt installs
+ * regardless of where the distro puts them. */
+function findOnPath(): string | undefined {
+  const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  const names =
+    process.platform === 'win32'
+      ? ['chrome.exe', 'msedge.exe']
+      : LINUX_BROWSER_NAMES;
+  for (const dir of dirs) {
+    for (const name of names) {
+      const p = path.join(dir, name);
+      if (exists(p)) return p;
+    }
+  }
+  return undefined;
 }
 
 /** Locate an installed Chrome/Edge/Chromium binary for the current platform. */
@@ -46,14 +76,13 @@ function findLocalChrome(): string | undefined {
     );
   } else {
     candidates.push(
-      '/usr/bin/google-chrome',
-      '/usr/bin/google-chrome-stable',
-      '/usr/bin/chromium',
-      '/usr/bin/chromium-browser',
-      '/usr/bin/microsoft-edge',
+      ...LINUX_BROWSER_NAMES.map((n) => `/usr/bin/${n}`),
+      // Nixpacks (Railway) installs nix packages under a profile, not /usr/bin.
+      ...LINUX_BROWSER_NAMES.map((n) => `/root/.nix-profile/bin/${n}`),
+      ...LINUX_BROWSER_NAMES.map((n) => `/nix/var/nix/profiles/default/bin/${n}`),
     );
   }
-  return candidates.find(exists);
+  return candidates.find(exists) || findOnPath();
 }
 
 /**
@@ -61,7 +90,28 @@ function findLocalChrome(): string | undefined {
  * `browser.close()`. Throws a clear, actionable error if no Chromium is found.
  */
 export async function launchBrowser(): Promise<any> {
-  // 1) Serverless Chromium (Railway / Lambda).
+  const failures: string[] = [];
+
+  // 1) Installed Chrome/Edge/Chromium via puppeteer-core (dev machines AND
+  //    servers whose image ships a browser — see nixpacks.toml).
+  const localPath = findLocalChrome();
+  if (localPath) {
+    try {
+      const puppeteerCore = await import('puppeteer-core');
+      return await puppeteerCore.default.launch({
+        executablePath: localPath,
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      });
+    } catch (err: any) {
+      failures.push(`system browser (${localPath}): ${err?.message || err}`);
+      console.error(`[launchBrowser] system browser at ${localPath} failed to launch:`, err?.message || err);
+    }
+  } else {
+    failures.push('system browser: none found (checked env overrides, standard install paths, PATH)');
+  }
+
+  // 2) Serverless Chromium (@sparticuz/chromium extracts a bundled binary).
   try {
     const chromium = await import('@sparticuz/chromium');
     const puppeteerCore = await import('puppeteer-core');
@@ -77,19 +127,11 @@ export async function launchBrowser(): Promise<any> {
         headless: true,
       });
     }
-  } catch {
-    /* fall through to a local browser */
-  }
-
-  // 2) Locally-installed Chrome/Edge via puppeteer-core (dev machines).
-  const localPath = findLocalChrome();
-  if (localPath) {
-    const puppeteerCore = await import('puppeteer-core');
-    return await puppeteerCore.default.launch({
-      executablePath: localPath,
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
+    failures.push('@sparticuz/chromium: executablePath() returned empty');
+    console.error('[launchBrowser] @sparticuz/chromium executablePath() returned empty');
+  } catch (err: any) {
+    failures.push(`@sparticuz/chromium: ${err?.message || err}`);
+    console.error('[launchBrowser] @sparticuz/chromium tier failed:', err?.message || err);
   }
 
   // 3) Full puppeteer, if installed (bundles its own Chromium).
@@ -99,10 +141,15 @@ export async function launchBrowser(): Promise<any> {
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
     });
-  } catch {
+  } catch (err: any) {
+    failures.push(`puppeteer: ${err?.message || err}`);
+    console.error(
+      '[launchBrowser] No Chromium available. Tier failures:\n  - ' + failures.join('\n  - '),
+    );
     throw new Error(
       'No Chromium available for PDF export. Install Google Chrome or Microsoft Edge, ' +
-        'or set PUPPETEER_EXECUTABLE_PATH to a Chromium binary.',
+        'or set PUPPETEER_EXECUTABLE_PATH to a Chromium binary. ' +
+        `(${failures.join(' | ')})`,
     );
   }
 }

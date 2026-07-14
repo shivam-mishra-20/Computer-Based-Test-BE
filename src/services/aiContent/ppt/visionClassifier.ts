@@ -140,14 +140,32 @@ async function classifyPage(page: RawPage): Promise<{
 export const visionClassifier: VisionClassifier = {
   async classify(
     pages: RawPage[],
-    _ctx: PipelineContext,
+    ctx: PipelineContext,
   ): Promise<StageResult<VisionPageClassification[]>> {
-    const rasterPages = pages.filter((p) => !!p.imageBuffer);
-    if (!rasterPages.length) {
+    const allRaster = pages.filter((p) => !!p.imageBuffer);
+    if (!allRaster.length) {
       return { output: [], metrics: emptyMetrics(), warnings: [] };
     }
+    // Cap per-page vision calls — a 76-page scan must not mean 76 slow VLM
+    // round-trips (observed live: unusable latency + cost). Pages beyond the
+    // cap keep their OCR text; they just aren't noise-classified.
+    const maxPages = Number(process.env.VISION_MAX_PAGES || 24);
+    const rasterPages = allRaster.slice(0, maxPages);
+    const capWarnings =
+      allRaster.length > rasterPages.length
+        ? [`Vision noise-classification ran on the first ${rasterPages.length} of ${allRaster.length} pages (VISION_MAX_PAGES).`]
+        : [];
 
-    const { results, failures } = await runBatch(rasterPages, (page) => classifyPage(page));
+    // Per-page ticks: each vision call runs 30-90s — without visible progress
+    // the app's stall detector tells the teacher it failed while we're fine.
+    let done = 0;
+    ctx.progress?.(`Analyzing page 1 of ${rasterPages.length}…`, 0, rasterPages.length);
+    const { results, failures } = await runBatch(rasterPages, async (page) => {
+      const r = await classifyPage(page);
+      done++;
+      ctx.progress?.(`Analyzing page ${Math.min(done + 1, rasterPages.length)} of ${rasterPages.length}… (${done} done)`, done, rasterPages.length);
+      return r;
+    });
 
     const classifications: VisionPageClassification[] = [];
     let tokensIn = 0;
@@ -162,9 +180,12 @@ export const visionClassifier: VisionClassifier = {
     }
     classifications.sort((a, b) => a.pageIndex - b.pageIndex);
 
-    const warnings = failures.map(
-      (f) => `Vision classification failed for page ${rasterPages[f.index].pageIndex}: ${f.error.message}`,
-    );
+    const warnings = [
+      ...capWarnings,
+      ...failures.map(
+        (f) => `Vision classification failed for page ${rasterPages[f.index].pageIndex}: ${f.error.message}`,
+      ),
+    ];
 
     return {
       output: classifications,
