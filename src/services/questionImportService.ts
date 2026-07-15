@@ -10,6 +10,7 @@ import { EnhancedPdfQuestionExtractor } from './enhancedPdfQuestionExtractor';
 import { extractQuestionsFromChunk, mapOllamaToExtracted } from './ollamaService';
 import { extractTextFromImage } from './aiService';
 import { runPdfEnhancerPipeline, runTextEnhancerPipeline } from './scriptsBridge';
+import { runBatch } from '../ai';
 import * as progress from './importProgress';
 import { sha256, getFileCache, setFileCache } from './importCache';
 
@@ -881,10 +882,25 @@ export class QuestionImportService {
    */
   private static async normalizeQuestionsWithLaTeX(questions: ExtractedQuestion[]): Promise<ExtractedQuestion[]> {
     console.log(`[LaTeX Normalize] Processing ${questions.length} questions...`);
-    
-    const normalized: ExtractedQuestion[] = [];
-    
-    for (const question of questions) {
+
+    // PARALLEL across questions (bounded), not one-question-at-a-time: the old
+    // sequential loop made a 5-question image wait minutes here. Each
+    // normalizeMathematicalExpressions call also now skips the LLM entirely
+    // when the text has no math, so most questions cost 0 calls.
+    const { results } = await runBatch(
+      questions,
+      (question) => this.normalizeOneQuestion(question),
+      { concurrency: Math.max(1, Number(process.env.AI_ENHANCER_CONCURRENCY || 6)) },
+    );
+    // runBatch preserves order; a failed item degrades to its original.
+    const normalized = results.map((r, i) => r ?? questions[i]);
+
+    console.log(`[LaTeX Normalize] Completed normalizing ${normalized.length} questions`);
+    return normalized;
+  }
+
+  private static async normalizeOneQuestion(question: ExtractedQuestion): Promise<ExtractedQuestion> {
+    {
       try {
         // Check if text already has LaTeX formatting (has $ signs)
         const hasLatex = (text: string) =>
@@ -936,22 +952,19 @@ export class QuestionImportService {
           normalizedReason = await normalizeMathematicalExpressions(normalizedReason);
         }
         
-        normalized.push({
+        return {
           ...question,
           text: normalizedText,
           options: normalizedOptions,
           correctAnswerText: normalizedAnswer,
           assertion: normalizedAssertion,
           reason: normalizedReason
-        });
+        };
       } catch (error) {
         console.error(`[LaTeX Normalize] Error normalizing question ${question.questionNumber}:`, error);
         // Keep original if normalization fails
-        normalized.push(question);
+        return question;
       }
     }
-    
-    console.log(`[LaTeX Normalize] Completed normalizing ${normalized.length} questions`);
-    return normalized;
   }
 }

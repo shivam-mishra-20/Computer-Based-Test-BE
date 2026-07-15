@@ -1,4 +1,4 @@
-import { ai } from '../ai';
+import { ai, pickModel } from '../ai';
 
 /**
  * Converts mathematical expressions in text to proper LaTeX format
@@ -6,6 +6,11 @@ import { ai } from '../ai';
  */
 export async function normalizeMathematicalExpressions(text: string): Promise<string> {
   try {
+    // No math → nothing to normalize → NO LLM call. Most short questions and
+    // options ("Name the powerhouse of the cell") were paying a multi-second
+    // model round-trip to come back unchanged.
+    if (!text?.trim() || !containsMathematicalContent(text)) return text;
+
     const prompt = `You are a mathematical notation expert. Convert ALL mathematical expressions in the following text to proper LaTeX format wrapped in $ for inline math or $$ for display math.
 
 CRITICAL RULES:
@@ -66,7 +71,9 @@ TEXT TO PROCESS:
 ${text}
 """`;
 
-    const normalizedText = await ai.text(prompt, { label: 'math-normalize', temperature: 0 });
+    // Mechanical symbol conversion — the fast model handles it in ~2-3s vs
+    // 20-30s on the default generation model.
+    const normalizedText = await ai.text(prompt, { label: 'math-normalize', temperature: 0, model: pickModel('fast') });
 
     return normalizedText.trim();
   } catch (error) {

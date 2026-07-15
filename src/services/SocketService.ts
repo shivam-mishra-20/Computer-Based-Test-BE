@@ -21,9 +21,17 @@ class SocketService {
   }
 
   public init(httpServer: HttpServer): void {
+    // CORS_ORIGIN is a COMMA-SEPARATED list. Passing the raw string to socket.io
+    // makes it a single (unmatchable) origin, so browsers get CORS-blocked on the
+    // websocket handshake — breaking real-time on WEB while native apps (no Origin
+    // header) still work. Split it into an array so each origin is matched.
+    const socketOrigins = process.env.CORS_ORIGIN
+      ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean)
+      : true; // reflect any origin when unset (dev)
+
     this.io = new Server(httpServer, {
       cors: {
-        origin: process.env.CORS_ORIGIN || '*',
+        origin: socketOrigins,
         methods: ['GET', 'POST'],
         credentials: true
       },

@@ -28,8 +28,17 @@ export const redisPublisher = new Redis(REDIS_URL, {
 // Subscriber client for Socket.IO adapter (separate connection required)
 export const redisSubscriber = redisPublisher.duplicate();
 
-// General purpose Redis client for caching
-export const redisClient = redisPublisher.duplicate();
+// General purpose Redis client for caching + rate limiting.
+// commandTimeout ensures a stalled Redis can't hang the per-request rate-limit
+// check (globalLimiter runs on every request). Paired with the limiters'
+// passOnStoreError:true, a slow/broken Redis degrades OPEN instead of 500ing
+// the whole API. Only this client is tuned — the pub/sub clients used by the
+// Socket.IO adapter keep their defaults. (For TLS Redis, use a rediss:// URL —
+// ioredis enables TLS automatically from the scheme.)
+export const redisClient = redisPublisher.duplicate({
+  commandTimeout: Number(process.env.REDIS_COMMAND_TIMEOUT_MS) || 5000,
+  maxRetriesPerRequest: 3,
+});
 
 // Connection event handlers
 redisPublisher.on('connect', () => console.log('✅ Redis Publisher connected'));

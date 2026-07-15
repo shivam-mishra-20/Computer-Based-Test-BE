@@ -216,15 +216,26 @@ export async function extractTextFromImage(buffer: Buffer, useVision = true): Pr
   // Try NVIDIA vision first for better accuracy with mathematical content and diagrams
   if (useVision) {
     try {
-      const metadata = await sharp(buffer).metadata();
-      const format = metadata.format || 'png';
-      const mimeMap: Record<string, string> = {
-        jpeg: 'image/jpeg',
-        jpg: 'image/jpeg',
-        png: 'image/png',
-        webp: 'image/webp',
-      };
-      const mimeType = mimeMap[format] || 'image/png';
+      // The NVIDIA vision API reliably accepts JPEG/PNG/WEBP. Formats like
+      // HEIC/BMP/GIF/TIFF (phone photos, screenshots) may be rejected, so
+      // normalize anything else to PNG. Defensive: on any sharp failure, send
+      // the original bytes with a best-effort mime.
+      let sendBuffer = buffer;
+      let mimeType = 'image/png';
+      try {
+        const meta = await sharp(buffer).metadata();
+        const format = meta.format || '';
+        if (format === 'jpeg' || format === 'png' || format === 'webp') {
+          mimeType = format === 'jpeg' ? 'image/jpeg' : `image/${format}`;
+        } else {
+          // heic/bmp/gif/tiff/svg/unknown → re-encode to PNG.
+          sendBuffer = await sharp(buffer).png().toBuffer();
+          mimeType = 'image/png';
+        }
+      } catch (convErr) {
+        console.warn('[OCR] image normalize failed, sending original bytes:', convErr instanceof Error ? convErr.message : convErr);
+      }
+      buffer = sendBuffer;
 
       const prompt = `Extract ALL text content from this image with MAXIMUM ACCURACY.
 

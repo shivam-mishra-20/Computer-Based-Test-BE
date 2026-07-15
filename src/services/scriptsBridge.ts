@@ -130,8 +130,27 @@ export async function runPdfEnhancerPipeline(
   const enhanced = await enhancer.enhanceQuestions(blocks, mergedMeta, {
     onProgress: opts.onProgress,
     cache: makeBlockCache(provider || 'ollama'),
+    // Smart Import is teacher-reviewed: a low quality score flags the question
+    // for review instead of silently dropping it from the teacher's own paper.
+    gateMode: 'flag',
   });
   return buildResult(blocks.length, enhanced, userMeta, mergedMeta, parsed.stats?.total || 1);
+}
+
+/**
+ * Split OCR'd text into ONE block per numbered question so the enhancer can
+ * process them in PARALLEL (each block → its own bounded-concurrency call).
+ * A "(Given: ...)" line, an options line "(a) ...", or any line NOT starting
+ * with a new "N." marker stays attached to the question above it — so no data
+ * is separated from its question. Falls back to a single block when it can't
+ * find ≥2 numbered questions (short answer / free-form paste).
+ */
+function splitIntoQuestionBlocks(text: string): string[] {
+  const t = String(text || '').replace(/\r\n/g, '\n').replace(/=== PAGE \d+ ===/g, '\n');
+  // Split at line starts that begin a NEW numbered question: "1.", "10)", "3 .".
+  const parts = t.split(/\n(?=\s*\d{1,2}\s*[.)]\s)/);
+  const blocks = parts.map((s) => s.trim()).filter((s) => s.length > 3);
+  return blocks.length >= 2 ? blocks : [t.trim()].filter(Boolean);
 }
 
 /** Plain text (e.g. OCR'd image) → per-question enhancement. */
@@ -143,11 +162,20 @@ export async function runTextEnhancerPipeline(
 ): Promise<PipelineResult> {
   const { createEnhancer } = loadScript('ai-enhancer');
   const mergedMeta = mergeMeta(userMeta, {});
-  const block = { text, topic: mergedMeta.topic || mergedMeta.chapter, chapter: mergedMeta.chapter };
+  const blocks = splitIntoQuestionBlocks(text).map((bt) => ({
+    text: bt,
+    topic: mergedMeta.topic || mergedMeta.chapter,
+    chapter: mergedMeta.chapter,
+    // Fidelity: the OCR text is verbatim, so the enhancer takes the STEM from
+    // this source block (not the LLM's re-emission) — see stemFromSource.
+    _verbatim: true,
+  }));
   const enhancer = createEnhancer(provider === 'nvidia' ? 'nvidia' : 'ollama');
-  const enhanced = await enhancer.enhanceQuestions([block], mergedMeta, {
+  const enhanced = await enhancer.enhanceQuestions(blocks, mergedMeta, {
     onProgress: opts.onProgress,
     cache: makeBlockCache(provider || 'ollama'),
+    // Teacher-reviewed import — flag low scorers, never silently drop them.
+    gateMode: 'flag',
   });
-  return buildResult(1, enhanced, userMeta, mergedMeta, 1);
+  return buildResult(blocks.length, enhanced, userMeta, mergedMeta, 1);
 }

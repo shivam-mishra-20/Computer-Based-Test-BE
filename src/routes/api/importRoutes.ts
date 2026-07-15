@@ -13,6 +13,7 @@ import Blueprint from '../../models/Blueprint';
 import Paper from '../../models/Paper';
 import { upload as memUpload } from '../../middlewares/upload';
 import { uploadLimiter } from '../../middlewares/rateLimiter';
+import { attachmentFileFilter } from '../../utils/uploadFileTypes';
 
 const router = express.Router();
 
@@ -37,22 +38,11 @@ const upload = multer({
   limits: {
     fileSize: 50 * 1024 * 1024, // 50MB limit
   },
-  fileFilter: (req: Request, file: Express.Multer.File, cb: multer.FileFilterCallback) => {
-    const allowedTypes = [
-      'application/pdf',
-      'image/jpeg',
-      'image/jpg',
-      'image/png',
-      'image/gif',
-      'image/bmp'
-    ];
-    
-    if (allowedTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error('Invalid file type. Only PDF and image files are allowed.'));
-    }
-  }
+  // Shared filter: accepts PDFs + images by mimetype OR extension, and
+  // tolerates a generic/empty mimetype (octet-stream) via the .ext — the exact
+  // reason webp/heic/screenshot uploads were being rejected before OCR ran.
+  // (See utils/uploadFileTypes.ts — the codebase's canonical upload filter.)
+  fileFilter: attachmentFileFilter,
 });
 
 /**
@@ -68,8 +58,13 @@ router.post('/import-paper', authMiddleware, uploadLimiter, upload.single('quest
       return errorResponse(res, 'No file uploaded', 400);
     }
 
-    // Validate file type
-    const fileType = req.file.mimetype.startsWith('image/') ? 'image' : 'pdf';
+    // Classify pdf vs image. mimetype alone is unreliable (empty /
+    // octet-stream for many images) — fall back to the extension so an image
+    // isn't mis-sent to the PDF text extractor.
+    const mimel = (req.file.mimetype || '').toLowerCase();
+    const extl = path.extname(req.file.originalname || '').toLowerCase();
+    const isPdf = mimel === 'application/pdf' || extl === '.pdf';
+    const fileType: 'pdf' | 'image' = isPdf ? 'pdf' : 'image';
     
     // Create the batch + kick off the pipeline in the BACKGROUND, then return
     // immediately. The client polls GET /import-paper/batch/:id for live progress.

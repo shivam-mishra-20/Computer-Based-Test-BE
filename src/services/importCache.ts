@@ -75,7 +75,15 @@ export interface BlockCache {
 }
 
 export function makeBlockCache(provider: string): BlockCache {
-  const ns = `import:q:${provider || 'ollama'}:`;
+  // BUMP THIS whenever enhancer prompts/logic change — the cache is keyed on
+  // block-text hash only, so without a bump stale pre-fix results serve for the
+  // 30d TTL. v2: fast model + gate-flag + /no_think. v3: option-value fix +
+  // fidelity/keep-complete-question rules (Given: no longer skipped).
+  // v4: explicit trailing-(Given:)-clause attachment example.
+  // v5: quality model default + per-question parallel splitting (fidelity).
+  // v6: verbatim-source stem (image path) + fast model (fidelity from source).
+  // v7: keep pre-split verbatim blocks 1:1 (splitIntoChunks) + collapse stem.
+  const ns = `import:q:v7:${provider || 'ollama'}:`;
   return {
     async get(text: string) {
       const raw = await rawGet(ns + sha256(text));

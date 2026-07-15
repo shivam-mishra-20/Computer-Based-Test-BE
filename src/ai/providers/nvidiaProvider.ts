@@ -87,14 +87,28 @@ function toDataUrl(img: VisionImage): string {
 }
 
 /**
- * Inject the nemotron `detailed thinking on|off` directive. nemotron reads it
- * from the system prompt; we merge it into the first system message (or add one).
+ * Inject the model-appropriate reasoning directive into the system prompt.
+ * Two conventions exist in the nemotron family:
+ *   - super/ultra v1.x:  "detailed thinking on|off"
+ *   - nemotron-nano v2+: "/think" | "/no_think"
+ * Sending the WRONG convention silently leaves reasoning at the model default
+ * — observed live: nano-9b-v2 burned thousands of hidden <think> tokens per
+ * call (an 87s "parse" for 5 questions) because "detailed thinking off" is a
+ * no-op for it.
  */
+function reasoningDirectiveFor(model: string, reasoning: 'on' | 'off'): string {
+  if (/nemotron-nano|nano-9b|nano-12b/i.test(model)) {
+    return reasoning === 'on' ? '/think' : '/no_think';
+  }
+  return `detailed thinking ${reasoning}`;
+}
+
 function withReasoningDirective(
   messages: ChatMessage[],
   reasoning: 'on' | 'off',
+  model: string,
 ): ChatMessage[] {
-  const directive = `detailed thinking ${reasoning}`;
+  const directive = reasoningDirectiveFor(model, reasoning);
   const out = messages.map((m) => ({ ...m }));
   const sys = out.find((m) => m.role === 'system');
   if (sys) {
@@ -115,7 +129,7 @@ export class NvidiaProvider implements AIProvider {
     const model = opts.model || aiConfig.nvidia.modelPrimary;
     const reasoning =
       opts.reasoning || (aiConfig.nvidia.reasoning as 'on' | 'off');
-    const finalMessages = withReasoningDirective(messages, reasoning);
+    const finalMessages = withReasoningDirective(messages, reasoning, model);
 
     const controller = new AbortController();
     const idleMs = opts.idleTimeoutMs ?? aiConfig.nvidia.idleTimeoutMs;
