@@ -62,6 +62,29 @@ const GREEK = {
 // Detects a token that already "is math" — has a command or a braced script.
 const HAS_MATH_INDICATOR = /\\[a-zA-Z]+|[\^_]\{/;
 
+// ── Periodic table (for chemistry detection) ──────────────────────────────────
+// Symbol → atomic number. Doubles as (a) the set of *valid* element symbols used
+// to gate chemistry conversions against false positives ("A+" grade, "The", …)
+// and (b) the Z lookup that lets us tell a real isotope ("23Na11", Z(Na)=11)
+// from a molecule coefficient ("2H2", Z(H)=1 ≠ 2 → left alone).
+const ATOMIC_NUMBER = {
+  H:1, He:2, Li:3, Be:4, B:5, C:6, N:7, O:8, F:9, Ne:10,
+  Na:11, Mg:12, Al:13, Si:14, P:15, S:16, Cl:17, Ar:18, K:19, Ca:20,
+  Sc:21, Ti:22, V:23, Cr:24, Mn:25, Fe:26, Co:27, Ni:28, Cu:29, Zn:30,
+  Ga:31, Ge:32, As:33, Se:34, Br:35, Kr:36, Rb:37, Sr:38, Y:39, Zr:40,
+  Nb:41, Mo:42, Tc:43, Ru:44, Rh:45, Pd:46, Ag:47, Cd:48, In:49, Sn:50,
+  Sb:51, Te:52, I:53, Xe:54, Cs:55, Ba:56, La:57, Ce:58, Pr:59, Nd:60,
+  Pm:61, Sm:62, Eu:63, Gd:64, Tb:65, Dy:66, Ho:67, Er:68, Tm:69, Yb:70,
+  Lu:71, Hf:72, Ta:73, W:74, Re:75, Os:76, Ir:77, Pt:78, Au:79, Hg:80,
+  Tl:81, Pb:82, Bi:83, Po:84, At:85, Rn:86, Fr:87, Ra:88, Ac:89, Th:90,
+  Pa:91, U:92, Np:93, Pu:94, Am:95, Cm:96, Bk:97, Cf:98, Es:99, Fm:100,
+  Md:101, No:102, Lr:103,
+};
+const ELEMENTS = new Set(Object.keys(ATOMIC_NUMBER));
+// Elements that legitimately appear as "El2" molecules (O2, N2, Cl2 …). Used so a
+// single-element formula converts only for these — never "B2"/"A2" style noise.
+const DIATOMIC = new Set(['H', 'N', 'O', 'F', 'Cl', 'Br', 'I']);
+
 // ── Step 1: Unicode → LaTeX commands ──────────────────────────────────────────
 
 function convertSuperSub(text) {
@@ -222,6 +245,144 @@ function fixCommonErrors(text) {
   return t;
 }
 
+// ── Scientific / chemical notation (Phase 4.1) ────────────────────────────────
+// OCR routinely flattens chemistry & science notation into ambiguous ASCII:
+//   O2- SO42- NH4+ Be-   (ions)      23Na11 (isotope)   nCr nPr (combinatorics)
+//   x2 (bare exponent)   Be -> Be-   (reaction)
+// This layer detects those *specific* shapes and rewrites them to clean LaTeX,
+// leaving everything else — prose, existing LaTeX, plain numbers — untouched.
+//
+// Convention (confirmed with the team): a chemical species renders "braces per
+// element" — each element that carries a subscript or the charge is wrapped in
+// {…}; the trailing digit run is a subscript (count); a single trailing digit is
+// a subscript, and only the LAST of ≥2 trailing digits is the charge magnitude:
+//   O2-   → {O}_{2}^{-}      SO42- → S{O}_{4}^{2-}
+//   NH4+  → N{H}_{4}^{+}     Be-   → {Be}^{-}
+
+/**
+ * Render "SO4"/"O2"/"Be" (+ optional charge like "2-") in braces-per-element form.
+ * Wraps an element in {…} when it has a subscript, carries the charge, or is the
+ * lone element of the species.
+ */
+function formatFormula(body, charge) {
+  const elems = [];
+  const re = /([A-Z][a-z]?)(\d*)/g;
+  let m;
+  while ((m = re.exec(body)) !== null) {
+    if (!m[0]) { re.lastIndex++; continue; }
+    elems.push({ el: m[1], sub: m[2] });
+  }
+  if (!elems.length) return body + (charge ? `^{${charge}}` : '');
+  const sole = elems.length === 1;
+  return elems
+    .map((e, i) => {
+      const isLast = i === elems.length - 1;
+      const hasSub = !!e.sub;
+      const wrap = hasSub || sole || (isLast && !!charge);
+      let piece = wrap ? `{${e.el}}` : e.el;
+      if (hasSub) piece += `_{${e.sub}}`;
+      if (isLast && charge) piece += `^{${charge}}`;
+      return piece;
+    })
+    .join('');
+}
+
+/**
+ * Turn a raw species token ("SO42-", "O2-", "NH4+", "Be-", "Be") into LaTeX.
+ * Splits the trailing charge from the formula body per the convention above.
+ */
+function parseSpeciesLatex(raw) {
+  const m = raw.match(/^(.*?)(\d*)([+\-]+)$/);
+  if (!m || !m[3]) return formatFormula(raw, '');       // neutral (e.g. "Be")
+  let body = m[1];
+  const mag = m[2];
+  const sign = m[3];
+  let charge;
+  if (mag.length >= 2) { body += mag.slice(0, -1); charge = mag.slice(-1) + sign; }
+  else { body += mag; charge = sign; }                  // 0/1 trailing digit → subscript
+  return formatFormula(body, charge);
+}
+
+// Are all element symbols in a token real elements? (rejects "A+", "The", …)
+function elementsValid(raw) {
+  const els = raw.replace(/[+\-]+$/, '').match(/[A-Z][a-z]?/g) || [];
+  return els.length > 0 && els.every((e) => ELEMENTS.has(e));
+}
+
+// A chemical species inside a reaction expression: element run + optional charge,
+// but never swallow the '-' of a "->" arrow.
+const SP_SRC = '[A-Z][a-z]?[A-Za-z0-9]*(?:[+\\-](?!>))?';
+// Connectors: arrows tolerate any spacing; a reactant "+" must be space-padded so
+// it's never confused with a cation charge ("Na+ + Cl-" — first + is the charge).
+const CONN_SRC = '(?:\\s*(?:-->|->|→|⟶|⇌|⇋|=>)\\s*|\\s+\\+\\s+)';
+const REACTION_RE = new RegExp(`${SP_SRC}(?:${CONN_SRC}${SP_SRC})+`, 'g');
+
+// Isotope: massNumber Element atomicNumber → ^{A}_{Z}\mathrm{El}
+const ISOTOPE_RE = /(?<![\w\\{}$^_])(\d{1,3})([A-Z][a-z]?)(\d{1,3})(?![\w])/g;
+// Combinatorics / permutations: nCr, nPr, 10C2 → {}^{n}C_{r}
+const COMBO_RE = /(?<![\w\\{}$^_])([nm]|\d{1,3})([CP])([nrk]|\d{1,3})(?![\w])/g;
+// Charged ion: element run ending in a single +/- sign (not part of "->").
+const ION_RE = /(?<![\w\\{}$^_])((?:[A-Z][a-z]?\d*){1,8}[+\-])(?![\w>=+\-])/g;
+// Uncharged formula candidate (gated hard in the replacer): H2O, CO2, CaCl2 …
+const FORMULA_RE = /(?<![\w\\{}$^_])((?:[A-Z][a-z]?\d*){1,10})(?![\w+\-{}$^_=])/g;
+// Bare exponent for the common italic unknowns only: x2 → x^{2}
+const EXPONENT_RE = /(?<![\w\\{}$^_])([xyz])(\d{1,3})(?![\w{}$^_.])/g;
+
+// Convert an uncharged formula only when it's unambiguously chemical.
+function tryFormula(tok) {
+  if (!/\d/.test(tok)) return null;                      // nothing to subscript
+  const els = tok.match(/[A-Z][a-z]?/g) || [];
+  if (!els.length || !els.every((e) => ELEMENTS.has(e))) return null;
+  if (new Set(els).size < 2) {
+    // one distinct element → only accept real diatomics written as "El2"
+    if (!(els.length === 1 && DIATOMIC.has(els[0]) && /^[A-Z][a-z]?2$/.test(tok))) return null;
+  }
+  if (tok.length > 14) return null;
+  return formatFormula(tok, '');
+}
+
+// Rewrite a reaction expression ("Be -> Be-", "H2 + O2 -> H2O") as one $…$ unit.
+function replaceReaction(match) {
+  const species = match.match(new RegExp(SP_SRC, 'g')) || [];
+  // Require a real chemical signal (a digit or a charge) and valid elements —
+  // this keeps prose like "cause -> effect" or math "A = B" untouched.
+  const strong = species.some((s) => /\d/.test(s) || /[+\-]$/.test(s));
+  if (!strong || !species.every(elementsValid)) return match;
+  let inner = match.replace(new RegExp(SP_SRC, 'g'), (s) => parseSpeciesLatex(s));
+  inner = inner
+    .replace(/\s*(?:-->|->|→|⟶)\s*/g, ' \\rightarrow ')
+    .replace(/\s*(?:⇌|⇋)\s*/g, ' \\rightleftharpoons ')
+    .replace(/\s*=>\s*/g, ' \\Rightarrow ')
+    .replace(/\s+\+\s+/g, ' + ');   // spaces required → never touches a ^{+} charge
+  return `$${inner.trim()}$`;
+}
+
+/**
+ * Detect malformed scientific notation and rewrite it to LaTeX. Existing $…$
+ * math is protected; each conversion is stashed behind an inert sentinel so a
+ * later pass never re-processes an earlier one. Returns a mix of finished $…$
+ * segments (reactions) and raw LaTeX runs that the $-wrapping step will wrap.
+ */
+function convertScientific(text) {
+  if (!text || typeof text !== 'string') return text;
+  const store = [];
+  const stash = (s) => { const k = `${store.length}`; store.push(s); return k; };
+
+  let t = text;
+  t = t.replace(/\$\$[^$]*\$\$|\$[^$]*\$/g, (m) => stash(m));      // protect existing math
+  // Each conversion self-wraps in $…$ so it renders as an isolated math span and
+  // never absorbs neighbouring sentence punctuation (e.g. "…is CO2." → "…is $C{O}_{2}$.").
+  t = t.replace(REACTION_RE, (m) => { const r = replaceReaction(m); return r === m ? m : stash(r); });
+  t = t.replace(ISOTOPE_RE, (m, a, el, z) =>
+    ATOMIC_NUMBER[el] === Number(z) ? stash(`$^{${a}}_{${z}}\\mathrm{${el}}$`) : m);
+  t = t.replace(COMBO_RE, (m, a, op, b) => stash('$' + `{}^{${a}}${op}_{${b}}` + '$'));
+  t = t.replace(ION_RE, (m, tok) => (elementsValid(tok) ? stash(`$${parseSpeciesLatex(tok)}$`) : m));
+  t = t.replace(FORMULA_RE, (m, tok) => { const l = tryFormula(tok); return l ? stash(`$${l}$`) : m; });
+  t = t.replace(EXPONENT_RE, (m, v, d) => stash(`$${v}^{${d}}$`));
+  t = t.replace(/(\d+)/g, (_, i) => store[Number(i)]);  // restore
+  return t;
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────────
 
 /**
@@ -235,6 +396,7 @@ function normalizeLatex(text) {
   t = convertSuperSub(t);
   t = convertFractions(t);
   t = convertRoot(t);
+  t = convertScientific(t);       // chemistry / isotopes / combinatorics / exponents
   t = convertOperators(t);
   t = convertGreek(t);
   t = fixAsciiScripts(t);
@@ -273,4 +435,4 @@ function validateLatex(text) {
   return { valid: issues.length === 0, issues };
 }
 
-module.exports = { normalizeLatex, validateLatex, fixCommonErrors };
+module.exports = { normalizeLatex, validateLatex, fixCommonErrors, convertScientific };

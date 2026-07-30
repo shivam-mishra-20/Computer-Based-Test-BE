@@ -84,6 +84,10 @@ class PDFParser {
 
     console.log(`[PDF Parser] ${chunks.length} enriched chunk(s)`);
     const stats = this.analyzeChunks(chunks);
+    // Additive signal for the OCR-fallback decision (scanned PDFs are sparse).
+    // Does not affect chunking/extraction — purely descriptive.
+    stats.numPages = numPages;
+    stats.totalTextChars = fullText.length;
     return { metadata, questions: chunks, stats };
   }
 

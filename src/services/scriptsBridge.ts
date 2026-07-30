@@ -15,6 +15,8 @@
 import path from 'path';
 import type { ExtractedQuestion } from './enhancedPdfQuestionExtractor';
 import { makeBlockCache } from './importCache';
+import { extractTextFromImage } from './aiService';
+import { extractPdfTextWithOcrFallback } from './pdfOcrFallback';
 
 // `eval('require')` forces a true runtime require so esbuild leaves it alone.
 // eslint-disable-next-line no-eval
@@ -45,8 +47,8 @@ export interface PipelineResult {
 }
 
 /**
- * Map an ai-enhancer question onto the ExtractedQuestion shape used by
- * saveQuestions(). Req #1: user-provided metadata wins over AI classification.
+ * Map an ai-enhancer question onto the ExtractedQuestion shape used by the
+ * import review buffer. Req #1: user-provided metadata wins over AI classification.
  */
 function mapEnhanced(q: any, index: number, userMeta: EnhancerMetadata): ExtractedQuestion {
   return {
@@ -124,6 +126,43 @@ export async function runPdfEnhancerPipeline(
   const mergedMeta = mergeMeta(userMeta, parsed.metadata);
 
   const blocks = parsed.questions || [];
+
+  // ── Scanned-PDF OCR fallback ────────────────────────────────────────────────
+  // A scanned PDF carries no selectable text: the parser extracts almost nothing
+  // and 0 questions come out. Detect that (empty / sparse) and OCR the pages with
+  // the SAME engine image uploads use (extractTextFromImage → NVIDIA Vision), then
+  // run the recovered text through the existing text pipeline — exactly the image
+  // path. Digital PDFs (enough text) skip this entirely and are unchanged.
+  const OCR_MIN = Number(process.env.PDF_OCR_MIN_CHARS || 100);
+  const numPages = Number(parsed.stats?.numPages) || 0;
+  const totalTextChars = Number(
+    parsed.stats?.totalTextChars ?? blocks.reduce((s: number, b: any) => s + ((b?.text || '').length), 0),
+  );
+  const avgCharsPerPage = numPages > 0 ? totalTextChars / numPages : totalTextChars;
+  const looksScanned = blocks.length === 0 || (numPages > 0 && avgCharsPerPage < OCR_MIN);
+
+  if (looksScanned) {
+    try {
+      console.log(
+        `[PDF OCR] Sparse PDF detected (avg ${Math.round(avgCharsPerPage)} chars/page over ${numPages} page(s), ${blocks.length} block(s)) — attempting OCR fallback`,
+      );
+      const fallback = await extractPdfTextWithOcrFallback(filePath, {
+        // Reuse the exact image-upload OCR engine (NVIDIA Vision / Tesseract).
+        ocr: (buf) => extractTextFromImage(buf, provider === 'nvidia'),
+      });
+      if (fallback.usedOcr && fallback.combinedText.trim()) {
+        console.log(
+          `[PDF OCR] Recovered text from ${fallback.ocrPages.length}/${fallback.totalPages} page(s) — routing through the existing text pipeline`,
+        );
+        return await runTextEnhancerPipeline(fallback.combinedText, userMeta, provider, opts);
+      }
+      console.warn('[PDF OCR] OCR produced no usable text — continuing with parser output');
+    } catch (e) {
+      // Never fail the import — degrade to the existing (parser) result.
+      console.error(`[PDF OCR] Fallback error: ${e instanceof Error ? e.message : e} — continuing with parser output`);
+    }
+  }
+
   if (blocks.length === 0) return buildResult(0, [], userMeta, mergedMeta, parsed.stats?.total || 1);
 
   const enhancer = createEnhancer(provider === 'nvidia' ? 'nvidia' : 'ollama');

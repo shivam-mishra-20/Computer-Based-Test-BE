@@ -4,6 +4,7 @@ import path from 'path';
 import pdfParse from 'pdf-parse';
 import { Types } from 'mongoose';
 import { ImportBatch, ImportedQuestion, IImportedQuestion } from '../models/ImportedQuestion';
+import { setPreview, newPreviewId, PreviewQuestion } from './importPreview';
 import { EnhancedQuestionData, saveValidatedQuestion } from './questionValidationService';
 import { normalizeMathematicalExpressions } from './mathService';
 import { EnhancedPdfQuestionExtractor } from './enhancedPdfQuestionExtractor';
@@ -210,13 +211,13 @@ export class QuestionImportService {
       console.log(`[Import] Step 3: Normalizing mathematical expressions...`);
       const normalizedQuestions = await this.normalizeQuestionsWithLaTeX(questions);
 
-      // Step 4: Save questions to database with metadata
+      // Step 4: Buffer questions in memory for review — NOT saved to the DB.
+      // Persistence happens only when the teacher saves from the preview modal.
       progress.setStage(batchId, 'saving');
-      console.log(`[Import] Step 4: Saving questions to database...`);
-      const savedQuestions = await this.saveQuestions(
+      console.log(`[Import] Step 4: Buffering questions for review (no DB write)...`);
+      const savedQuestions = this.bufferExtractedQuestions(
         normalizedQuestions,
         batchId,
-        uploadedBy,
         {
           subject: options.subject,
           topic: options.topic,
@@ -228,35 +229,9 @@ export class QuestionImportService {
         }
       );
 
-      console.log(`[Import] Saved ${savedQuestions.length} questions`);
+      console.log(`[Import] Buffered ${savedQuestions.length} questions for review`);
 
-      // Step 5: Upsert subject/topic aggregate in Imports collection
-      try {
-        const { ImportModel } = await import('../models/Import');
-        const byKey = new Map<string, Types.ObjectId[]>();
-        for (const q of savedQuestions) {
-          const key = `${q.subject || 'Unknown'}::${q.topic || 'General'}`;
-          const arr = byKey.get(key) || [];
-          arr.push(q._id as Types.ObjectId);
-          byKey.set(key, arr);
-        }
-        for (const [key, ids] of byKey) {
-          const [subject, topic] = key.split('::');
-          await ImportModel.findOneAndUpdate(
-            { uploadedBy, subject, topic },
-            { 
-              $setOnInsert: { uploadedBy, subject, topic },
-              $inc: { questionCount: ids.length },
-              $addToSet: { questionIds: { $each: ids } }
-            },
-            { upsert: true, new: true }
-          );
-        }
-      } catch (e) {
-        console.warn('[Import] Failed to upsert Imports aggregate:', e);
-      }
-
-      // Step 6: Update batch status
+      // Step 5: Update batch status
       const processingTime = Date.now() - startTime;
       batch.status = 'completed';
       batch.processingCompleted = new Date();
@@ -415,13 +390,13 @@ export class QuestionImportService {
       console.log('[Enhanced Import] Normalizing mathematical expressions...');
       const normalizedQuestions = await this.normalizeQuestionsWithLaTeX(questions);
 
-      // Save questions to database
+      // Buffer questions in memory for review — NOT saved to the DB. Persistence
+      // happens only when the teacher saves from the preview modal.
       progress.setStage(batchId, 'saving');
-      console.log('[Enhanced Import] Saving questions to database...');
-      const savedQuestions = await this.saveQuestions(
+      console.log('[Enhanced Import] Buffering questions for review (no DB write)...');
+      const savedQuestions = this.bufferExtractedQuestions(
         normalizedQuestions,
         batchId,
-        uploadedBy,
         {
           subject: options.subject,
           topic: options.topic,
@@ -433,33 +408,7 @@ export class QuestionImportService {
         }
       );
 
-      console.log(`[Enhanced Import] Saved ${savedQuestions.length} questions`);
-
-      // Update imports collection (aggregate)
-      try {
-        const { ImportModel } = await import('../models/Import');
-        const byKey = new Map<string, Types.ObjectId[]>();
-        for (const q of savedQuestions) {
-          const key = `${q.subject || 'Unknown'}::${q.topic || 'General'}`;
-          const arr = byKey.get(key) || [];
-          arr.push(q._id as Types.ObjectId);
-          byKey.set(key, arr);
-        }
-        for (const [key, ids] of byKey) {
-          const [subject, topic] = key.split('::');
-          await ImportModel.findOneAndUpdate(
-            { uploadedBy, subject, topic },
-            {
-              $setOnInsert: { uploadedBy, subject, topic },
-              $inc: { questionCount: ids.length },
-              $addToSet: { questionIds: { $each: ids } }
-            },
-            { upsert: true, new: true }
-          );
-        }
-      } catch (e) {
-        console.warn('[Enhanced Import] Failed to upsert Imports aggregate:', e);
-      }
+      console.log(`[Enhanced Import] Buffered ${savedQuestions.length} questions for review`);
 
       // Update batch status with enhanced stats
       const processingTime = Date.now() - startTime;
@@ -697,12 +646,14 @@ export class QuestionImportService {
 
 
   /**
-   * Save structured questions to database with validation
+   * Hold structured questions in the in-memory review buffer — NOTHING is written
+   * to the database here. Questions are persisted only when the teacher explicitly
+   * saves the ones they want from the preview modal (POST /ai/save-questions).
+   * GET /import-paper/batch/:batchId serves this buffer for review.
    */
-  private static async saveQuestions(
+  private static bufferExtractedQuestions(
     questions: ExtractedQuestion[],
     batchId: Types.ObjectId,
-    extractedBy: Types.ObjectId,
     metadata?: {
       subject?: string;
       topic?: string;
@@ -712,21 +663,17 @@ export class QuestionImportService {
       section?: string;
       marks?: number;
     }
-  ): Promise<IImportedQuestion[]> {
-    // Review-first flow: persist extracted questions into ImportedQuestion (temporary store)
-    // Do NOT push directly to the Question Bank here.
-    const docs = questions.map((q) => {
+  ): PreviewQuestion[] {
+    const previews: PreviewQuestion[] = questions.map((q, i) => {
       // Filter out empty options to prevent validation errors
       let cleanedOptions = q.options;
       if (cleanedOptions && Array.isArray(cleanedOptions)) {
         cleanedOptions = cleanedOptions.filter(opt => opt && opt.text && opt.text.trim() !== '');
-        // If after filtering we have no options, set to undefined
-        if (cleanedOptions.length === 0) {
-          cleanedOptions = undefined;
-        }
+        if (cleanedOptions.length === 0) cleanedOptions = undefined;
       }
 
       return {
+        _id: newPreviewId(),
         text: q.text,
         type: q.type,
         // Req #1: user-selected metadata wins; only fall back to AI when absent.
@@ -742,16 +689,11 @@ export class QuestionImportService {
         reasonIsTrue: q.reasonIsTrue,
         reasonExplainsAssertion: q.reasonExplainsAssertion,
         diagramUrl: undefined,
-        importBatch: batchId,
-        originalText: q.text || '',
         confidence: typeof q.confidence === 'number' ? q.confidence : 0.5,
         needsReview: q.needsReview ?? false,
         status: 'extracted' as const,
-        pageNumber: undefined,
-        questionNumber: q.questionNumber,
-        extractedBy,
-        reviewedBy: undefined,
-        // Include metadata for later use when moving to class-wise collections
+        questionNumber: q.questionNumber || String(i + 1),
+        // Carried through so a manual save can route to the class-wise collection.
         class: metadata?.class,
         board: metadata?.board,
         chapter: metadata?.chapter,
@@ -760,8 +702,8 @@ export class QuestionImportService {
       };
     });
 
-    const saved = await ImportedQuestion.insertMany(docs);
-    return saved;
+    setPreview(batchId, previews);
+    return previews;
   }
 
   /**

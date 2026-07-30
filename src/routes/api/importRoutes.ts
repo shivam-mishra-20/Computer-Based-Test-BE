@@ -6,6 +6,7 @@ import { Types } from 'mongoose';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import { QuestionImportService } from '../../services/questionImportService';
 import { getProgress, stageLabel } from '../../services/importProgress';
+import { getPreview } from '../../services/importPreview';
 import { ImportBatch, ImportedQuestion } from '../../models/ImportedQuestion';
 import { successResponse, errorResponse } from '../../utils/response';
 import { ImportModel } from '../../models/Import';
@@ -166,8 +167,9 @@ router.get('/import-paper/batch/:batchId', authMiddleware, async (req, res) => {
       return errorResponse(res, 'Import batch not found', 404);
     }
 
-    const questions = await ImportedQuestion.find({ importBatch: batchId })
-      .sort({ questionNumber: 1 });
+    // Questions live in the in-memory review buffer — nothing is persisted until
+    // the teacher saves them from the preview modal (POST /ai/save-questions).
+    const questions = getPreview(batchId) || [];
 
     // Merge LIVE progress (in-memory) into the response — no schema change.
     const batchObj: any = (batch as any).toObject ? (batch as any).toObject() : batch;

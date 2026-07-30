@@ -51,6 +51,15 @@ export const aiConfig = {
       process.env.NVIDIA_MODEL_VISION,
       'meta/llama-3.2-90b-vision-instruct',
     ),
+    // Feature-specific override for the Schedule Image Auto-Extraction table
+    // reader (Admin → App Management → Custom Schedule → Upload Schedule).
+    // Kept separate from modelVision so this doesn't change behavior for the
+    // other, already-working vision callers (Smart Import OCR, PPT vision
+    // analysis) — same pattern as the ppt.* per-feature model overrides below.
+    scheduleVisionModel: str(
+      process.env.NVIDIA_MODEL_SCHEDULE_VISION,
+      'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning',
+    ),
     // Small/fast model for metadata, JSON formatting, validation, small rewrites.
     // Falls back to the generation model when unset.
     // NOTE: nvidia/llama-3.1-nemotron-nano-8b-v1 (the old default) went dead on
