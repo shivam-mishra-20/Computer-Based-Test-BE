@@ -7,6 +7,7 @@ import Lecture from '../../models/Lecture';
 import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
 import { uploadAiContent } from '../../middlewares/uploadAiContent';
 import { aiLimiter } from '../../middlewares/rateLimiter';
+import { buildClassVariants } from '../../utils/audienceTargeting';
 import {
   generate as aiContentGenerate,
   listHistory as aiContentListHistory,
@@ -149,7 +150,10 @@ router.get('/students', authMiddleware, async (req: AuthRequest, res: Response) 
     if (batch) {
       filter.batch = batch;
     }
-    if (classLevel) filter.classLevel = classLevel;
+    // Match every stored representation: callers send the bare digit ("11")
+    // while User.classLevel holds the label form ("Class 11"). An exact match
+    // silently returned zero students.
+    if (classLevel) filter.classLevel = { $in: buildClassVariants(classLevel) };
     if (search) {
       filter.$or = [
         { name: { $regex: search, $options: 'i' } },

@@ -42,6 +42,7 @@ import attendanceRuleRoutes from './routes/api/attendanceRuleRoutes';
 import syllabusRoutes from './routes/api/syllabusRoutes';
 import automationRoutes from './routes/api/automation';
 import resourceRoutes from './routes/api/resourceRoutes';
+import classRequestRoutes from './routes/api/classRequestRoutes';
 import eodRoutes from './routes/api/eodRoutes';
 import playlistRoutes from './routes/api/playlistRoutes';
 import scholarshipRoutes from './routes/api/scholarshipRoutes';
@@ -276,6 +277,9 @@ app.use('/api/attendance-rules', attendanceRuleRoutes);
 app.use('/api/syllabus', syllabusRoutes);
 // Study resources (videos/PDFs) routes
 app.use('/api/resources', resourceRoutes);
+
+// Public class requests (guest web/app submissions) + admin review queue
+app.use('/api/class-requests', classRequestRoutes);
 // EOD (End of Day) reports
 app.use('/api/eod', eodRoutes);
 // YouTube playlist import & sync

@@ -58,6 +58,53 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
   }
 };
 
+/**
+ * Attaches `req.user` when a valid token is present, but NEVER rejects.
+ *
+ * For endpoints that are legitimately public yet must serve less data to
+ * anonymous callers (e.g. study resources: guests only ever see published +
+ * isPublic content). Downstream handlers decide based on `req.user` — an
+ * invalid or absent token simply means "treat as guest", so a bad token can
+ * never escalate, only degrade to the public view.
+ */
+export const optionalAuthMiddleware = async (
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+) => {
+  const token = req.header('Authorization')?.replace('Bearer ', '').trim();
+
+  if (!token || token === 'null' || token === 'undefined' || token.length < 20) {
+    return next();
+  }
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as AuthPayload;
+    const User = require('../models/User').default;
+    const user = await User.findById(decoded.id)
+      .select('name role email classLevel batch firebaseUid status')
+      .lean();
+
+    if (user) {
+      (req as any).user = {
+        id: decoded.id,
+        _id: decoded.id,
+        role: (user as any).role || decoded.role,
+        name: (user as any).name,
+        email: (user as any).email,
+        classLevel: (user as any).classLevel,
+        batch: (user as any).batch,
+        firebaseUid: (user as any).firebaseUid,
+        status: (user as any).status,
+      };
+    }
+  } catch {
+    // Ignore — caller is simply treated as a guest.
+  }
+
+  next();
+};
+
 export const requireRole = (...roles: string[]) => {
   return (req: Request, res: Response, next: NextFunction) => {
     const current = (req as any).user as { id: string; role?: string } | undefined;

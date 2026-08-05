@@ -1,10 +1,12 @@
 import { Router, Request, Response } from 'express';
+import mongoose from 'mongoose';
 import multer from 'multer';
 import StudyResource from '../../models/StudyResource';
-import { authMiddleware } from '../../middlewares/authMiddleware';
+import { authMiddleware, optionalAuthMiddleware } from '../../middlewares/authMiddleware';
 import { uploadLimiter } from '../../middlewares/rateLimiter';
 import { uploadToFirebase } from '../../services/firebaseService';
 import { pdfFileFilter, resolveContentType } from '../../utils/uploadFileTypes';
+import { withContentCategory } from '../../utils/resourceCategory';
 import youtubeService from '../../services/youtubeService';
 
 const router = Router();
@@ -21,91 +23,164 @@ const upload = multer({
 
 // ============ Public Routes ============
 
+/**
+ * True when the caller is signed in as staff. Guests AND signed-in students
+ * both get the public view; only staff may see non-public/unpublished items.
+ */
+const isStaff = (req: Request): boolean => {
+  const role = (req as any).user?.role;
+  return role === 'admin' || role === 'teacher' || role === 'developer';
+};
+
+/**
+ * Visibility floor enforced SERVER-SIDE for every non-staff caller.
+ *
+ * Previously `isPublic` was applied only when the client happened to send
+ * `?isPublic=true`, so simply omitting the parameter returned private
+ * resources to anonymous callers. Client query params can no longer influence
+ * this — they are only allowed to narrow within the permitted set.
+ */
+const applyVisibilityFloor = (query: any, req: Request) => {
+  if (isStaff(req)) return query;
+  query.status = 'published';
+  query.isPublic = true;
+  return query;
+};
+
+/** Guests must never receive uploader identity (staff names/emails). */
+const publicProjection =
+  '-uploadedBy -__v';
+
 // Get all published resources (for guest users and students)
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', optionalAuthMiddleware, async (req: Request, res: Response) => {
   try {
-    const { 
-      type, 
-      category, 
-      subject, 
-      classLevel, 
-      batch, 
-      isPublic, 
+    const {
+      type,
+      category,
+      contentCategory,
+      subject,
+      classLevel,
+      batch,
+      isPublic,
       isFeatured,
-      search 
+      search
     } = req.query;
 
+    const staff = isStaff(req);
     const query: any = { status: 'published' };
 
     if (type) query.type = type;
     if (category) query.category = category;
+    // NB: contentCategory is intentionally NOT part of the DB query — it is
+    // applied after derivation below, so untagged legacy content still lands
+    // in the right public section.
     if (subject) query.subject = subject;
     if (classLevel) query.classLevel = classLevel;
     if (batch) query.batch = batch;
-    if (isPublic !== undefined) query.isPublic = isPublic === 'true';
+    // Only staff may widen/narrow these — for everyone else the floor below wins.
+    if (staff && isPublic !== undefined) query.isPublic = isPublic === 'true';
     if (isFeatured !== undefined) query.isFeatured = isFeatured === 'true';
-    
+
     // Search in title and description
     if (search) {
+      const escaped = String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       query.$or = [
-        { title: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } },
-        { tags: { $in: [new RegExp(search as string, 'i')] } }
+        { title: { $regex: escaped, $options: 'i' } },
+        { description: { $regex: escaped, $options: 'i' } },
+        { tags: { $in: [new RegExp(escaped, 'i')] } }
       ];
     }
 
-    const resources = await StudyResource.find(query)
-      .populate('uploadedBy', 'name email')
+    applyVisibilityFloor(query, req);
+
+    const findQuery = StudyResource.find(query);
+    if (staff) {
+      findQuery.populate('uploadedBy', 'name email');
+    } else {
+      findQuery.select(publicProjection);
+    }
+
+    const resources = await findQuery
       .sort({ isFeatured: -1, createdAt: -1 })
       .lean();
 
-    res.json(resources);
+    // Fill in the public section for untagged content, then narrow if the
+    // caller asked for one specific section.
+    const withSections = resources.map((r) => withContentCategory(r));
+    const result = contentCategory
+      ? withSections.filter((r) => r.contentCategory === contentCategory)
+      : withSections;
+
+    res.json(result);
   } catch (error: any) {
     console.error('Error fetching resources:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Get resource by ID (public)
-router.get('/:id', async (req: Request, res: Response) => {
+// Get resource by ID (public for published+public items; staff see anything)
+router.get('/:id', optionalAuthMiddleware, async (req: Request, res: Response) => {
   try {
-    const resource = await StudyResource.findById(req.params.id)
-      .populate('uploadedBy', 'name email');
+    const staff = isStaff(req);
+
+    // Public endpoint: a malformed id is a 404, not a Mongoose CastError 500.
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ error: 'Resource not found' });
+    }
+
+    // The visibility floor is part of the LOOKUP, not a post-filter, so a
+    // private resource is a 404 for guests rather than a readable document.
+    const criteria: any = { _id: req.params.id };
+    applyVisibilityFloor(criteria, req);
+
+    const query = StudyResource.findOne(criteria);
+    if (staff) {
+      query.populate('uploadedBy', 'name email');
+    } else {
+      query.select(publicProjection);
+    }
+
+    const resource = await query.lean();
 
     if (!resource) {
       return res.status(404).json({ error: 'Resource not found' });
     }
 
-    // Increment view/download count
-    if (resource.type === 'video' && resource.viewCount !== undefined) {
-      resource.viewCount += 1;
-      await resource.save();
-    } else if (resource.type === 'pdf' && resource.downloadCount !== undefined) {
-      resource.downloadCount += 1;
-      await resource.save();
-    }
+    // Increment view/download counters WITHOUT a full document save — the old
+    // code round-tripped the whole doc on an unauthenticated GET. $inc is
+    // atomic, fire-and-forget, and cannot rewrite other fields.
+    const counterField = resource.type === 'video' ? 'viewCount' : 'downloadCount';
+    StudyResource.updateOne({ _id: resource._id }, { $inc: { [counterField]: 1 } }).catch(
+      (err) => console.error('Error incrementing resource counter:', err),
+    );
 
-    res.json(resource);
+    res.json(withContentCategory(resource));
   } catch (error: any) {
     console.error('Error fetching resource:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Get unique categories
-router.get('/meta/categories', async (req: Request, res: Response) => {
+// Get unique categories (guests only see categories of public content)
+router.get('/meta/categories', optionalAuthMiddleware, async (req: Request, res: Response) => {
   try {
-    const categories = await StudyResource.distinct('category', { status: 'published' });
+    const categories = await StudyResource.distinct(
+      'category',
+      applyVisibilityFloor({ status: 'published' }, req),
+    );
     res.json(categories);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
 });
 
-// Get unique subjects
-router.get('/meta/subjects', async (req: Request, res: Response) => {
+// Get unique subjects (guests only see subjects of public content)
+router.get('/meta/subjects', optionalAuthMiddleware, async (req: Request, res: Response) => {
   try {
-    const subjects = await StudyResource.distinct('subject', { status: 'published' });
+    const subjects = await StudyResource.distinct(
+      'subject',
+      applyVisibilityFloor({ status: 'published' }, req),
+    );
     res.json(subjects);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -197,6 +272,7 @@ router.post('/upload-pdf', authMiddleware, uploadLimiter, upload.single('file'),
       title,
       description,
       category,
+      contentCategory,
       subject,
       classLevel,
       batch,
@@ -225,6 +301,7 @@ router.post('/upload-pdf', authMiddleware, uploadLimiter, upload.single('file'),
       type: 'pdf',
       resourceUrl: fileUrl,
       category,
+      contentCategory: contentCategory || undefined,
       subject,
       classLevel,
       batch: batch || undefined,

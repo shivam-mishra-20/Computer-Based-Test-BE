@@ -8,9 +8,20 @@ import Blueprint, { IBlueprint } from '../models/Blueprint';
 import { ImportedQuestion } from '../models/ImportedQuestion';
 import { getClassQuestionModel } from '../models/ClassQuestion';
 import type { GeneratedPaperResult } from './aiService';
-import User from '../models/User';
 import * as notificationService from './notificationService';
 import mongoose from 'mongoose';
+import { deriveExamStatus } from '../utils/examTiming';
+import { resolveExamNotificationRecipients } from './examAudienceService';
+
+// Attaches the server-derived `status` (draft/scheduled/live/completed) to an
+// exam document before it goes out over the API — additive field, not part of
+// the schema, so every response carries one authoritative status without web/
+// mobile/admin each re-deriving it from isPublished+schedule independently.
+function withStatus(examDoc: IExam | null): (IExam & { status: ReturnType<typeof deriveExamStatus> }) | null {
+  if (!examDoc) return null;
+  const obj = typeof (examDoc as any).toObject === 'function' ? (examDoc as any).toObject() : examDoc;
+  return { ...obj, status: deriveExamStatus(examDoc) };
+}
 
 export const createQuestion = async (payload: Partial<IQuestion> & { createdBy: Types.ObjectId }): Promise<IQuestion> => {
   const q = await Question.create(payload as IQuestion);
@@ -137,22 +148,44 @@ function normalizeMarkingScheme<T extends { markingScheme?: any }>(payload: T): 
   return payload;
 }
 
-export const createExam = async (payload: Partial<IExam>): Promise<IExam> => {
+// A teacher can no longer flip isPublished:true without an exam schedule —
+// students' waiting room / start-window enforcement depends on schedule.startAt
+// and schedule.endAt actually being set. `existing` supplies fallback values
+// when a PUT updates isPublished without re-sending an already-saved schedule.
+function assertPublishReady(payload: Partial<IExam>, existing?: IExam | null) {
+  const startAt = payload.schedule?.startAt ?? existing?.schedule?.startAt;
+  const endAt = payload.schedule?.endAt ?? existing?.schedule?.endAt;
+  if (!startAt || !endAt) {
+    throw new Error('Publishing requires an exam schedule (start and end date/time).');
+  }
+  if (new Date(startAt) >= new Date(endAt)) {
+    throw new Error('Exam schedule start time must be before the end time.');
+  }
+}
+
+export const createExam = async (payload: Partial<IExam>) => {
+  if (payload.isPublished) assertPublishReady(payload);
   const exam = await Exam.create(normalizeMarkingScheme({ ...payload }) as IExam);
-  return exam;
+  return withStatus(exam);
 };
 
 export const updateExam = async (id: string, payload: Partial<IExam>) => {
-  return Exam.findByIdAndUpdate(id, normalizeMarkingScheme({ ...payload }), { new: true });
+  let existing: IExam | null = null;
+  if (payload.isPublished) {
+    existing = await Exam.findById(id);
+    assertPublishReady(payload, existing);
+  }
+  const updated = await Exam.findByIdAndUpdate(id, normalizeMarkingScheme({ ...payload }), { new: true });
+  return withStatus(updated);
 };
 
-export const getExam = async (id: string) => Exam.findById(id);
+export const getExam = async (id: string) => withStatus(await Exam.findById(id));
 export const listExams = async (filter: any = {}, limit = 50, skip = 0) => {
   const [items, total] = await Promise.all([
     Exam.find(filter).limit(limit).skip(skip).sort({ createdAt: -1 }),
     Exam.countDocuments(filter),
   ]);
-  return { items, total };
+  return { items: items.map(withStatus), total };
 };
 
 export const deleteExam = async (id: string) => {
@@ -174,32 +207,30 @@ export const deleteExam = async (id: string) => {
 export const assignExam = async (id: string, users?: string[], groups?: string[]) => {
   const exam = await Exam.findById(id);
   if (!exam) return null;
+  // Non-destructive: a caller that only sends `groups` (e.g. the
+  // Schedule & Publish flow, which is class/batch-only) must not silently
+  // wipe out an existing individual-student assignment set by a different
+  // caller (e.g. the mobile build wizard's per-student picker), and vice
+  // versa. Omitting a key means "leave it as-is"; sending an empty array
+  // means "clear it" — both are distinguishable from `undefined` here.
   exam.assignedTo = {
-    users: users?.map((u) => new Types.ObjectId(u)),
-    groups,
+    users: users !== undefined ? users.map((u) => new Types.ObjectId(u)) : exam.assignedTo?.users,
+    groups: groups !== undefined ? groups : exam.assignedTo?.groups,
   };
+  // Notifications must never run ahead of a successful write — if save()
+  // throws, we exit here and nobody is told about an exam they cannot open.
   await exam.save();
 
   // Trigger Notifications
   try {
-    const userIds = new Set<string>();
-    
-    // Add directly assigned users
-    if (users) users.forEach(u => userIds.add(u));
+    // Resolved from the SAVED exam, not from the request payload: assignment is
+    // a non-destructive merge, and some clients express the audience purely
+    // through classLevel+batch while sending an empty `groups`. The saved
+    // document is the only complete picture of who the exam now targets.
+    const userIds = await resolveExamNotificationRecipients(exam);
 
-    // Resolve groups to users
-    if (groups && groups.length > 0) {
-      const groupUsers = await User.find({
-        $or: [
-          { batch: { $in: groups } },
-          { classLevel: { $in: groups } }
-        ]
-      }).select('_id');
-      groupUsers.forEach((u: any) => userIds.add(u._id.toString()));
-    }
-
-    if (userIds.size > 0) {
-      await notificationService.broadcastNotification(Array.from(userIds), {
+    if (userIds.length > 0) {
+      await notificationService.broadcastNotification(userIds, {
         type: 'exam',
         title: 'New Exam Assigned',
         body: `You have been assigned a new exam: ${exam.title}`,
@@ -210,7 +241,7 @@ export const assignExam = async (id: string, users?: string[], groups?: string[]
     console.error('Error sending exam assignment notifications:', err);
   }
 
-  return exam;
+  return withStatus(exam);
 };
 
 // Blueprint CRUD
@@ -234,7 +265,7 @@ export const createExamFromPaper = async (paper: GeneratedPaperResult, createdBy
   schedule?: { startAt?: string | Date; endAt?: string | Date };
   autoPublish?: boolean;
   blueprintId?: string;
-}): Promise<IExam> => {
+}) => {
   // First persist all questions (flatten sections)
   const questionDocs: IQuestion[] = [];
   for (const section of paper.sections) {
@@ -277,12 +308,25 @@ export const createExamFromPaper = async (paper: GeneratedPaperResult, createdBy
     };
   });
 
+  // autoPublish is only honoured when a valid schedule came with it — same
+  // requirement as every other publish path (assertPublishReady). Previously
+  // this bypassed that check entirely via a raw Exam.create, so an AI-generated
+  // exam could end up "published" with no schedule (unrestricted, immediate,
+  // indefinite access). Without a schedule it's created as a draft instead of
+  // throwing, since this flow has no inline UI to fix a validation error.
+  const hasValidSchedule = !!(
+    opts.schedule?.startAt &&
+    opts.schedule?.endAt &&
+    new Date(opts.schedule.startAt) < new Date(opts.schedule.endAt)
+  );
+  const isPublished = !!opts.autoPublish && hasValidSchedule;
+
   const exam = await Exam.create({
     title: paper.examTitle,
     description: `Generated exam from AI paper for subject ${paper.subject || ''}`.trim(),
     createdBy,
     sections,
-    isPublished: !!opts.autoPublish,
+    isPublished,
     classLevel: opts.classLevel,
     batch: opts.batch,
     autoPublish: opts.autoPublish,
@@ -290,5 +334,5 @@ export const createExamFromPaper = async (paper: GeneratedPaperResult, createdBy
     blueprintId: opts.blueprintId ? new Types.ObjectId(opts.blueprintId) : undefined,
     meta: { generated: true },
   } as any);
-  return exam;
+  return withStatus(exam);
 };

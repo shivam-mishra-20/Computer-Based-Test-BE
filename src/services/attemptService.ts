@@ -5,8 +5,16 @@ import Question, { IQuestion } from '../models/Question';
 import Attempt, { IAnswerItem } from '../models/Attempt';
 import ExamEvaluation from '../models/ExamEvaluation';
 import { computeMaxScoreForExam, sanitizeQuestion, shuffleArray } from '../utils/exam';
+import { getDeadline, getStartWindowState, getSubmitUnlockAt, isPastDeadline } from '../utils/examTiming';
 import { gradeSubjectiveAnswerGroq } from './aiService';
 import { getClassQuestionModel } from '../models/ClassQuestion';
+
+function makeError(message: string, code: string, extra?: Record<string, any>) {
+  const err: any = new Error(message);
+  err.code = code;
+  if (extra) Object.assign(err, extra);
+  return err;
+}
 
 export async function listAssignedExams(userId: string) {
   // Published exams assigned to this user: must match user's classLevel AND (batch OR "All Batches" OR explicitly assigned)
@@ -104,7 +112,8 @@ export async function startAttempt(examId: string, userId: string) {
   const user = await User.findById(userId).select('classLevel batch');
   const now = new Date();
   const hasSchedule = !!(exam.schedule?.startAt && exam.schedule?.endAt);
-  const openWindow = hasSchedule && exam.schedule!.startAt! <= now && exam.schedule!.endAt! >= now;
+  const windowState = getStartWindowState(exam, now);
+  const openWindow = windowState === 'active';
   const assignedUsers = exam.assignedTo?.users || [];
   // When an exam names specific students it is individually targeted: only those
   // students may start it, and the "open window = public" fallback below must not
@@ -126,7 +135,18 @@ export async function startAttempt(examId: string, userId: string) {
     (targeted && (!hasSchedule || openWindow)) ||
     (!isIndividuallyTargeted && !targeted && openWindow)
   );
-  if (!canAccess) throw new Error('You are not allowed to start this exam');
+  if (!canAccess) {
+    // Best-effort classification of WHY access was denied so both clients can
+    // branch between "show waiting room" / "exam closed" / "not eligible" —
+    // this does not change the access decision above, only the error surfaced.
+    if (hasSchedule && windowState === 'not-started') {
+      throw makeError('This exam has not started yet.', 'EXAM_NOT_STARTED', { startAt: exam.schedule?.startAt });
+    }
+    if (hasSchedule && windowState === 'closed') {
+      throw makeError('This exam has ended or the entry window has closed.', 'EXAM_ENDED', { endAt: exam.schedule?.endAt });
+    }
+    throw makeError('You are not allowed to start this exam', 'NOT_ELIGIBLE');
+  }
   // Prevent multiple attempts for same exam-user
   let attempt = await Attempt.findOne({ examId, userId });
   if (attempt) return attempt;
@@ -264,6 +284,7 @@ export async function getAttemptView(attemptId: string, userId: string) {
       totalDurationMins = Math.ceil((practiceTest.questionIds.length * (practiceTest.duration.perQuestionSecs || 60)) / 60);
     }
     
+    const ptDeadline = getDeadline(attempt, { totalDurationMins });
     return {
       attempt,
       exam: {
@@ -273,6 +294,9 @@ export async function getAttemptView(attemptId: string, userId: string) {
       },
       sections,
       questions: questionDict,
+      serverNow: new Date().toISOString(),
+      deadlineAt: ptDeadline ? ptDeadline.toISOString() : null,
+      submitUnlockAt: null,
     };
   }
   
@@ -337,7 +361,74 @@ export async function getAttemptView(attemptId: string, userId: string) {
     }
     questionDict[qid] = sanitized;
   }
-  return { attempt, exam: { _id: exam._id, title: exam.title, totalDurationMins: exam.totalDurationMins, antiCheat: !!exam.antiCheat }, sections, questions: questionDict };
+  const deadline = getDeadline(attempt, exam);
+  const submitUnlockAt = getSubmitUnlockAt(attempt, exam);
+  return {
+    attempt,
+    exam: {
+      _id: exam._id,
+      title: exam.title,
+      totalDurationMins: exam.totalDurationMins,
+      antiCheat: !!exam.antiCheat,
+      instructions: exam.instructions,
+      schedule: exam.schedule,
+    },
+    sections,
+    questions: questionDict,
+    serverNow: new Date().toISOString(),
+    deadlineAt: deadline ? deadline.toISOString() : null,
+    submitUnlockAt: submitUnlockAt ? submitUnlockAt.toISOString() : null,
+  };
+}
+
+// Waiting-room metadata for a not-yet-started attempt. Deliberately does NOT
+// check the time window (the waiting room needs to render before start) and
+// does NOT create an attempt or return any question content.
+export async function getExamPreview(examId: string, userId: string) {
+  const exam = await Exam.findById(examId).populate('createdBy', 'name');
+  if (!exam) throw makeError('Exam not found', 'NOT_FOUND');
+  const user = await User.findById(userId).select('classLevel batch');
+  if (!user) throw makeError('User not found', 'NOT_FOUND');
+
+  // Eligibility mirrors listAssignedExams' visibility rule (the exam list is the
+  // actual gate for "can this student even see this exam") rather than
+  // startAttempt's more permissive edge cases — a student who can't see the exam
+  // in their list shouldn't be able to preview it via a guessed URL either.
+  const assignedUsers = exam.assignedTo?.users || [];
+  const isIndividuallyTargeted = assignedUsers.length > 0;
+  const explicitUser = assignedUsers.some((u) => u.toString() === userId.toString());
+  const groupLabels = new Set<string>([user.classLevel || '', user.batch || ''].filter(Boolean));
+  const inGroups = (exam.assignedTo?.groups || []).some((g) => groupLabels.has(g));
+  const normalizeClass = (cls?: string) => cls?.replace(/^Class\s*/i, '').trim().toLowerCase() || '';
+  const classMatch = !!(user.classLevel && exam.classLevel && normalizeClass(exam.classLevel) === normalizeClass(user.classLevel));
+  const batchMatch = !!(user.batch && exam.batch && (exam.batch === user.batch || exam.batch === 'All Batches'));
+  const eligible = exam.isPublished && (
+    explicitUser || (!isIndividuallyTargeted && (classMatch || batchMatch || inGroups))
+  );
+  if (!eligible) throw makeError('You are not allowed to view this exam', 'NOT_ELIGIBLE');
+
+  const totalQuestions = exam.sections.reduce((sum, s) => sum + s.questionIds.length, 0);
+  return {
+    examId: exam._id,
+    title: exam.title,
+    teacherName: (exam.createdBy as any)?.name,
+    subject: exam.meta?.subject,
+    durationMins: exam.totalDurationMins,
+    totalQuestions,
+    markingScheme: exam.markingScheme,
+    instructions: exam.instructions,
+    antiCheat: !!exam.antiCheat,
+    schedule: exam.schedule,
+    serverNow: new Date().toISOString(),
+  };
+}
+
+export async function heartbeat(attemptId: string, userId: string) {
+  const attempt = await Attempt.findById(attemptId).select('userId');
+  if (!attempt) throw makeError('Attempt not found', 'NOT_FOUND');
+  if (attempt.userId.toString() !== userId) throw makeError('Forbidden', 'FORBIDDEN');
+  await Attempt.updateOne({ _id: attemptId }, { $set: { lastHeartbeatAt: new Date() } });
+  return { serverNow: new Date().toISOString() };
 }
 
 export async function getAttemptViewForTeacher(attemptId: string) {
@@ -378,43 +469,20 @@ export async function getAttemptViewForTeacher(attemptId: string) {
   return { attempt, exam: { _id: exam._id, title: exam.title, totalDurationMins: exam.totalDurationMins }, sections, questions: questionDict };
 }
 
-export async function saveAnswer(attemptId: string, userId: string, answer: IAnswerItem) {
-  const attempt = await Attempt.findById(attemptId);
-  if (!attempt) throw new Error('Attempt not found');
-  if (attempt.userId.toString() !== userId) throw new Error('Forbidden');
-  if (!['in-progress'].includes(attempt.status)) throw new Error('Attempt not editable');
-  
-  // Check for time expiry - handle both regular exams and practice tests
-  if (attempt.practiceTestId) {
-    // Practice test - check duration from practice test
-    const PracticeTest = (await import('../models/PracticeTest')).default;
-    const practiceTest = await PracticeTest.findById(attempt.practiceTestId);
-    if (practiceTest && practiceTest.duration.type === 'total' && practiceTest.duration.totalMins && attempt.startedAt) {
-      const deadline = new Date(attempt.startedAt.getTime() + practiceTest.duration.totalMins * 60 * 1000);
-      if (new Date() > deadline) {
-        return submitAttempt(attemptId, userId, true);
-      }
-    }
-  } else if (attempt.examId) {
-    // Regular exam - check duration from exam
-    const exam = await Exam.findById(attempt.examId);
-    if (!exam) throw new Error('Exam not found');
-    if ((attempt.mode || exam.mode) === 'live' && exam.totalDurationMins && attempt.startedAt) {
-      const deadline = new Date(attempt.startedAt.getTime() + exam.totalDurationMins * 60 * 1000);
-      if (new Date() > deadline) {
-        return submitAttempt(attemptId, userId, true);
-      }
-    }
-  }
-  
+// Merge one answer into an attempt's answers array, non-destructively (only
+// overwrite fields actually provided) and clientSeq-guarded: if the stored
+// answer already carries a clientSeq >= the incoming one, the write is skipped
+// as a safe no-op (`applied:false`) instead of clobbering a newer answer. This
+// is what makes retried/out-of-order offline-queue writes safe regardless of
+// network reordering — both callers (single saveAnswer, batch) share it.
+function mergeAnswer(attempt: InstanceType<typeof Attempt>, answer: IAnswerItem): boolean {
   const idx = attempt.answers.findIndex((a) => a.questionId.toString() === answer.questionId.toString());
   if (idx >= 0) {
-    // Non-destructive merge: only overwrite fields that were actually provided.
-    // A spread merge ({ ...existing, ...answer }) would clobber chosenOptionId /
-    // textAnswer with `undefined` whenever a partial update (e.g. a mark-for-review
-    // toggle) comes in, silently erasing the student's saved answer. Mutate the
-    // existing subdocument in place so untouched fields survive.
     const existing = attempt.answers[idx] as any;
+    const incomingSeq = (answer as any).clientSeq;
+    if (typeof existing.clientSeq === 'number' && typeof incomingSeq === 'number' && existing.clientSeq > incomingSeq) {
+      return false; // stale write, no-op
+    }
     for (const [key, value] of Object.entries(answer)) {
       if (value !== undefined) existing[key] = value;
     }
@@ -422,12 +490,64 @@ export async function saveAnswer(attemptId: string, userId: string, answer: IAns
   } else {
     attempt.answers.push(answer);
   }
-  await attempt.save();
-  return attempt;
+  return true;
+}
+
+export async function saveAnswer(attemptId: string, userId: string, answer: IAnswerItem): Promise<{ attempt: InstanceType<typeof Attempt>; applied: boolean }> {
+  const attempt = await Attempt.findById(attemptId);
+  if (!attempt) throw new Error('Attempt not found');
+  if (attempt.userId.toString() !== userId) throw new Error('Forbidden');
+  if (!['in-progress'].includes(attempt.status)) throw new Error('Attempt not editable');
+
+  // Check for time expiry - handle both regular exams and practice tests
+  if (attempt.practiceTestId) {
+    // Practice test - check duration from practice test
+    const PracticeTest = (await import('../models/PracticeTest')).default;
+    const practiceTest = await PracticeTest.findById(attempt.practiceTestId);
+    if (practiceTest && practiceTest.duration.type === 'total' && isPastDeadline(attempt, { totalDurationMins: practiceTest.duration.totalMins })) {
+      return { attempt: await submitAttempt(attemptId, userId, true), applied: false };
+    }
+  } else if (attempt.examId) {
+    // Regular exam - check duration from exam
+    const exam = await Exam.findById(attempt.examId);
+    if (!exam) throw new Error('Exam not found');
+    if ((attempt.mode || exam.mode) === 'live' && isPastDeadline(attempt, exam)) {
+      return { attempt: await submitAttempt(attemptId, userId, true), applied: false };
+    }
+  }
+
+  const applied = mergeAnswer(attempt, answer);
+  if (applied) await attempt.save();
+  return { attempt, applied };
+}
+
+// Last-mile sync: apply several queued answers in one save (used to flush a
+// client's offline queue, and inline from submitAttempt). Same clientSeq guard
+// as saveAnswer, applied per-item so one stale item doesn't block the rest.
+export async function saveAnswersBatch(attemptId: string, userId: string, answers: IAnswerItem[]) {
+  const attempt = await Attempt.findById(attemptId);
+  if (!attempt) throw new Error('Attempt not found');
+  if (attempt.userId.toString() !== userId) throw new Error('Forbidden');
+  if (!['in-progress'].includes(attempt.status)) throw new Error('Attempt not editable');
+
+  if (attempt.examId) {
+    const exam = await Exam.findById(attempt.examId);
+    if (exam && (attempt.mode || exam.mode) === 'live' && isPastDeadline(attempt, exam)) {
+      return { attempt: await submitAttempt(attemptId, userId, true), results: [] as { questionId: string; applied: boolean }[] };
+    }
+  }
+
+  const results = answers.map((answer) => ({
+    questionId: answer.questionId.toString(),
+    applied: mergeAnswer(attempt, answer),
+  }));
+  if (results.some((r) => r.applied)) await attempt.save();
+  return { attempt, results };
 }
 
 export async function markForReview(attemptId: string, userId: string, questionId: string, marked: boolean) {
-  return saveAnswer(attemptId, userId, { questionId: new Types.ObjectId(questionId), isMarkedForReview: marked });
+  const { attempt } = await saveAnswer(attemptId, userId, { questionId: new Types.ObjectId(questionId), isMarkedForReview: marked });
+  return attempt;
 }
 
 /**
@@ -571,7 +691,7 @@ export function gradeObjective(q: IQuestion, ans: IAnswerItem): { isCorrect: boo
   return null; // subjective -> AI graded
 }
 
-export async function submitAttempt(attemptId: string, userId: string, auto = false) {
+export async function submitAttempt(attemptId: string, userId: string, auto = false, inlineAnswers: IAnswerItem[] = []) {
   const attempt = await Attempt.findById(attemptId);
   if (!attempt) throw new Error('Attempt not found');
   if (attempt.userId.toString() !== userId) throw new Error('Forbidden');
@@ -581,6 +701,31 @@ export async function submitAttempt(attemptId: string, userId: string, auto = fa
     // attempt instead of throwing prevents the manual "Submit" button from
     // surfacing a spurious "Submit failed" error to the student.
     return attempt;
+  }
+
+  // Last-mile answers a client attaches directly to the submit call (any still
+  // unsynced offline-queue entries) — applied before the 50% lock check and
+  // grading below so nothing queued is lost even if it never made a separate
+  // /answer or /answers/batch round trip.
+  if (inlineAnswers.length) {
+    for (const a of inlineAnswers) mergeAnswer(attempt, a);
+  }
+
+  // Voluntary-submit lock: a student may not submit during the first
+  // submitLockPercent% of the exam duration. Auto-submits (time-up, anti-cheat
+  // violation threshold, forced) always pass auto=true and skip this.
+  if (!auto && attempt.examId && !attempt.practiceTestId) {
+    const lockExam = await Exam.findById(attempt.examId).select('totalDurationMins submitLockPercent');
+    if (lockExam) {
+      const unlockAt = getSubmitUnlockAt(attempt, lockExam);
+      if (unlockAt && new Date() < unlockAt) {
+        throw makeError(
+          'You may submit your exam after completing the first half of the examination duration.',
+          'SUBMIT_LOCKED',
+          { unlockAt: unlockAt.toISOString() }
+        );
+      }
+    }
   }
 
   let qmap: Map<string, any>;
@@ -598,13 +743,10 @@ export async function submitAttempt(attemptId: string, userId: string, auto = fa
     if (!practiceTest) throw new Error('Practice test not found');
     
     // Check for time expiry
-    if (practiceTest.duration.type === 'total' && practiceTest.duration.totalMins && attempt.startedAt) {
-      const deadline = new Date(attempt.startedAt.getTime() + practiceTest.duration.totalMins * 60 * 1000);
-      if (new Date() > deadline) {
-        auto = true;
-      }
+    if (practiceTest.duration.type === 'total' && isPastDeadline(attempt, { totalDurationMins: practiceTest.duration.totalMins })) {
+      auto = true;
     }
-    
+
     // Use practice test marking scheme
     markingScheme = practiceTest.markingScheme;
     
@@ -622,13 +764,10 @@ export async function submitAttempt(attemptId: string, userId: string, auto = fa
     if (!exam) throw new Error('Exam not found');
     
     // Live mode: if time is over, force auto submit path
-    if ((attempt.mode || exam.mode) === 'live' && exam.totalDurationMins && attempt.startedAt) {
-      const deadline = new Date(attempt.startedAt.getTime() + exam.totalDurationMins * 60 * 1000);
-      if (new Date() > deadline) {
-        auto = true;
-      }
+    if ((attempt.mode || exam.mode) === 'live' && isPastDeadline(attempt, exam)) {
+      auto = true;
     }
-    
+
     const qids = exam.sections.flatMap((s) => s.questionIds);
     let questions: IQuestion[];
     if (exam.classLevel) {

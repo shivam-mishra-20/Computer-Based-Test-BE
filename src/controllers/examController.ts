@@ -48,10 +48,14 @@ export const createExamCtrl = async (req: Request, res: Response) => {
 };
 
 export const updateExamCtrl = async (req: Request, res: Response) => {
-  const exam = await updateExam(req.params.id, req.body);
-  if (!exam) return res.status(404).json({ message: 'Exam not found' });
-  await logAudit((req as any).user?.id, 'admin.exam.update', String(exam._id), { patch: req.body });
-  res.json(exam);
+  try {
+    const exam = await updateExam(req.params.id, req.body);
+    if (!exam) return res.status(404).json({ message: 'Exam not found' });
+    await logAudit((req as any).user?.id, 'admin.exam.update', String(exam._id), { patch: req.body });
+    res.json(exam);
+  } catch (err: any) {
+    res.status(400).json({ message: err.message || 'Failed to update exam' });
+  }
 };
 
 export const getExamCtrl = async (req: Request, res: Response) => {

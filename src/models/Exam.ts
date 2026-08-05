@@ -28,7 +28,18 @@ export interface IExam extends Document {
   schedule?: {
     startAt?: Date;
     endAt?: Date;
+    // Display-only IANA zone (dates are always stored/compared as absolute UTC).
+    timezone?: string;
   };
+  // Shown to students on the pre-exam waiting screen.
+  instructions?: string;
+  // Minutes after schedule.startAt during which a student may still start the
+  // exam. Unset = students may start any time up to schedule.endAt (today's
+  // behavior). Does not extend schedule.endAt itself.
+  lateEntryMins?: number;
+  // % of totalDurationMins that must elapse before a student may voluntarily
+  // submit. Does not gate auto-submit (time-up / anti-cheat / forced).
+  submitLockPercent?: number;
   classLevel?: string; // e.g., 'Class 10', 'NEET Batch'
   batch?: string; // batch/group label
   autoPublish?: boolean; // if true exam auto publishes at start
@@ -73,7 +84,11 @@ const examSchema = new Schema<IExam>(
     schedule: {
       startAt: { type: Date },
       endAt: { type: Date },
+      timezone: { type: String, default: 'Asia/Kolkata' },
     },
+    instructions: { type: String },
+    lateEntryMins: { type: Number },
+    submitLockPercent: { type: Number, default: 50 },
     classLevel: { type: String, index: true },
     batch: { type: String, index: true },
     autoPublish: { type: Boolean, default: false },

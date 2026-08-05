@@ -112,6 +112,22 @@ export const uploadLimiter = rateLimit({
 });
 
 /**
+ * Public (unauthenticated) form submissions — e.g. class requests. Keyed by IP
+ * since there is no user. Deliberately tight: a real person submits a handful
+ * of these, so a low ceiling blunts scripted spam without affecting anyone.
+ */
+export const publicFormLimiter = rateLimit({
+  windowMs: envNumber('PUBLIC_FORM_RATE_LIMIT_WINDOW_MS', 60 * 60 * 1000),
+  max: envNumber('PUBLIC_FORM_RATE_LIMIT_MAX', 20),
+  message: 'Too many submissions from this device, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: createRedisStore('rl:public-form:'),
+  passOnStoreError: true,
+  validate: false,
+});
+
+/**
  * Message/Chat endpoints — per-user (all message routes are authenticated).
  */
 export const messageLimiter = rateLimit({

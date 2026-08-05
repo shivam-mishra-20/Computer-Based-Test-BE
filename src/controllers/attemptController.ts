@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
-import { listAssignedExams, startAttempt, getAttemptView, saveAnswer, markForReview, clearAnswerResponse, submitAttempt, publishResult, logActivity, nextAdaptiveQuestion, listPendingReviewAttempts, adjustAnswerScore, listAttemptsForUser, getAttemptViewForTeacher } from '../services/attemptService';
+import { listAssignedExams, startAttempt, getAttemptView, saveAnswer, saveAnswersBatch, markForReview, clearAnswerResponse, submitAttempt, publishResult, logActivity, nextAdaptiveQuestion, listPendingReviewAttempts, adjustAnswerScore, listAttemptsForUser, getAttemptViewForTeacher, getExamPreview, heartbeat } from '../services/attemptService';
 import Question from '../models/Question';
 import Attempt from '../models/Attempt';
 
@@ -14,7 +14,25 @@ export const startAttemptCtrl = async (req: Request, res: Response) => {
     const attempt = await startAttempt(req.params.examId, (req as any).user.id);
     res.status(201).json(attempt);
   } catch (err: any) {
-    res.status(400).json({ message: err.message || 'Failed to start attempt' });
+    res.status(400).json({ message: err.message || 'Failed to start attempt', code: err.code, startAt: err.startAt, endAt: err.endAt });
+  }
+};
+
+export const examPreviewCtrl = async (req: Request, res: Response) => {
+  try {
+    const preview = await getExamPreview(req.params.examId, (req as any).user.id);
+    res.json(preview);
+  } catch (err: any) {
+    res.status(err.code === 'NOT_FOUND' ? 404 : 400).json({ message: err.message || 'Failed to load exam preview', code: err.code });
+  }
+};
+
+export const heartbeatCtrl = async (req: Request, res: Response) => {
+  try {
+    const result = await heartbeat(req.params.attemptId, (req as any).user.id);
+    res.json(result);
+  } catch (err: any) {
+    res.status(400).json({ message: err.message || 'Failed to record heartbeat' });
   }
 };
 
@@ -27,6 +45,60 @@ export const getAttemptCtrl = async (req: Request, res: Response) => {
   }
 };
 
+// Build a PARTIAL answer that contains only the fields the client actually
+// sent. The service merges non-destructively, so omitting a field leaves the
+// stored value intact (critical: a mark-for-review toggle must not wipe the
+// answer, and an answer save must not wipe the review flag). Shared by the
+// single-answer and batch (offline-sync flush) endpoints.
+function buildAnswerFromBody(body: any): any {
+  const answer: any = { questionId: new Types.ObjectId(body.questionId) };
+
+  if (body.chosenOptionId) {
+    answer.chosenOptionId = new Types.ObjectId(body.chosenOptionId);
+  }
+  if (Array.isArray(body.selectedOptionIds)) {
+    // Multi-select is persisted as a JSON array of option ids in textAnswer.
+    answer.textAnswer = JSON.stringify(body.selectedOptionIds);
+  } else if (body.textAnswer !== undefined && body.textAnswer !== null) {
+    answer.textAnswer = body.textAnswer;
+  }
+  if (typeof body.isMarkedForReview === 'boolean') {
+    answer.isMarkedForReview = body.isMarkedForReview;
+  }
+  if (body.timeSpentSec !== undefined) {
+    answer.timeSpentSec = body.timeSpentSec;
+  }
+  // Offline-sync ordering: monotonic per-attempt sequence + client timestamp.
+  // Older clients that don't send these simply skip the staleness guard.
+  if (typeof body.clientSeq === 'number') {
+    answer.clientSeq = body.clientSeq;
+  }
+  if (body.clientTs) {
+    answer.clientTs = new Date(body.clientTs);
+  }
+
+  // Backward/cross-client compatibility: older mobile builds POST a single
+  // `response` field instead of chosenOptionId/textAnswer. Route it to the
+  // right field so those answers are no longer silently dropped (the "0
+  // attempted from app" bug). Only used when explicit fields are absent.
+  if (
+    answer.chosenOptionId === undefined &&
+    answer.textAnswer === undefined &&
+    body.response !== undefined &&
+    body.response !== null
+  ) {
+    const r = body.response;
+    if (Array.isArray(r)) {
+      answer.textAnswer = JSON.stringify(r);
+    } else if (typeof r === 'string' && /^[a-f\d]{24}$/i.test(r)) {
+      answer.chosenOptionId = new Types.ObjectId(r);
+    } else {
+      answer.textAnswer = String(r);
+    }
+  }
+  return answer;
+}
+
 export const saveAnswerCtrl = async (req: Request, res: Response) => {
   try {
     const body = req.body || {};
@@ -35,52 +107,22 @@ export const saveAnswerCtrl = async (req: Request, res: Response) => {
       const cleared = await clearAnswerResponse(req.params.attemptId, (req as any).user.id, body.questionId);
       return res.json(cleared);
     }
-    // Build a PARTIAL answer that contains only the fields the client actually
-    // sent. The service merges non-destructively, so omitting a field leaves the
-    // stored value intact (critical: a mark-for-review toggle must not wipe the
-    // answer, and an answer save must not wipe the review flag).
-    const answer: any = { questionId: new Types.ObjectId(body.questionId) };
-
-    if (body.chosenOptionId) {
-      answer.chosenOptionId = new Types.ObjectId(body.chosenOptionId);
-    }
-    if (Array.isArray(body.selectedOptionIds)) {
-      // Multi-select is persisted as a JSON array of option ids in textAnswer.
-      answer.textAnswer = JSON.stringify(body.selectedOptionIds);
-    } else if (body.textAnswer !== undefined && body.textAnswer !== null) {
-      answer.textAnswer = body.textAnswer;
-    }
-    if (typeof body.isMarkedForReview === 'boolean') {
-      answer.isMarkedForReview = body.isMarkedForReview;
-    }
-    if (body.timeSpentSec !== undefined) {
-      answer.timeSpentSec = body.timeSpentSec;
-    }
-
-    // Backward/cross-client compatibility: older mobile builds POST a single
-    // `response` field instead of chosenOptionId/textAnswer. Route it to the
-    // right field so those answers are no longer silently dropped (the "0
-    // attempted from app" bug). Only used when explicit fields are absent.
-    if (
-      answer.chosenOptionId === undefined &&
-      answer.textAnswer === undefined &&
-      body.response !== undefined &&
-      body.response !== null
-    ) {
-      const r = body.response;
-      if (Array.isArray(r)) {
-        answer.textAnswer = JSON.stringify(r);
-      } else if (typeof r === 'string' && /^[a-f\d]{24}$/i.test(r)) {
-        answer.chosenOptionId = new Types.ObjectId(r);
-      } else {
-        answer.textAnswer = String(r);
-      }
-    }
-
-    const attempt = await saveAnswer(req.params.attemptId, (req as any).user.id, answer);
-    res.json(attempt);
+    const answer = buildAnswerFromBody(body);
+    const { attempt, applied } = await saveAnswer(req.params.attemptId, (req as any).user.id, answer);
+    res.json({ ...(attempt as any).toObject(), applied });
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Failed to save answer' });
+  }
+};
+
+export const saveAnswersBatchCtrl = async (req: Request, res: Response) => {
+  try {
+    const items = Array.isArray(req.body?.answers) ? req.body.answers : [];
+    const answers = items.map(buildAnswerFromBody);
+    const { attempt, results } = await saveAnswersBatch(req.params.attemptId, (req as any).user.id, answers);
+    res.json({ ...(attempt as any).toObject(), results });
+  } catch (err: any) {
+    res.status(400).json({ message: err.message || 'Failed to sync answers' });
   }
 };
 
@@ -97,10 +139,15 @@ export const submitAttemptCtrl = async (req: Request, res: Response) => {
   try {
     // Tolerate a body-less POST (req.body may be undefined) — older mobile builds
     // submit with no body, and reading `.auto` off undefined throws a 400.
-    const attempt = await submitAttempt(req.params.attemptId, (req as any).user.id, !!req.body?.auto);
+    const body = req.body || {};
+    // Last-mile answers a client attaches directly to the submit call (any
+    // still-unsynced offline-queue entries at exam end).
+    const inlineAnswers = Array.isArray(body.answers) ? body.answers.map(buildAnswerFromBody) : [];
+    const attempt = await submitAttempt(req.params.attemptId, (req as any).user.id, !!body.auto, inlineAnswers);
     res.json(attempt);
   } catch (err: any) {
-    res.status(400).json({ message: err.message || 'Failed to submit attempt' });
+    const status = err.code === 'SUBMIT_LOCKED' ? 403 : 400;
+    res.status(status).json({ message: err.message || 'Failed to submit attempt', code: err.code, unlockAt: err.unlockAt });
   }
 };
 

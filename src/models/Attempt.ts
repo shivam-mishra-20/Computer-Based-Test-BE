@@ -17,6 +17,12 @@ export interface IAnswerItem {
   manualScore?: number;
   manualScoreBy?: Types.ObjectId;
   manualScoreAt?: Date;
+  // Monotonic per-attempt sequence number assigned by the client when this
+  // answer was made locally (offline-sync ordering/idempotency). A merge is
+  // skipped if the stored clientSeq is already >= the incoming one, so a
+  // stale/out-of-order queued write can never clobber a newer answer.
+  clientSeq?: number;
+  clientTs?: Date;
 }
 
 export interface IActivityLog {
@@ -65,6 +71,7 @@ export interface IAttempt extends Document {
   percentile?: number;
   resultPublished?: boolean;
   activityLogs?: IActivityLog[];
+  lastHeartbeatAt?: Date;
 }
 
 const answerSchema = new Schema<IAnswerItem>(
@@ -81,6 +88,8 @@ const answerSchema = new Schema<IAnswerItem>(
     manualScore: { type: Number },
     manualScoreBy: { type: Schema.Types.ObjectId, ref: 'User' },
     manualScoreAt: { type: Date },
+    clientSeq: { type: Number },
+    clientTs: { type: Date },
   },
   { _id: false }
 );
@@ -113,6 +122,7 @@ const attemptSchema = new Schema<IAttempt>(
     rankInTest: { type: Number },
     percentile: { type: Number },
     resultPublished: { type: Boolean, default: false },
+    lastHeartbeatAt: { type: Date },
     activityLogs: [
       {
         at: { type: Date, default: Date.now },

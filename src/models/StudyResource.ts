@@ -3,6 +3,24 @@ import mongoose, { Document, Schema } from 'mongoose';
 export type ResourceType = 'video' | 'pdf';
 export type ResourceStatus = 'draft' | 'published' | 'archived';
 
+// Controlled category for the public/guest learning sections. Kept SEPARATE
+// from the pre-existing free-text `category` field (which holds subject-ish
+// values like "Mathematics" and is still used by the authenticated study
+// materials UI) so existing content keeps working untouched. Optional by
+// design: a resource without one simply doesn't appear in a guest section.
+export type ResourceContentCategory =
+  | 'TECHNIQUE'
+  | 'PLAYLIST'
+  | 'SAMPLE_PAPER'
+  | 'LECTURE_NOTE';
+
+export const RESOURCE_CONTENT_CATEGORIES: ResourceContentCategory[] = [
+  'TECHNIQUE',
+  'PLAYLIST',
+  'SAMPLE_PAPER',
+  'LECTURE_NOTE',
+];
+
 export interface IStudyResource extends Document {
   title: string;
   description: string;
@@ -10,6 +28,7 @@ export interface IStudyResource extends Document {
   resourceUrl: string; // YouTube URL or Firebase Storage URL
   thumbnailUrl?: string; // Thumbnail image URL
   category: string; // e.g., 'Mathematics', 'Physics', 'Chemistry'
+  contentCategory?: ResourceContentCategory; // public/guest section grouping
   subject: string;
   classLevel: string;
   batch?: string;
@@ -42,6 +61,7 @@ const studyResourceSchema = new Schema<IStudyResource>({
   resourceUrl: { type: String, required: true },
   thumbnailUrl: { type: String },
   category: { type: String, required: true, index: true },
+  contentCategory: { type: String, enum: RESOURCE_CONTENT_CATEGORIES, index: true },
   subject: { type: String, required: true, index: true },
   classLevel: { type: String, required: true, index: true },
   batch: { type: String, index: true },
@@ -79,6 +99,8 @@ studyResourceSchema.pre('save', function(next) {
 // Indexes for efficient queries
 studyResourceSchema.index({ type: 1, status: 1, classLevel: 1, subject: 1 });
 studyResourceSchema.index({ isPublic: 1, isFeatured: 1 });
+// Guest sections: published + public, grouped by controlled category.
+studyResourceSchema.index({ isPublic: 1, status: 1, contentCategory: 1 });
 studyResourceSchema.index({ tags: 1 });
 
 export default mongoose.model<IStudyResource>('StudyResource', studyResourceSchema);
