@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import TestResult, { ITestResult, IStudentResult } from '../models/TestResult';
 import User from '../models/User';
 import { sendStudentNotifications } from '../services/notificationService';
+import { INSTITUTE_ACCOUNT_CLAUSE } from '../utils/instituteAudience';
 
 // ── Assignment + notification helpers ────────────────────────────────────────
 // These mirror the Homework module (homeworkRoutes.ts) so offline tests reuse
@@ -53,7 +54,7 @@ async function resolveTestStudentIds(test: any): Promise<string[]> {
   const classScope = buildClassVariants(classSource);
   if (classScope.length === 0) return [];
 
-  const query: any = { role: 'student', classLevel: { $in: classScope } };
+  const query: any = { role: 'student', ...INSTITUTE_ACCOUNT_CLAUSE, classLevel: { $in: classScope } };
 
   // Batch restriction = assignedBatches ∪ the test's own `batch`, ignoring
   // empty / "all" / "All Batches" wildcards. When present, only those batches
@@ -222,12 +223,55 @@ export const getTestById = async (req: Request, res: Response) => {
       return res.status(404).json({ message: 'Test not found' });
     }
 
-    res.json(test);
+    res.json({
+      ...test,
+      studentResults: await withStudentImages(test.studentResults as any[]),
+    });
   } catch (error: any) {
     console.error('[TestResults] Get by ID error:', error);
     res.status(500).json({ message: 'Failed to fetch test', error: error.message });
   }
 };
+
+/**
+ * Attach each student's profile image to their result row.
+ *
+ * ── Why a join and not a stored field ────────────────────────────────────────
+ * TestResult denormalises `studentName` at entry time, which is right for a
+ * name (it is the name as recorded when the test was marked). An IMAGE is not
+ * like that: a student who updates their photo should be recognisable in every
+ * result immediately, and a copy taken at entry time would go stale and, worse,
+ * would keep showing a face that no longer belongs to that person's account.
+ *
+ * ── Why it cannot mismatch ───────────────────────────────────────────────────
+ * The lookup is keyed on `studentId` and written back onto the same row object.
+ * A student whose account no longer exists simply gets no image — the row keeps
+ * its stored name and marks rather than disappearing or inheriting a neighbour's
+ * face.
+ *
+ * One query per test, regardless of class size.
+ */
+async function withStudentImages<T extends { studentId?: string }>(rows: T[]): Promise<T[]> {
+  const list = Array.isArray(rows) ? rows : [];
+  const ids = Array.from(
+    new Set(
+      list
+        .map((r) => String(r?.studentId || ''))
+        .filter((id) => mongoose.Types.ObjectId.isValid(id)),
+    ),
+  );
+  if (ids.length === 0) return list;
+
+  const users = await User.find({ _id: { $in: ids } })
+    .select('_id profileImage')
+    .lean();
+  const imageById = new Map(users.map((u: any) => [String(u._id), u.profileImage]));
+
+  return list.map((row) => ({
+    ...row,
+    profileImage: imageById.get(String(row?.studentId || '')) || undefined,
+  }));
+}
 
 // Update test results (marks for students)
 export const updateTestResults = async (req: Request, res: Response) => {
@@ -474,9 +518,10 @@ export const getLeaderboard = async (req: Request, res: Response) => {
       student.rank = index + 1;
     });
 
-    // Apply limit if specified
+    // Apply limit if specified. Images are attached AFTER slicing, so a class
+    // of 300 costs one lookup of the ten rows actually returned.
     const limitNum = limit ? parseInt(limit as string) : leaderboard.length;
-    res.json(leaderboard.slice(0, limitNum));
+    res.json(await withStudentImages(leaderboard.slice(0, limitNum)));
   } catch (error: any) {
     console.error('[TestResults] Get leaderboard error:', error);
     res.status(500).json({ message: 'Failed to fetch leaderboard', error: error.message });

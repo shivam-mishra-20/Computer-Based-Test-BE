@@ -8,6 +8,7 @@ import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
 import { uploadAiContent } from '../../middlewares/uploadAiContent';
 import { aiLimiter } from '../../middlewares/rateLimiter';
 import { buildClassVariants } from '../../utils/audienceTargeting';
+import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
 import {
   generate as aiContentGenerate,
   listHistory as aiContentListHistory,
@@ -88,7 +89,11 @@ router.get('/batches', authMiddleware, async (req: AuthRequest, res: Response) =
 
     // Also include batches that actually exist on students, so pickers work
     // even before the teacher has created any batch-scoped exam
-    const studentBatches = await User.distinct('batch', { role: 'student', status: 'approved' });
+    const studentBatches = await User.distinct('batch', {
+      role: 'student',
+      status: 'approved',
+      ...INSTITUTE_ACCOUNT_CLAUSE,
+    });
 
     // Also include the teacher's own batch if assigned.
     // 'All Batches' is a placeholder, never a real batch.
@@ -101,10 +106,11 @@ router.get('/batches', authMiddleware, async (req: AuthRequest, res: Response) =
     // Get student counts per batch
     const batchData = await Promise.all(
       allBatches.map(async (batch) => {
-        const studentCount = await User.countDocuments({ 
-          role: 'student', 
+        const studentCount = await User.countDocuments({
+          role: 'student',
           batch,
-          status: 'approved'
+          status: 'approved',
+          ...INSTITUTE_ACCOUNT_CLAUSE,
         });
         
         const examCount = await Exam.countDocuments({ 
@@ -138,7 +144,8 @@ router.get('/students', authMiddleware, async (req: AuthRequest, res: Response) 
 
     const filter: any = {
       role: 'student',
-      status: 'approved'
+      status: 'approved',
+      ...INSTITUTE_ACCOUNT_CLAUSE,
     };
 
     // Note: students are intentionally NOT restricted to batches derived from
@@ -165,7 +172,7 @@ router.get('/students', authMiddleware, async (req: AuthRequest, res: Response) 
 
     const [students, total] = await Promise.all([
       User.find(filter)
-        .select('name email classLevel batch phone createdAt')
+        .select('name email classLevel batch phone createdAt profileImage')
         .sort({ name: 1 })
         .skip(skip)
         .limit(Number(limit))
@@ -212,11 +219,11 @@ router.get('/dashboard-stats', authMiddleware, async (req: AuthRequest, res: Res
       Lecture.countDocuments({ instructor: teacherId, status: 'published' }),
       Doubt.countDocuments({ $or: [{ teacher: teacherId }, { batch: teacherBatch }], status: 'pending' }),
       Doubt.countDocuments({ teacher: teacherId, status: 'resolved' }),
-      User.countDocuments({ role: 'student', batch: teacherBatch, status: 'approved' }),
+      User.countDocuments({ role: 'student', batch: teacherBatch, status: 'approved', ...INSTITUTE_ACCOUNT_CLAUSE }),
       Attempt.find({ /* we'd need exam filter */ })
         .sort({ createdAt: -1 })
         .limit(5)
-        .populate('userId', 'name')
+        .populate('userId', 'name profileImage')
         .populate('examId', 'title')
         .lean()
     ]);
@@ -270,10 +277,13 @@ router.get('/performance', authMiddleware, async (req: AuthRequest, res: Respons
       },
       {
         $group: {
+          // _id IS the student's user id, so studentImage below can never be
+          // paired with a different student's row.
           _id: '$user',
           studentName: { $first: '$student.name' },
           studentEmail: { $first: '$student.email' },
           studentBatch: { $first: '$student.batch' },
+          studentImage: { $first: '$student.profileImage' },
           totalAttempts: { $sum: 1 },
           avgScore: { $avg: '$score' },
           maxScore: { $max: '$score' },
@@ -350,7 +360,7 @@ router.get('/student-report/:studentId', authMiddleware, async (req: AuthRequest
 
     // Get student details
     const student = await User.findById(studentId)
-      .select('name email phone classLevel batch')
+      .select('name email phone classLevel batch profileImage')
       .lean();
 
     if (!student) {

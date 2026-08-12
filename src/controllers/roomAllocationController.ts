@@ -9,6 +9,7 @@ import RoomAllocation, {
 import TestResult from '../models/TestResult';
 import User from '../models/User';
 import { createAndSendNotification } from '../services/notificationService';
+import { INSTITUTE_ACCOUNT_CLAUSE } from '../utils/instituteAudience';
 
 // ── Roster resolution ─────────────────────────────────────────────────────────
 // Seating is allocated per EXAM DATE, not per test. A date can carry multiple
@@ -74,13 +75,15 @@ async function resolveTestRoster(test: any): Promise<RosterStudent[]> {
       .filter((id: any) => mongoose.Types.ObjectId.isValid(id))
       .map((id: any) => new mongoose.Types.ObjectId(id));
     if (ids.length === 0) return [];
-    students = await User.find({ _id: { $in: ids }, role: 'student' }).select(projection).lean();
+    students = await User.find({ _id: { $in: ids }, role: 'student', ...INSTITUTE_ACCOUNT_CLAUSE })
+      .select(projection)
+      .lean();
   } else {
     const classSource = test.assignedClasses?.length ? test.assignedClasses : [test.class];
     const classScope = buildClassVariants(classSource);
     if (classScope.length === 0) return [];
 
-    const query: any = { role: 'student', classLevel: { $in: classScope } };
+    const query: any = { role: 'student', ...INSTITUTE_ACCOUNT_CLAUSE, classLevel: { $in: classScope } };
 
     const batchScope = normalizeBatchList([...(test.assignedBatches || []), test.batch]).filter(
       (b) => !['all', 'all batches'].includes(b.toLowerCase())

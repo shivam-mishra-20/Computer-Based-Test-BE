@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import Syllabus from '../../models/Syllabus';
 import User from '../../models/User';
 import { authMiddleware } from '../../middlewares/authMiddleware';
+import { instituteStudentFilter } from '../../utils/instituteAudience';
 
 const router = Router();
 
@@ -77,8 +78,8 @@ router.get('/metadata', authMiddleware, async (req: Request, res: Response) => {
       distinctBatches
     ] = await Promise.all([
       Syllabus.distinct('subject'),
-      User.distinct('classLevel', { role: 'student' }),
-      User.distinct('batch', { role: 'student' })
+      User.distinct('classLevel', instituteStudentFilter()),
+      User.distinct('batch', instituteStudentFilter())
     ]);
     
     // Add default subjects if list is empty or small

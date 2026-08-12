@@ -5,6 +5,7 @@
 
 import User from '../models/User';
 import Batch from '../models/Batch';
+import { instituteStudentFilter } from '../utils/instituteAudience';
 import { initFirebaseAdmin } from './firebaseService';
 
 let admin: any = null;
@@ -205,6 +206,18 @@ export async function syncFirebaseStudentsToMongoDB(options?: {
             { email: fbStudent.email.toLowerCase() }
           ]
         });
+
+        // A public learner must never be silently converted into an institute
+        // student by an email collision — that would write institute
+        // classLevel/batch onto a self-registered account and pull it into
+        // every class roster. Skip and report instead of mutating.
+        if (existingUser && existingUser.accountType === 'PUBLIC_LEARNER') {
+          console.warn(
+            `[firebaseSync] Skipping ${fbStudent.email}: a PUBLIC_LEARNER account already uses this email.`,
+          );
+          result.skipped++;
+          continue;
+        }
 
         if (existingUser) {
           // Update existing user
@@ -454,11 +467,11 @@ export async function getSyncStats(): Promise<{
   const firebaseBatches = await fetchFirebaseBatches();
   const firebaseClasses = await fetchFirebaseClasses();
 
-  const mongoStudents = await User.countDocuments({ role: 'student' });
+  const mongoStudents = await User.countDocuments(instituteStudentFilter());
   const mongoTeachers = await User.countDocuments({ role: 'teacher' });
   const mongoBatches = await Batch.countDocuments();
 
-  const syncedStudents = await User.countDocuments({ role: 'student', authProvider: 'firebase' });
+  const syncedStudents = await User.countDocuments(instituteStudentFilter({ authProvider: 'firebase' }));
   const syncedTeachers = await User.countDocuments({ role: 'teacher', authProvider: 'firebase' });
 
   return {

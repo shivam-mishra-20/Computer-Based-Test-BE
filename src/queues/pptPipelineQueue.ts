@@ -28,6 +28,17 @@ export const bullmqConnection = new IORedis(REDIS_URL, {
   enableReadyCheck: false,
 });
 
+/**
+ * REQUIRED, not optional politeness.
+ *
+ * An ioredis client with no 'error' listener rethrows the event as an uncaught
+ * exception, so an unreachable Redis killed the whole API at boot. BullMQ
+ * retries on its own; the queue simply stops draining until Redis returns.
+ */
+bullmqConnection.on('error', (err) => {
+  console.error('❌ BullMQ Redis connection error:', err?.message || err);
+});
+
 export interface PptPipelineJobData {
   generationId: string;
   ownerId: string;

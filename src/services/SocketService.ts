@@ -2,7 +2,7 @@ import { Server as HttpServer } from 'http';
 import { Server, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import { createAdapter } from '@socket.io/redis-adapter';
-import { redisPublisher, redisSubscriber } from '../config/redis';
+import { isRedisEnabled, redisPublisher, redisSubscriber } from '../config/redis';
 
 class SocketService {
   private static instance: SocketService;
@@ -50,9 +50,21 @@ class SocketService {
       }
     });
 
-    // Redis Adapter for Horizontal Scaling
-    this.io.adapter(createAdapter(redisPublisher, redisSubscriber));
-    console.log('✅ Socket.IO Redis adapter initialized');
+    /**
+     * Redis adapter for horizontal scaling.
+     *
+     * Skipped when Redis is disabled. Without it, sockets still work — events
+     * simply do not cross worker processes, which is correct for a single
+     * worker and is a far better outcome than refusing to start.
+     */
+    if (isRedisEnabled) {
+      this.io.adapter(createAdapter(redisPublisher, redisSubscriber));
+      console.log('✅ Socket.IO Redis adapter initialized');
+    } else {
+      console.warn(
+        'ℹ️ Socket.IO running WITHOUT the Redis adapter — events do not cross worker processes.',
+      );
+    }
 
     // Authentication Middleware
     this.io.use((socket: Socket, next) => {

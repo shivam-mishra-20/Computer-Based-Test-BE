@@ -55,13 +55,15 @@ const offlineResultSchema = new Schema<IOfflineResult>(
     testDate: { 
       type: String, 
       required: true,
-      index: true,
+      // Indexed below as { testDate: -1 } — the order results are actually
+      // sorted in. Declaring `index: true` here as well made Mongoose warn
+      // about a duplicate index on every boot.
       match: /^\d{4}-\d{2}-\d{2}$/ // Validate yyyy-mm-dd format
     },
     createdAt: { 
       type: Date, 
       default: Date.now,
-      index: true 
+      // Indexed below as { createdAt: -1 } — see testDate above.
     },
     updatedAt: { 
       type: Date 

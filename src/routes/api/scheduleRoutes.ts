@@ -24,6 +24,7 @@ import {
   isValidTimeString,
   validateSessionSet,
 } from '../../services/schedule/scheduleValidator';
+import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
 
 // Initialize Firebase Admin on module load
 let firebaseAdmin: any = null;
@@ -597,10 +598,10 @@ router.get('/firebase/students', authMiddleware, async (req: Request, res: Respo
     
     if (!admin) {
       // Fallback to MongoDB users
-      const mongoQuery: any = { role: 'student' };
+      const mongoQuery: any = { role: 'student', ...INSTITUTE_ACCOUNT_CLAUSE };
       if (classLevel) mongoQuery.classLevel = classLevel;
       if (batch) mongoQuery.batch = batch;
-      
+
       const mongoStudents = await User.find(mongoQuery)
         .select('_id name email classLevel batch')
         .sort({ name: 1 });
@@ -768,8 +769,8 @@ router.get('/students', authMiddleware, async (req: Request, res: Response) => {
     const { classLevel, batch } = req.query;
     
     // Build query for MongoDB - handle both "9" and "Class 9" formats
-    const mongoQuery: any = { role: 'student', status: 'approved' };
-    
+    const mongoQuery: any = { role: 'student', status: 'approved', ...INSTITUTE_ACCOUNT_CLAUSE };
+
     if (classLevel) {
       // Try to match both "9" and "Class 9" formats
       mongoQuery.$or = [
@@ -1811,7 +1812,7 @@ router.get('/students', authMiddleware, async (req: Request, res: Response) => {
     const students: any[] = [];
 
     // 1. Fetch from MongoDB
-    const mongoQuery: any = { role: 'student' };
+    const mongoQuery: any = { role: 'student', ...INSTITUTE_ACCOUNT_CLAUSE };
     if (classLevel) mongoQuery.classLevel = classLevel;
     if (batch) mongoQuery.batch = batch;
     if (search) {

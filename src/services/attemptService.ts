@@ -432,7 +432,7 @@ export async function heartbeat(attemptId: string, userId: string) {
 }
 
 export async function getAttemptViewForTeacher(attemptId: string) {
-  const attempt = await Attempt.findById(attemptId).populate('userId', 'name email classLevel batch firebaseUid');
+  const attempt = await Attempt.findById(attemptId).populate('userId', 'name email classLevel batch firebaseUid profileImage');
   if (!attempt) throw new Error('Attempt not found');
   const exam = await Exam.findById(attempt.examId);
   if (!exam) throw new Error('Exam not found');
@@ -879,7 +879,7 @@ export async function publishResult(attemptId: string, publish = true) {
 export async function listPendingReviewAttempts() {
   // Fetch ALL submitted attempts (both pending and published) for the reviews dashboard
   const attempts = await Attempt.find({ submittedAt: { $ne: null } })
-    .populate('userId', 'name email classLevel batch firebaseUid')
+    .populate('userId', 'name email classLevel batch firebaseUid profileImage')
     .populate('examId', 'title')
     .sort({ submittedAt: -1 })
     .limit(100)

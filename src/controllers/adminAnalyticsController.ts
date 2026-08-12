@@ -92,7 +92,7 @@ export const getStudentReport = async (req: Request, res: Response) => {
     }
 
     const student = await User.findById(studentId)
-      .select('name email classLevel batch role')
+      .select('name email classLevel batch role profileImage')
       .lean();
     if (!student) {
       return res.status(404).json({ message: 'Student not found' });

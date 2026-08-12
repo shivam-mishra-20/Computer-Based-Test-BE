@@ -6,6 +6,24 @@ dotenv.config();
 // Redis Configuration for Socket.IO adapter and caching
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 
+/**
+ * Whether this process should use Redis at all.
+ *
+ * Set `REDIS_ENABLED=false` to run without it. Everything Redis backs here is
+ * already optional by design — rate limiting degrades to an in-memory store,
+ * the cache helpers return null, and Socket.IO runs without the cross-process
+ * adapter (fine for a single worker). Turning it off is the honest option when
+ * the configured instance is unreachable, instead of paying a 5-second command
+ * timeout on every request that touches it.
+ */
+export const isRedisEnabled = String(process.env.REDIS_ENABLED ?? 'true').toLowerCase() !== 'false';
+
+if (!isRedisEnabled) {
+  console.warn(
+    'ℹ️ REDIS_ENABLED=false — running without Redis. Rate limiting is per-process and caching is disabled.',
+  );
+}
+
 // Publisher client for Socket.IO adapter
 export const redisPublisher = new Redis(REDIS_URL, {
   maxRetriesPerRequest: null,

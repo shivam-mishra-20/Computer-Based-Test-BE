@@ -735,7 +735,7 @@ export async function getReviewSummary(examId: string) {
   const baseMax = computeBaseMax(orderedQids, qmap, scheme, qMarks);
 
   const attempts = await Attempt.find({ examId: new Types.ObjectId(examId), submittedAt: { $ne: null } })
-    .populate('userId', 'name email classLevel batch firebaseUid')
+    .populate('userId', 'name email classLevel batch firebaseUid profileImage')
     .sort({ rankInTest: 1, totalScore: -1 })
     .lean();
 

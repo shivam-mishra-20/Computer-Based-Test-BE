@@ -7,6 +7,11 @@ import { uploadLimiter } from '../../middlewares/rateLimiter';
 import { uploadToFirebase } from '../../services/firebaseService';
 import { pdfFileFilter, resolveContentType } from '../../utils/uploadFileTypes';
 import { withContentCategory } from '../../utils/resourceCategory';
+import {
+  PUBLIC_RESOURCE_PROJECTION,
+  applyPublicVisibilityFloor,
+  isStaffRequest,
+} from '../../utils/publicResourceVisibility';
 import youtubeService from '../../services/youtubeService';
 
 const router = Router();
@@ -24,32 +29,18 @@ const upload = multer({
 // ============ Public Routes ============
 
 /**
- * True when the caller is signed in as staff. Guests AND signed-in students
- * both get the public view; only staff may see non-public/unpublished items.
- */
-const isStaff = (req: Request): boolean => {
-  const role = (req as any).user?.role;
-  return role === 'admin' || role === 'teacher' || role === 'developer';
-};
-
-/**
- * Visibility floor enforced SERVER-SIDE for every non-staff caller.
+ * Visibility enforcement now lives in utils/publicResourceVisibility so that
+ * this route and the public content/search endpoints share ONE implementation.
+ * The rules are unchanged; these aliases keep the call sites below identical.
  *
- * Previously `isPublic` was applied only when the client happened to send
- * `?isPublic=true`, so simply omitting the parameter returned private
- * resources to anonymous callers. Client query params can no longer influence
- * this — they are only allowed to narrow within the permitted set.
+ * Guests AND signed-in students both get the public view; only staff may see
+ * non-public/unpublished items. Client query params can only narrow within the
+ * permitted set, never widen it.
  */
-const applyVisibilityFloor = (query: any, req: Request) => {
-  if (isStaff(req)) return query;
-  query.status = 'published';
-  query.isPublic = true;
-  return query;
-};
-
-/** Guests must never receive uploader identity (staff names/emails). */
-const publicProjection =
-  '-uploadedBy -__v';
+const isStaff = isStaffRequest;
+const applyVisibilityFloor = (query: any, req: Request) =>
+  applyPublicVisibilityFloor(query, req);
+const publicProjection = PUBLIC_RESOURCE_PROJECTION;
 
 // Get all published resources (for guest users and students)
 router.get('/', optionalAuthMiddleware, async (req: Request, res: Response) => {
@@ -61,9 +52,13 @@ router.get('/', optionalAuthMiddleware, async (req: Request, res: Response) => {
       subject,
       classLevel,
       batch,
+      chapter,
       isPublic,
       isFeatured,
-      search
+      search,
+      limit,
+      skip,
+      paginated,
     } = req.query;
 
     const staff = isStaff(req);
@@ -71,6 +66,7 @@ router.get('/', optionalAuthMiddleware, async (req: Request, res: Response) => {
 
     if (type) query.type = type;
     if (category) query.category = category;
+    if (chapter) query.chapter = chapter;
     // NB: contentCategory is intentionally NOT part of the DB query — it is
     // applied after derivation below, so untagged legacy content still lands
     // in the right public section.
@@ -93,6 +89,23 @@ router.get('/', optionalAuthMiddleware, async (req: Request, res: Response) => {
 
     applyVisibilityFloor(query, req);
 
+    // ── Pagination ───────────────────────────────────────────────────────────
+    // Backward compatible by construction: with no `limit` the response is the
+    // same unbounded JSON array it has always been, so existing callers are
+    // untouched. A caller that sends `limit` gets at most that many rows (which
+    // is what it asked for — `limit` was silently ignored before). The
+    // `{ data, total, ... }` envelope is opt-in via `paginated=true` so no
+    // existing consumer's response SHAPE changes.
+    //
+    // NB: `contentCategory` narrowing happens in application code after
+    // derivation, so it cannot be pushed into the DB query. When it is used
+    // together with pagination the page is filtered post-slice and may be
+    // short — acceptable because the public sections and chapter/subject
+    // browsing are separate code paths that never combine the two.
+    const parsedLimit = Math.min(Math.max(Number(limit) || 0, 0), 200);
+    const parsedSkip = Math.max(Number(skip) || 0, 0);
+    const wantsEnvelope = paginated === 'true';
+
     const findQuery = StudyResource.find(query);
     if (staff) {
       findQuery.populate('uploadedBy', 'name email');
@@ -100,9 +113,14 @@ router.get('/', optionalAuthMiddleware, async (req: Request, res: Response) => {
       findQuery.select(publicProjection);
     }
 
-    const resources = await findQuery
-      .sort({ isFeatured: -1, createdAt: -1 })
-      .lean();
+    findQuery.sort({ isFeatured: -1, createdAt: -1 });
+    if (parsedSkip > 0) findQuery.skip(parsedSkip);
+    if (parsedLimit > 0) findQuery.limit(parsedLimit);
+
+    const [resources, total] = await Promise.all([
+      findQuery.lean(),
+      wantsEnvelope ? StudyResource.countDocuments(query) : Promise.resolve(0),
+    ]);
 
     // Fill in the public section for untagged content, then narrow if the
     // caller asked for one specific section.
@@ -110,6 +128,16 @@ router.get('/', optionalAuthMiddleware, async (req: Request, res: Response) => {
     const result = contentCategory
       ? withSections.filter((r) => r.contentCategory === contentCategory)
       : withSections;
+
+    if (wantsEnvelope) {
+      return res.json({
+        data: result,
+        total,
+        limit: parsedLimit || total,
+        skip: parsedSkip,
+        hasMore: parsedLimit > 0 ? parsedSkip + resources.length < total : false,
+      });
+    }
 
     res.json(result);
   } catch (error: any) {
@@ -276,6 +304,8 @@ router.post('/upload-pdf', authMiddleware, uploadLimiter, upload.single('file'),
       subject,
       classLevel,
       batch,
+      chapter,
+      board,
       tags,
       pageCount,
       isPublic,
@@ -305,6 +335,9 @@ router.post('/upload-pdf', authMiddleware, uploadLimiter, upload.single('file'),
       subject,
       classLevel,
       batch: batch || undefined,
+      // Optional public-learning metadata; absent on every existing resource.
+      chapter: chapter || undefined,
+      board: board ? JSON.parse(board) : undefined,
       tags: tags ? JSON.parse(tags) : [],
       uploadedBy: user.id,
       fileSize: file.size,

@@ -8,6 +8,7 @@ import { uploadLimiter } from '../../middlewares/rateLimiter';
 import { sendStudentNotifications } from '../../services/notificationService';
 import { getFirestoreUserProfile, uploadToFirebase } from '../../services/firebaseService';
 import { attachmentFileFilter, resolveContentType } from '../../utils/uploadFileTypes';
+import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
 
 const router = Router();
 
@@ -62,7 +63,7 @@ async function getAssignedStudentIds(homework: any): Promise<string[]> {
     return (homework.assignedStudents || []).map((id: any) => id.toString());
   }
 
-  const query: any = { role: 'student' };
+  const query: any = { role: 'student', ...INSTITUTE_ACCOUNT_CLAUSE };
   const classScope = buildClassVariants(
     homework.assignmentType === 'class'
       ? homework.assignedClasses
@@ -390,7 +391,7 @@ router.get('/:id/submissions', authMiddleware, async (req: Request, res: Respons
       targetType: 'homework',
       targetId: req.params.id
     })
-      .populate('student', 'name email classLevel batch')
+      .populate('student', 'name email classLevel batch profileImage')
       .sort({ submittedAt: -1 })
       .lean();
     

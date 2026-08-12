@@ -10,7 +10,9 @@ import User from '../models/User';
 import StudyResource from '../models/StudyResource';
 import Question from '../models/Question';
 import { getStudentBatchConfigFromDatabase } from './batchConfigService';
+import { CURRICULUM_SUBJECTS } from '../config/subjects';
 import { buildClassVariants } from '../utils/audienceTargeting';
+import { INSTITUTE_ACCOUNT_CLAUSE } from '../utils/instituteAudience';
 import * as notificationService from './notificationService';
 
 // ── Class Request service ───────────────────────────────────────────────────
@@ -146,9 +148,12 @@ export const getPublicOptions =
       Question.distinct('tags.subject'),
     ]);
 
+    // Canonical curriculum list first, then anything the content library
+    // actually uses — so a subject already present in the DB still appears
+    // even when it is not in the standard list.
     const subjects = Array.from(
       new Set(
-        [...resourceSubjects, ...questionSubjects]
+        [...CURRICULUM_SUBJECTS, ...resourceSubjects, ...questionSubjects]
           .map((s) => sanitize(clean(s)))
           .filter((s) => s.length > 0 && s.length <= LIMITS.subject),
       ),
@@ -329,6 +334,7 @@ export const createPublicClassRequest = async (
       const found = await User.find({
         _id: { $in: rawStudentIds },
         role: 'student',
+        ...INSTITUTE_ACCOUNT_CLAUSE,
         classLevel: { $in: buildClassVariants(classValue) },
       })
         .select('_id')
@@ -586,6 +592,18 @@ export const listClassRequests = async (params: ListClassRequestsParams) => {
     counts,
     pendingCount: counts.PENDING,
   };
+};
+
+/**
+ * Hard-delete a request. Admin-only housekeeping for spam/duplicate rows —
+ * there is nothing referencing a ClassRequest, so no cascade is needed.
+ */
+export const deleteClassRequest = async (id: string): Promise<boolean> => {
+  if (!Types.ObjectId.isValid(id)) {
+    throw new ClassRequestValidationError('Invalid request id', 'id');
+  }
+  const result = await ClassRequest.findByIdAndDelete(id);
+  return Boolean(result);
 };
 
 export interface UpdateClassRequestInput {

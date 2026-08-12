@@ -4,6 +4,10 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
 import authRoutes from './routes/api/authRoutes';
+import learnerRoutes from './routes/api/learnerRoutes';
+import publicContentRoutes from './routes/api/publicContentRoutes';
+import publicTestRoutes from './routes/api/publicTestRoutes';
+import publicTestAdminRoutes from './routes/api/publicTestAdminRoutes';
 import userRoutes from './routes/api/userRoutes';
 import testRoutes from './routes/api/testRoutes';
 import examRoutes from './routes/api/examRoutes';
@@ -229,6 +233,10 @@ app.get('/register', (_req, res) => {
 // API routes
 app.use('/api/auth', authRoutes);
 app.use('/api/auth', passwordResetRoutes); // Password reset under /api/auth
+app.use('/api/learner', learnerRoutes); // Public Learner profile, home, saves, progress
+app.use('/api/public', publicContentRoutes); // Guest + learner content discovery
+app.use('/api/public', publicTestRoutes); // Guest + learner assessment discovery (browse-only)
+app.use('/api/admin-assessments', publicTestAdminRoutes); // Staff authoring for public tests
 app.use('/api/users', userRoutes);
 app.use('/api/tests', testRoutes);
 app.use('/api/exams', examRoutes);

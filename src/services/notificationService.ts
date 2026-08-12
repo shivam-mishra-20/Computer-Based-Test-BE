@@ -2,6 +2,7 @@ import { Expo, ExpoPushMessage, ExpoPushTicket } from 'expo-server-sdk';
 import Notification from '../models/Notification';
 import User from '../models/User';
 import SocketService from './SocketService';
+import { INSTITUTE_ACCOUNT_CLAUSE } from '../utils/instituteAudience';
 
 // Initialize Expo SDK
 const expo = new Expo();
@@ -130,7 +131,7 @@ export async function sendScheduleNotification(
   try {
     // Find ALL matching students (even those without a push token) so we can
     // persist an in-app notification for every student regardless.
-    const query: any = { role: 'student' };
+    const query: any = { role: 'student', ...INSTITUTE_ACCOUNT_CLAUSE };
     if (classLevel) {
       // Schedules store "11" while students store "Class 11" — match both
       // formats, otherwise the query silently targets zero students.
@@ -308,17 +309,23 @@ export async function sendStudentNotifications(
     const objectIds = studentIds.filter(isValidObjectId);
     const firebaseIds = studentIds.filter(id => !isValidObjectId(id));
     
+    // Last-mile isolation: even if an upstream audience resolver ever leaked a
+    // public-learner id, an INSTITUTE notification must not be delivered to it.
+    // Cheap here, and it makes delivery safe independent of every caller.
+
     // Find by MongoDB ObjectIds
-    const mongoStudents = objectIds.length > 0 
+    const mongoStudents = objectIds.length > 0
       ? await User.find({
           _id: { $in: objectIds },
+          ...INSTITUTE_ACCOUNT_CLAUSE,
         }).select('_id pushToken')
       : [];
-    
+
     // Find by Firebase IDs
     const firebaseStudents = firebaseIds.length > 0
       ? await User.find({
           firebaseUid: { $in: firebaseIds },
+          ...INSTITUTE_ACCOUNT_CLAUSE,
         }).select('_id pushToken')
       : [];
     

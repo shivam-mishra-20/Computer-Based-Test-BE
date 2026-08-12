@@ -22,7 +22,7 @@ export const resultsCsv = async (req: Request, res: Response) => {
   // Sort by per-test rank so the export mirrors the published standings, and
   // include the effective (post-review) score, percentage and publish state.
   const attempts = await Attempt.find({ examId })
-    .populate('userId', 'name email classLevel batch')
+    .populate('userId', 'name email classLevel batch profileImage')
     .sort({ rankInTest: 1, totalScore: -1 });
 
   const esc = (v: unknown) => {

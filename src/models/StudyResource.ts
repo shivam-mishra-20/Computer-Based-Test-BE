@@ -31,6 +31,20 @@ export interface IStudyResource extends Document {
   contentCategory?: ResourceContentCategory; // public/guest section grouping
   subject: string;
   classLevel: string;
+  /**
+   * Boards this resource is relevant to. OPTIONAL and currently sparse — no
+   * existing content is board-tagged. Until coverage is real, board is a
+   * ranking/display signal for public learners, never a hard filter, otherwise
+   * the public library would appear empty. An empty/absent array means
+   * "board-agnostic" and must remain visible to every learner.
+   */
+  board?: string[];
+  /**
+   * Chapter this resource belongs to. OPTIONAL. The public UI renders a
+   * chaptered view only for subjects where this is populated, and a flat list
+   * otherwise — no empty chapter scaffolding is ever shown.
+   */
+  chapter?: string;
   batch?: string;
   tags: string[];
   uploadedBy: mongoose.Types.ObjectId;
@@ -64,6 +78,10 @@ const studyResourceSchema = new Schema<IStudyResource>({
   contentCategory: { type: String, enum: RESOURCE_CONTENT_CATEGORIES, index: true },
   subject: { type: String, required: true, index: true },
   classLevel: { type: String, required: true, index: true },
+  // Both optional and unset on every existing document — adding them cannot
+  // change what any current query returns.
+  board: [{ type: String, enum: ['CBSE', 'ICSE', 'GSEB', 'IB', 'IGCSE', 'Other'] }],
+  chapter: { type: String },
   batch: { type: String, index: true },
   tags: [{ type: String }],
   uploadedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
@@ -102,5 +120,9 @@ studyResourceSchema.index({ isPublic: 1, isFeatured: 1 });
 // Guest sections: published + public, grouped by controlled category.
 studyResourceSchema.index({ isPublic: 1, status: 1, contentCategory: 1 });
 studyResourceSchema.index({ tags: 1 });
+// Public learning: browse a class+subject, optionally drilling into a chapter.
+studyResourceSchema.index({ isPublic: 1, status: 1, classLevel: 1, subject: 1, chapter: 1 });
+// Sparse: only the (currently few) board-tagged resources occupy this index.
+studyResourceSchema.index({ board: 1 }, { sparse: true });
 
 export default mongoose.model<IStudyResource>('StudyResource', studyResourceSchema);

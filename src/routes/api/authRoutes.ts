@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { register, login, me, publicRegister, publicTeacherRegister, changePassword, updateProfile, uploadProfileImage, publicUploadProfileImage, publicStudentBatchConfig, deleteAccount } from '../../controllers/authController';
+import { learnerRegister } from '../../controllers/learnerController';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import { authLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
 import multer from 'multer';
@@ -25,6 +26,10 @@ const upload = multer({
 router.post('/register', authLimiter, register);
 router.post('/public-register', authLimiter, publicRegister);
 router.post('/public-register-teacher', authLimiter, publicTeacherRegister);
+// Public Learner self-registration. Separate from /public-register (institute)
+// because it has none of its requirements: no admin approval, no photo, no
+// class/batch enrollment. Returns a usable session immediately.
+router.post('/learner-register', authLimiter, learnerRegister);
 // Public (pre-auth) profile photo upload for registration — server-side upload
 // avoids client-side Firebase Storage rule failures.
 router.post('/public-profile-image', uploadLimiter, upload.single('image'), publicUploadProfileImage);

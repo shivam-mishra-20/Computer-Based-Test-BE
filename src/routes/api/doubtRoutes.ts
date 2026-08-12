@@ -16,6 +16,7 @@ import FileMetadata from '../../models/FileMetadata';
 import { bucket } from '../../config/firebase';
 import SocketService from '../../services/SocketService';
 import { createAndSendNotification } from '../../services/notificationService';
+import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
 
 interface AuthRequest extends Request {
   user?: IUser & { _id: any };
@@ -333,9 +334,10 @@ router.post('/teacher/start', authMiddleware, messageLimiter, async (req: AuthRe
     const senderName = req.user?.name || 'Teacher';
     const senderRole = req.user.role as 'teacher' | 'admin';
 
-    // Only message real students (reuses the platform's role model).
+    // Only message real INSTITUTE students. Public learners have no teacher
+    // relationship and must never be reachable through institute doubt chats.
     const User = require('../../models/User').default;
-    const students = await User.find({ _id: { $in: validIds }, role: 'student' })
+    const students = await User.find({ _id: { $in: validIds }, role: 'student', ...INSTITUTE_ACCOUNT_CLAUSE })
       .select('_id name classLevel batch')
       .lean();
 

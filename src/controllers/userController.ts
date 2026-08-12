@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import User, { IUser, UserRole } from '../models/User';
 import { logAudit } from '../utils/logger';
+import { INSTITUTE_ACCOUNT_CLAUSE, instituteStudentFilter } from '../utils/instituteAudience';
 import {
 	normalizeClassValue,
 	toClassLabel,
@@ -53,9 +54,19 @@ export const adminGetRegistrationRecords = async (req: Request, res: Response) =
 			search,
 			from,
 			to,
+			accountType,
 		} = req.query as Record<string, string | undefined>;
 
 		const filter: any = {};
+
+		// Institute-only by default, so this admin view keeps meaning exactly what
+		// it meant before public learners existed. `?accountType=PUBLIC_LEARNER`
+		// (or `all`) is the deliberate opt-in for support/audit purposes.
+		if (accountType === 'PUBLIC_LEARNER') {
+			filter.accountType = 'PUBLIC_LEARNER';
+		} else if (accountType !== 'all') {
+			filter.accountType = { $ne: 'PUBLIC_LEARNER' };
+		}
 
 		if (role && ['teacher', 'student', 'admin'].includes(role)) {
 			filter.role = role;
@@ -239,7 +250,9 @@ export const adminListUsers = async (req: Request, res: Response) => {
 		const search = (req.query.search as string) || undefined;
 		const classLevel = (req.query.classLevel as string) || undefined;
 		const batch = (req.query.batch as string) || undefined;
-		const filter: any = {};
+		// Institute roster source for admin/teacher student pickers — public
+		// learners must never be selectable as an institute audience member.
+		const filter: any = { ...INSTITUTE_ACCOUNT_CLAUSE };
 		if (role && ['teacher', 'student', 'admin'].includes(role)) filter.role = role;
 		if (status && ['pending', 'approved', 'rejected'].includes(status)) filter.status = status;
 		if (registrationSource && ['website', 'app', 'admin', 'unknown'].includes(registrationSource)) {
@@ -383,7 +396,7 @@ export const adminDashboard = async (_req: Request, res: Response) => {
 		const [admins, teachers, students] = await Promise.all([
 			User.countDocuments({ role: 'admin' }),
 			User.countDocuments({ role: 'teacher' }),
-			User.countDocuments({ role: 'student' }),
+			User.countDocuments(instituteStudentFilter()),
 		]);
 		res.json({ stats: { admins, teachers, students } });
 	} catch (err) {

@@ -1,7 +1,7 @@
 import rateLimit from 'express-rate-limit';
 import type { Request } from 'express';
 import RedisStore from 'rate-limit-redis';
-import { redisClient } from '../config/redis';
+import { isRedisEnabled, redisClient } from '../config/redis';
 
 const envNumber = (name: string, fallback: number): number => {
   const raw = process.env[name];
@@ -11,10 +11,28 @@ const envNumber = (name: string, fallback: number): number => {
 };
 
 // Helper function for Redis rate limiting - ioredis type compatibility wrapper
+/**
+ * A Redis-backed store, or `undefined` to let express-rate-limit use its own
+ * in-memory one.
+ *
+ * Returning undefined is a real fallback, not a failure: per-process limiting
+ * still stops abuse, it just isn't shared across workers. That is strictly
+ * better than every request waiting on a Redis command timeout — and better
+ * than the server dying at boot because `rate-limit-redis` floated its
+ * `SCRIPT LOAD` rejection with nothing to catch it.
+ */
 const createRedisStore = (prefix: string) => {
+  if (!isRedisEnabled) return undefined;
   return new RedisStore({
     // @ts-expect-error - ioredis call() returns Promise<unknown>, but rate-limit-redis expects Promise<RedisReply>
-    sendCommand: (...args: string[]) => redisClient.call(args[0], ...args.slice(1)),
+    sendCommand: (...args: string[]) =>
+      redisClient.call(args[0], ...args.slice(1)).catch((error: Error) => {
+        // Surfaced, then rethrown so the limiter's own passOnStoreError path
+        // decides what to do. Swallowing it here would make a dead Redis look
+        // like a working rate limiter.
+        console.error(`⚠️ Rate limit store unavailable (${prefix}):`, error?.message);
+        throw error;
+      }),
     prefix,
   });
 };

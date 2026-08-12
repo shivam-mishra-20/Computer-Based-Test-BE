@@ -17,7 +17,12 @@
     "start:cluster": "node dist/server.cluster.js",
     "start:worker:ppt": "node dist/workers/pptPipelineWorker.js",
     "verify:ai": "node scripts/verify-nvidia.js",
-    "lint": "eslint . --ext .ts"
+    "verify:isolation-filter": "ts-node scripts/verify-isolation-filter.ts",
+    "verify:public-visibility": "ts-node scripts/verify-public-visibility.ts",
+    "verify:assessment": "ts-node scripts/verify-public-assessment.ts",
+    "verify:isolation-db": "ts-node scripts/verify-learner-isolation.ts",
+    "lint": "eslint . --ext .ts",
+    "diagnose:promotion": "ts-node scripts/diagnose-promotion.ts"
   },
   "keywords": [],
   "author": "",

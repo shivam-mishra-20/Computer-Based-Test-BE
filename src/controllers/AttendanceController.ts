@@ -8,6 +8,7 @@ import {
   getEffectiveRulesBulk,
   formatMinutes,
 } from '../services/attendanceRuleService';
+import { INSTITUTE_ACCOUNT_CLAUSE } from '../utils/instituteAudience';
 
 export class AttendanceController {
   
@@ -630,7 +631,10 @@ export class AttendanceController {
       const effectiveTo = toDate > todayEnd ? todayEnd : toDate;
 
       // 1. Filtered user roster (role/search applied here so fully-absent users still appear).
-      const userQuery: any = {};
+      // Attendance is an institute process — public learners are never marked
+      // present or absent, so they must not appear in the roster even when the
+      // caller passes no role filter at all.
+      const userQuery: any = { ...INSTITUTE_ACCOUNT_CLAUSE };
       if (role) userQuery.role = role;
       if (search) {
         const regex = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
@@ -871,7 +875,10 @@ export class AttendanceController {
       const effectiveTo = toDate > todayEnd ? todayEnd : toDate;
 
       // ── Load users ───────────────────────────────────────────────────────────
-      const userQuery: any = {};
+      // Attendance is an institute process — public learners are never marked
+      // present or absent, so they must not appear in the roster even when the
+      // caller passes no role filter at all.
+      const userQuery: any = { ...INSTITUTE_ACCOUNT_CLAUSE };
       if (role) userQuery.role = role;
       if (search) {
         const regex = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
@@ -1111,7 +1118,10 @@ export class AttendanceController {
       
       // Total Users? This implies fetching User count from DB, not just attendance.
       const User = require('../models/User').default;
-      const totalUsers = await User.countDocuments({ role: { $in: ['student', 'teacher'] } }); // Active users
+      const totalUsers = await User.countDocuments({
+        role: { $in: ['student', 'teacher'] },
+        ...INSTITUTE_ACCOUNT_CLAUSE,
+      }); // Active institute users
 
       res.json({
         totalUsers,

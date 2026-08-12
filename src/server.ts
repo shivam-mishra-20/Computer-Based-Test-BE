@@ -117,3 +117,39 @@ const shutdown = async (signal: string) => {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
+/**
+ * A background promise failing must not drop live requests.
+ *
+ * Since Node 15 an unhandled rejection TERMINATES the process. Third-party
+ * clients float promises we never see: `rate-limit-redis` fires its
+ * `SCRIPT LOAD` at startup without awaiting it, so one unreachable Redis
+ * rejected 5 seconds after boot ("Command timed out") and killed a server that
+ * was otherwise healthy and serving.
+ *
+ * Rate limiting already degrades open (`passOnStoreError: true`) and the cache
+ * helpers already swallow their own failures — the API is designed to run
+ * without Redis. Only the missing handler made it fatal.
+ *
+ * Logged loudly, never silently: this must stay visible, because a rejection
+ * from OUR code is still a bug worth fixing.
+ */
+process.on('unhandledRejection', (reason) => {
+  const error = reason instanceof Error ? reason : new Error(String(reason));
+  console.error(
+    `⚠️ [Worker ${WORKER_ID}] Unhandled promise rejection — the server keeps running:`,
+    error.message,
+  );
+  console.error(error.stack);
+});
+
+/**
+ * An uncaught EXCEPTION is different: the process state may be corrupt, so it
+ * exits and lets the cluster restart it. Logged first so the reason is not lost
+ * to a silent respawn.
+ */
+process.on('uncaughtException', (error) => {
+  console.error(`💥 [Worker ${WORKER_ID}] Uncaught exception — exiting:`, error?.message);
+  console.error(error?.stack);
+  process.exit(1);
+});
+

@@ -11,6 +11,7 @@ import {
 } from '../../services/attendanceService';
 import absentService from '../../services/absentCalculationService';
 import { createAndSendNotification } from '../../services/notificationService';
+import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
 
 const router = Router();
 
@@ -317,6 +318,7 @@ router.post('/upload', authMiddleware, requireRole('admin', 'teacher'), async (r
           name: { $regex: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
           classLevel,
           role: 'student',
+          ...INSTITUTE_ACCOUNT_CLAUSE,
         }).select('_id');
 
         if (studentUser) {

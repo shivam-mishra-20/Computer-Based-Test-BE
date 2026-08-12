@@ -236,6 +236,9 @@ export const login = async (req: Request, res: Response) => {
       });
     }
 
+    // Public learners are always created `approved`, so they never hit the
+    // gates above. Nothing about the institute status handling changes.
+
     // User is approved, generate token (10 years - effectively permanent until manual logout)
     const token = jwt.sign(
       { id: user._id, role: user.role },
@@ -259,6 +262,22 @@ export const login = async (req: Request, res: Response) => {
         phone: (user as any).phone,
         empCode: (user as any).empCode,
         registrationSource: (user as any).registrationSource,
+        // ── Additive only ────────────────────────────────────────────────────
+        // Existing clients ignore these two fields; new clients use them to
+        // decide which experience to enter. `accountType` falls back to
+        // INSTITUTE_STUDENT for legacy documents that predate the field, so an
+        // old account can never be misrouted into the public experience.
+        accountType: (user as any).accountType || 'INSTITUTE_STUDENT',
+        learnerProfile:
+          (user as any).accountType === 'PUBLIC_LEARNER'
+            ? {
+                board: (user as any).learnerProfile?.board,
+                classLevel: (user as any).learnerProfile?.classLevel,
+                subjects: (user as any).learnerProfile?.subjects || [],
+                onboardingStep: (user as any).learnerProfile?.onboardingStep || 'BOARD',
+                onboardingCompletedAt: (user as any).learnerProfile?.onboardingCompletedAt,
+              }
+            : undefined,
       },
     });
   } catch (err) {
@@ -272,7 +291,7 @@ export const me = async (req: Request, res: Response) => {
   try {
     const current = (req as any).user as { id: string; role?: string } | undefined;
     if (!current) return res.status(401).json({ message: 'Unauthorized' });
-    const user = await User.findById(current.id).select('name email role classLevel batch firebaseUid profileImage phone empCode bio status registrationSource');
+    const user = await User.findById(current.id).select('name email role classLevel batch firebaseUid profileImage phone empCode bio status registrationSource accountType learnerProfile');
     if (!user) return res.status(404).json({ message: 'User not found' });
     res.json({ 
       _id: user._id, 
@@ -289,6 +308,19 @@ export const me = async (req: Request, res: Response) => {
       empCode: (user as any).empCode, 
       bio: (user as any).bio,
       registrationSource: (user as any).registrationSource,
+      // Additive, mirroring the login response — lets a resumed session pick up
+      // an onboarding step that was completed on another device.
+      accountType: (user as any).accountType || 'INSTITUTE_STUDENT',
+      learnerProfile:
+        (user as any).accountType === 'PUBLIC_LEARNER'
+          ? {
+              board: (user as any).learnerProfile?.board,
+              classLevel: (user as any).learnerProfile?.classLevel,
+              subjects: (user as any).learnerProfile?.subjects || [],
+              onboardingStep: (user as any).learnerProfile?.onboardingStep || 'BOARD',
+              onboardingCompletedAt: (user as any).learnerProfile?.onboardingCompletedAt,
+            }
+          : undefined,
     });
   } catch (err) {
     console.error('Get user error:', err);

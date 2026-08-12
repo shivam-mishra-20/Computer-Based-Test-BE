@@ -141,7 +141,7 @@ router.get('/material/:materialId', authMiddleware, async (req: Request, res: Re
       targetType: 'material',
       targetId: req.params.materialId
     })
-      .populate('student', 'name email classLevel batch')
+      .populate('student', 'name email classLevel batch profileImage')
       .sort({ updatedAt: -1 })
       .lean();
     
@@ -166,7 +166,7 @@ router.get('/homework/:homeworkId', authMiddleware, async (req: Request, res: Re
       targetType: 'homework',
       targetId: req.params.homeworkId
     })
-      .populate('student', 'name email classLevel batch')
+      .populate('student', 'name email classLevel batch profileImage')
       .sort({ updatedAt: -1 })
       .lean();
     

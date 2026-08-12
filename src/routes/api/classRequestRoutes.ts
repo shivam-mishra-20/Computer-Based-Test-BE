@@ -8,6 +8,7 @@ import { publicFormLimiter } from '../../middlewares/rateLimiter';
 import {
   ClassRequestValidationError,
   createPublicClassRequest,
+  deleteClassRequest,
   getPublicOptions,
   listClassRequests,
   listMyClassRequests,
@@ -194,6 +195,28 @@ router.patch(
       res.json(updated);
     } catch (err) {
       handleError(res, err, 'Failed to update class request');
+    }
+  },
+);
+
+/**
+ * DELETE /api/class-requests/:id
+ * Admin-only removal (spam / duplicates). Nothing references a ClassRequest,
+ * so this is a plain delete with no cascade.
+ */
+router.delete(
+  '/:id',
+  authMiddleware,
+  requireRole('admin', 'developer'),
+  async (req: Request, res: Response) => {
+    try {
+      const removed = await deleteClassRequest(req.params.id);
+      if (!removed) {
+        return res.status(404).json({ message: 'Class request not found' });
+      }
+      res.json({ message: 'Class request deleted' });
+    } catch (err) {
+      handleError(res, err, 'Failed to delete class request');
     }
   },
 );

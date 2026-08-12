@@ -5,6 +5,7 @@ import TestResult from '../../models/TestResult';
 import Exam from '../../models/Exam';
 import Attempt from '../../models/Attempt';
 import { authMiddleware } from '../../middlewares/authMiddleware';
+import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
 
 const router = Router();
 
@@ -113,7 +114,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
     }
 
     // 4. Now fetch all approved students (optionally filtered by class)
-    const studentQuery: any = { role: 'student', status: 'approved' };
+    const studentQuery: any = { role: 'student', status: 'approved', ...INSTITUTE_ACCOUNT_CLAUSE };
     if (classLevel) {
       // Match users whose classLevel matches the filter.
       // classLevel in User could be "12" or "Class 12" while TestResult.class
@@ -127,7 +128,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
     }
 
     const students = await User.find(studentQuery)
-      .select('_id name classLevel batch')
+      .select('_id name classLevel batch profileImage')
       .lean() as any[];
 
     const totalParticipants = students.length;
@@ -251,7 +252,7 @@ router.get('/online', authMiddleware, async (req: Request, res: Response) => {
     if (examId) {
       const exam = await Exam.findById(examId as string).select('title classLevel meta').lean() as any;
       const attempts = await Attempt.find({ examId: new Types.ObjectId(examId as string), resultPublished: true, submittedAt: { $ne: null } })
-        .populate('userId', 'name classLevel batch')
+        .populate('userId', 'name classLevel batch profileImage')
         .lean() as any[];
       if (!exam || attempts.length === 0) {
         // No published results yet — keep standings hidden.
@@ -299,7 +300,7 @@ router.get('/online', authMiddleware, async (req: Request, res: Response) => {
     }
 
     const attempts = await Attempt.find({ examId: { $in: ids }, resultPublished: true, submittedAt: { $ne: null } })
-      .populate('userId', 'name classLevel batch')
+      .populate('userId', 'name classLevel batch profileImage')
       .lean() as any[];
 
     interface Bucket {

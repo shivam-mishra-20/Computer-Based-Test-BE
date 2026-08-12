@@ -5,6 +5,7 @@ import {
   normalizeBatchList,
   stripBatchWildcards,
 } from '../utils/audienceTargeting';
+import { INSTITUTE_ACCOUNT_CLAUSE } from '../utils/instituteAudience';
 
 // ── Online Exam audience resolution ─────────────────────────────────────────
 // Single source of truth for "which students does this exam target", used to
@@ -85,6 +86,7 @@ export async function resolveExamNotificationRecipients(
 
   const query: Record<string, unknown> = {
     role: 'student',
+    ...INSTITUTE_ACCOUNT_CLAUSE,
     classLevel: { $in: classScope },
   };
 

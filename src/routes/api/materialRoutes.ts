@@ -7,6 +7,7 @@ import { uploadLimiter } from '../../middlewares/rateLimiter';
 import { uploadToFirebase } from '../../services/firebaseService';
 import { materialFileFilter, resolveContentType } from '../../utils/uploadFileTypes';
 import { sendStudentNotifications } from '../../services/notificationService';
+import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
 
 const router = Router();
 
@@ -371,7 +372,7 @@ const buildSearchRegex = (value?: string): RegExp | null => {
 
 // Helper to get assigned student IDs
 async function getAssignedStudentIds(material: any): Promise<string[]> {
-  const students = await User.find({ role: 'student', status: 'approved' })
+  const students = await User.find({ role: 'student', status: 'approved', ...INSTITUTE_ACCOUNT_CLAUSE })
     .select('_id classLevel batch')
     .lean();
 

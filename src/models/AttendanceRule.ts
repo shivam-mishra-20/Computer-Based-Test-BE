@@ -39,8 +39,12 @@ export interface IAttendanceRule extends Document {
 
 const attendanceRuleSchema = new Schema<IAttendanceRule>(
   {
-    userId: { type: Schema.Types.ObjectId, ref: 'User', index: true },
-    role: { type: String, enum: ['admin', 'teacher', 'student'], index: true },
+    // Indexed below via schema.index() — it needs { unique, sparse }, which
+    // `index: true` cannot express. Declaring both made Mongoose warn about
+    // a duplicate index on every boot.
+    userId: { type: Schema.Types.ObjectId, ref: 'User' },
+    // Indexed below with a partialFilterExpression — see userId above.
+    role: { type: String, enum: ['admin', 'teacher', 'student'] },
 
     userType: { type: String, enum: ['full_time', 'half_time'], required: true, default: 'full_time' },
 
