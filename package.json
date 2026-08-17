@@ -29,7 +29,8 @@
     "safety:verify": "ts-node scripts/safety/verify-restore.ts",
     "safety:guard": "ts-node scripts/safety/guard.test.ts",
     "safety:api-snapshot": "ts-node scripts/safety/api-contract-snapshot.ts",
-    "safety:api-check": "ts-node scripts/safety/api-contract-snapshot.ts --check docs/baselines/api-contract-2026-08-17.txt"
+    "safety:api-check": "ts-node scripts/safety/api-contract-snapshot.ts --check docs/baselines/api-contract-2026-08-17.txt",
+    "safety:client-surface": "ts-node scripts/safety/legacy-client-surface.ts"
   },
   "keywords": [],
   "author": "",
