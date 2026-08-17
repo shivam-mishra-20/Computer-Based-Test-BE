@@ -390,6 +390,53 @@ async function main() {
     );
   }
 
+  // ── Lazy thenables ───────────────────────────────────────────────────────
+  // A Mongoose Query executes when .then() is called, not when it is built. If
+  // the helpers returned it unstarted, the caller's `await` would run it AFTER
+  // the context closed — silently unscoped. Found for real while writing the
+  // two-org isolation test, where it threw TenantContextMissing on a call that
+  // looked completely correct.
+  console.log('\nlazy thenables — the invisible-async footgun');
+  {
+    setEnv('warn');
+
+    /** Stands in for a Mongoose Query: does nothing until .then() is called. */
+    function makeLazyQuery() {
+      let contextAtExecution: string | null | undefined;
+      return {
+        get seen() {
+          return contextAtExecution;
+        },
+        then(resolve: (v: unknown) => void) {
+          const { currentOrgId } = require('../../src/core/tenancy/context');
+          contextAtExecution = currentOrgId();
+          resolve(contextAtExecution);
+        },
+      };
+    }
+
+    const lazy = makeLazyQuery();
+    // The NON-async form — the one that reads as obviously correct.
+    await runWithTenant({ orgId: 'ORG_LAZY', source: 'test' }, () => lazy as never);
+    check(
+      'runWithTenant starts a lazy query INSIDE the context',
+      lazy.seen === 'ORG_LAZY',
+      `context at execution was ${String(lazy.seen)} — an unstarted query escapes the scope`,
+    );
+
+    const lazy2 = makeLazyQuery();
+    await withoutTenantScope('test:lazy', () => lazy2 as never);
+    check(
+      'withoutTenantScope also starts it inside the opt-out',
+      lazy2.seen === null,
+      `context at execution was ${String(lazy2.seen)}`,
+    );
+
+    // Non-thenables must pass through untouched.
+    const plain = await runWithTenant({ orgId: 'ORG_X', source: 'test' }, () => 42 as never);
+    check('non-thenable return values pass through unchanged', (plain as unknown) === 42);
+  }
+
   console.log('');
   if (failures) {
     console.error(`TENANCY TESTS FAILED — ${failures} of ${checks} checks.`);

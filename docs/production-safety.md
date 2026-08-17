@@ -6,10 +6,10 @@ what do we go back to, and how do we know it worked?"*
 
 | | |
 |---|---|
-| **Current phase** | P1 — tenancy runtime (warn mode) |
-| **Status** | ✅ P0 · ✅ tenancy runtime (warn) · ✅ worker/cron · ✅  · ✅ public routes · ✅ backfill rehearsed · ⛔ NOT executed on production |
+| **Current phase** | P1 complete — deployment preparation |
+| **Status** | P1 COMPLETE — webhook resolved, both deployment configs written, all suites green. NOT deployed, NOT enforced. |
 | **Established** | 2026-08-17 |
-| **Next phase** | Public/pre-auth routes → backfill rehearsal. Deployment split still blocked (§12). |
+| **Next phase** | Stand up the two deployments (blocked on the two gates in §12), then production backfill, then enforce. |
 
 ---
 
@@ -395,6 +395,115 @@ unrepairable under enforce.
 
 ---
 
+## 5e. Attendance webhook — investigated and resolved
+
+`POST /api/webhooks/attendance` previously accepted **unauthenticated writes**:
+it read an `x-signature` header but the verification block was commented out, so
+any caller could queue an attendance record for any `studentId`.
+
+### The integration contract was established, not assumed
+
+| Evidence | Finding |
+|---|---|
+| eTimeOffice client | **Pull-only** — `EtimeService.syncAttendance()` calls `GET {ETIME_API_URL}/DownloadPunchData` on a cron. Zero callback/webhook/subscribe references. |
+| `WEBHOOK_SECRET` | Never configured — 0 occurrences in `.env` |
+| Production attendance, 2026-01-02 → 2026-08-16 | 7,643 records, `distinct('source')` = **`['external']`** only, all written by `EtimeService.ts:192` |
+| Records with `source: 'webhook'` | **Zero, ever** — this path would produce them |
+| Audit entries mentioning a webhook | Zero |
+| Client repositories calling it | None — it appears in the *unconsumed* list |
+
+**Conclusion: there is no live integration to preserve.** The endpoint is dead
+scaffolding — the original "Mock implementation" comment was accurate — so
+closing it breaks nothing. No compatibility strategy is required because there
+is nothing consuming it.
+
+### Resolution
+
+**Disabled by default.** The code is retained rather than deleted, and enabling
+it now requires the full target architecture:
+
+```
+external webhook
+  → ENABLE_ATTENDANCE_WEBHOOK=true            (else 404, not 403)
+  → HMAC-SHA256 signature, timing-safe        (else 401)
+  → org from ATTENDANCE_WEBHOOK_ORG_ID        (never from the payload)
+  → runWithTenant(orgId)
+  → student membership verified in that org   (else dropped)
+  → enqueue with the org travelling on the job
+```
+
+Two properties matter most:
+
+- **Tenant identity is never inferred from `studentId`.** An attacker chooses
+  that field, so deriving the organization from it would let a caller write into
+  whichever tenant they name — precisely the hole being closed.
+- **Misconfiguration refuses, it does not fall back.** `ENABLE_…=true` with a
+  missing secret or org returns 503. A fallback there would recreate the
+  original vulnerability the first time someone set one variable and not the
+  others.
+
+Signature is verified over the **raw received bytes**, not a re-serialisation of
+the parsed body — otherwise a caller could craft a payload that stringifies
+differently from what they signed.
+
+`npm run safety:webhook` — 9 checks, no database, covering: disabled-by-default,
+all three misconfiguration shapes, missing signature, wrong signature, a
+signature valid for a *different* payload, a signature from the wrong secret,
+and payload validation applying only *after* authentication.
+
+---
+
+## 5f. Two-deployment configuration
+
+`deploy/api-legacy.env.example` and `deploy/api-platform.env.example` — examples,
+no secrets, safe to commit.
+
+| | api-legacy | api-platform |
+|---|---|---|
+| Source | tag `legacy/v1.0` | `main` |
+| `TENANT_MODE` | `pinned` | `claim` |
+| `ORG_ID` | Org 001 | unset (deliberately — no fallback org) |
+| `TENANT_ENFORCEMENT` | `warn` | `warn` until backfill completes |
+| `ENABLE_CRON` | `false` | `true` |
+| `PPT_WORKER_EMBEDDED` | `false` | `true` |
+| Serves | `abhigyan-gurukul-app`, existing web | new clients + console |
+| Database | \<— **the same one** —\> | |
+
+`JWT_SECRET` must be identical across both, or tokens minted by one are rejected
+by the other.
+
+**Not yet deployed.** These are configuration files; standing up the services
+requires the two gates in §12.
+
+---
+
+## 5g. Lazy-thenable bug found and fixed
+
+Found while writing the two-org test, on a call that looked entirely correct:
+
+```ts
+await runWithTenant(ctx, () => User.countDocuments({ role: 'student' }));
+//                          ^ throws TenantContextMissing
+```
+
+A Mongoose Query is **lazy** — it executes when `.then()` is called, not when it
+is built. So `fn` returned an unstarted Query, the context closed, and the
+caller's `await` then executed it with **no context at all**. Under enforce that
+throws; under `warn` it would have silently recorded an unscoped read.
+
+The working version differed only by an invisible `async`:
+
+```ts
+await runWithTenant(ctx, async () => await User.countDocuments({ ... }));
+```
+
+Correctness cannot depend on a keyword that easy to omit, across 805 call sites.
+`runWithTenant` and `withoutTenantScope` now call `.then()` on a returned
+thenable *inside* the scope, so the obvious form is the correct one. Covered by
+three regression checks.
+
+---
+
 ## 6. Rollback procedure
 
 | Failure | Rollback | Time | Data loss |
@@ -451,7 +560,7 @@ signature instead), and login/register. Two deserve review before P1:
 
 | # | Finding | Status |
 |---|---|---|
-| 1 | **`POST /api/webhooks/attendance` is unauthenticated and WRITES.** Its signature check is commented out (`WebhookController.ts:14-19`), so anyone can POST attendance for any `studentId` straight into the processing queue. | **Open — needs your decision.** Deliberately not allowlisted. Left unmodified because enforcing a signature could break the live eTimeOffice integration. |
+| 1 | **`POST /api/webhooks/attendance` was unauthenticated and WROTE.** | **RESOLVED — see §5e.** Investigation proved it was dead scaffolding (eTimeOffice is pull-only; zero `source:'webhook'` records in 7 months; no client calls it). Now disabled by default, with signature verification and explicit org resolution required to enable. Nothing broken, because nothing consumed it. |
 | 2 | **Teacher performance analytics silently returns nothing.** `teacherRoutes.ts` joins `localField: 'user'`, but `Attempt` has no such field — it is `userId`. Verified: 0 of 48 attempts carry `user`. With `$unwind` and no `preserveNullAndEmptyArrays`, both aggregations always yield an empty result. | **Open — reported, not fixed.** Fixing changes an endpoint from returning `[]` to returning data, which is a behaviour change mid-migration. |
 | 3 | `verify-learner-isolation.ts` assertion had an object-key collision (`...INSTITUTE_ACCOUNT_CLAUSE` overwrote `accountType: { $exists: false }`), comparing 136 against 135. Proven pre-existing by reproducing with `TENANT_ENFORCEMENT=off`. | **Fixed** — uses `$and`; suite is 21/21. |
 | 4 | 9 of 48 attempts reference exams that no longer exist (orphans from deletes predating the cascade). | Informational — the verifier tolerates pre-existing orphans by design. |
@@ -581,3 +690,4 @@ unexpected action. **If any occurs: stop, diagnose, roll back.**
 | **P1 step 2** | 2026-08-17 | ✅ Client consumption surface mapped: 158 of 385 routes are load-bearing on the legacy mobile app. 3 tool bugs found and fixed. 1 pre-existing dead-code defect recorded. No production behaviour changed. |
 | **P1 tenancy** | 2026-08-17 | ✅ ALS context + global plugin shipped in warn mode · 55 models verified (54 scoped, 1 exempt, 0 missing) · Org 001 seed rehearsed on scratch, idempotent · API contract UNCHANGED · cron-disable regression caught and fixed before wiring · no production behaviour changed |
 | **P1 worker/cron** | 2026-08-17 | ✅ forEachOrg with per-org failure isolation · both crons wrapped at the scheduling boundary · QueueService + BullMQ stamp orgId at enqueue and open a fresh context in the processor · standalone worker entrypoint registers tenancy · fallback proven: cron still runs when no Org documents exist · 24 tenancy checks green · API contract UNCHANGED |
+| **P1 deployment prep** | 2026-08-17 | Webhook investigated and resolved (dead scaffolding, now disabled + hardened, 9 tests) · api-legacy/api-platform env configs written · lazy-thenable context bug found and fixed · 44 tenancy + 9 webhook + 9 two-org + 22 backfill-verify checks · legacy suites 13/13, 23/23, 178/178, 21/21 · contract UNCHANGED · nothing deployed, nothing enforced |

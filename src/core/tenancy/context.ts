@@ -72,13 +72,45 @@ export function unscopedReason(): string | null {
 }
 
 /**
+ * Start a lazy thenable INSIDE the active context.
+ *
+ * ── The footgun this removes ────────────────────────────────────────────────
+ * A Mongoose Query is lazy: `User.countDocuments({...})` builds a Query and
+ * executes nothing. Execution begins when someone calls `.then()` on it. So the
+ * most natural way to write a scoped call:
+ *
+ *     await runWithTenant(ctx, () => User.countDocuments({ role: 'student' }));
+ *
+ * ...runs `fn` inside the context, gets a Query back, leaves the context, and
+ * only THEN does the caller's `await` start the query — with no context at all.
+ * Under enforce that throws; under warn it silently records an unscoped read.
+ *
+ * The version that works looks almost identical:
+ *
+ *     await runWithTenant(ctx, async () => await User.countDocuments({...}));
+ *
+ * Depending on an invisible `async` keyword for correctness is not a
+ * contract anyone can hold in their head across 805 call sites. Calling
+ * `.then()` here — inside the scope — makes the obvious form the correct one.
+ *
+ * `Promise.resolve(thenable)` invokes `thenable.then(...)`, which is precisely
+ * what kicks a Mongoose Query into execution.
+ */
+function startInScope<T>(result: T): T {
+  if (result && typeof (result as { then?: unknown }).then === 'function') {
+    return Promise.resolve(result) as unknown as T;
+  }
+  return result;
+}
+
+/**
  * Run `fn` inside a tenant context. Everything it touches is scoped to `orgId`.
  */
 export function runWithTenant<T>(context: TenantContext, fn: () => T): T {
   if (!context.orgId) {
     throw new Error('runWithTenant requires a non-empty orgId — refusing to open an empty context.');
   }
-  return storage.run(context, fn);
+  return storage.run(context, () => startInScope(fn()));
 }
 
 /**
@@ -103,7 +135,8 @@ export function withoutTenantScope<T>(reason: string, fn: () => T): T {
       'withoutTenantScope requires a reason. It exists so every bypass is greppable and reviewable.',
     );
   }
-  return storage.run({ unscoped: true, reason: reason.trim() }, fn);
+  // Same lazy-thenable handling as runWithTenant — see startInScope().
+  return storage.run({ unscoped: true, reason: reason.trim() }, () => startInScope(fn()));
 }
 
 /**
