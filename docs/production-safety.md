@@ -7,7 +7,7 @@ what do we go back to, and how do we know it worked?"*
 | | |
 |---|---|
 | **Current phase** | P1 step 2 — legacy compatibility harness |
-| **Status** | ✅ Complete. Restore gate satisfied. |
+| **Status** | ✅ P0 complete (restore gate satisfied) · ✅ P1 step 2 complete · ⛔ P1 step 3 blocked |
 | **Established** | 2026-08-17 |
 | **Next phase** | P1 step 3 — deployment split (BLOCKED: see *Open items*) |
 
