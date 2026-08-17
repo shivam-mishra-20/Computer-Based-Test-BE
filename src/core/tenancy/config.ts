@@ -110,8 +110,29 @@ export function shouldThrowOnMissingContext(): boolean {
  * the attendance syncs and the EOD reminder on the live system the moment this
  * ships. Cron may only be disabled by a deliberate act.
  */
-function isExplicitlyPinned(): boolean {
+export function isExplicitlyPinned(): boolean {
   return (process.env.TENANT_MODE || '').trim().toLowerCase() === 'pinned';
+}
+
+/**
+ * Has tenancy been deliberately configured on this process at all?
+ *
+ * False means "pre-migration": the deployment predates tenancy configuration
+ * and must behave exactly as it did before. Today's production sets none of
+ * these variables, so this is the state the live system is in right now.
+ *
+ * This distinction is load-bearing and has already caught the same class of bug
+ * twice — once where a defaulted `pinned` mode would have silently disabled
+ * cron, and once where it would have made the request middleware 503 EVERY
+ * request. A safe default for tenancy is not automatically a safe default for
+ * behaviour, and the two must be decided separately.
+ */
+export function tenancyConfigured(): boolean {
+  return Boolean(
+    (process.env.TENANT_MODE || '').trim() ||
+      (process.env.ORG_ID || '').trim() ||
+      (process.env.TENANT_ENFORCEMENT || '').trim(),
+  );
 }
 
 /**

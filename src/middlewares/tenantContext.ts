@@ -24,7 +24,7 @@ import { NextFunction, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import { runWithTenant, withoutTenantScope, type TenantContext } from '../core/tenancy/context';
 import { findPublicRoute } from '../core/tenancy/publicRoutes';
-import { pinnedOrgId, tenantEnforcement, tenantMode } from '../core/tenancy/config';
+import { isExplicitlyPinned, pinnedOrgId, tenantEnforcement, tenantMode } from '../core/tenancy/config';
 
 interface TokenClaims {
   id?: string;
@@ -62,12 +62,28 @@ export function tenantContextMiddleware(req: Request, res: Response, next: NextF
   if (mode === 'pinned') {
     const orgId = pinnedOrgId();
     if (!orgId) {
-      // Refusing to serve is correct: the alternative is running unscoped and
-      // pretending that is the same thing.
-      return res.status(503).json({
-        message: 'Server misconfigured: TENANT_MODE=pinned requires ORG_ID.',
-        code: 'TENANT_NOT_CONFIGURED',
-      });
+      // ── The distinction that prevents a total outage ─────────────────────
+      // `tenantMode()` DEFAULTS to 'pinned' because that is the safest tenancy
+      // behaviour. But today's production sets no TENANT_* variables at all, so
+      // it lands here on every request. Returning 503 unconditionally would
+      // take the entire live system down the moment this code deployed —
+      // exactly the failure this whole migration exists to avoid.
+      //
+      // A 503 is correct ONLY when someone deliberately asked for pinned mode
+      // and forgot the organization; that is a misconfiguration worth refusing.
+      // An unconfigured deployment is not misconfigured, it is pre-migration,
+      // and it must behave precisely as it did before.
+      if (isExplicitlyPinned()) {
+        return res.status(503).json({
+          message: 'Server misconfigured: TENANT_MODE=pinned requires ORG_ID.',
+          code: 'TENANT_NOT_CONFIGURED',
+        });
+      }
+
+      // Pre-migration: no context, exactly as before this middleware existed.
+      // Under warn the plugin merely records; under enforce it throws, which is
+      // the correct signal that ORG_ID must be set before enforcing.
+      return next();
     }
     const claims = peekClaims(req);
     const context: TenantContext = {

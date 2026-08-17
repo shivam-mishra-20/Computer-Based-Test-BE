@@ -7,9 +7,9 @@ what do we go back to, and how do we know it worked?"*
 | | |
 |---|---|
 | **Current phase** | P1 complete — deployment preparation |
-| **Status** | P1 COMPLETE — webhook resolved, both deployment configs written, all suites green. NOT deployed, NOT enforced. |
+| **Status** | Deployment prep done. TOTAL-OUTAGE BUG found and fixed. Railway commit not provable from here — manual check required. NOT deployed, NOT enforced. |
 | **Established** | 2026-08-17 |
-| **Next phase** | Stand up the two deployments (blocked on the two gates in §12), then production backfill, then enforce. |
+| **Next phase** | Manual Railway commit check, then deploy api-legacy pinned/warn (step 3 of the 12-step order). |
 
 ---
 
@@ -51,10 +51,32 @@ remote — all tags and branches are local, pending manual sync.
 | Web | `cbt-exam` on Vercel |
 | Env vars | 87 in `cbt-exam-be/.env` — names recorded in §8, **values never recorded here** |
 
-> ⚠️ **Unverified:** the commits above are the local `main` HEADs. Whether Railway
-> and Vercel are currently serving exactly those commits has **not** been
-> confirmed — that requires dashboard access. Confirm before P1 step 3, because
-> the `legacy/v1.0` pin must match what is actually in production.
+### Railway production commit — strong circumstantial evidence, NOT proof
+
+| | |
+|---|---|
+| Production URL | `https://computer-based-test-be-production.up.railway.app` (the mobile app's configured host) |
+| Expected `legacy/v1.0` SHA | `8fc5d8125e7ca2db7041570a46e182617be45c95` |
+| Commit authored | 2026-08-12 **17:15:13 IST** |
+| Production process started | 2026-08-12 **17:16:55 IST** (uptime 4d 22h 52m at 10:39 UTC on 2026-08-17) |
+| Gap | **102 seconds** — consistent with a push-triggered auto-deploy |
+| `8fc5d81` position | tip of local `main`; no commits after it |
+
+**Cannot be proven from this environment.** The Railway CLI is not installed, and
+GitHub is off-limits. Decisively: **the API exposes no version or commit
+endpoint** — `/` and `/api/health` return status and uptime only. Uptime tells us
+when the *process* started, which a restart also resets; it does not identify a
+commit.
+
+> **Manual verification required before pinning `api-legacy`:**
+> Railway dashboard → the backend service → Deployments → confirm the active
+> deployment's commit is `8fc5d81`. If it is anything else, `legacy/v1.0` must be
+> re-tagged at that commit, because the entire legacy-safety mechanism assumes
+> the pin matches what production actually runs.
+>
+> Worth adding regardless: a `GET /api/version` returning the build SHA (from
+> `RAILWAY_GIT_COMMIT_SHA`) would make this answerable in one request forever
+> after. Not added here — it changes the API contract, which is frozen.
 
 ---
 
@@ -477,6 +499,45 @@ requires the two gates in §12.
 
 ---
 
+## 5h. Total-outage bug found before deployment ⚠️
+
+**The most serious defect introduced by this migration work, caught before it
+shipped.**
+
+`tenantMode()` defaults to `pinned` — the safest *tenancy* behaviour. But today's
+production sets **no `TENANT_*` variables at all**, so every request took the
+pinned branch, found no `ORG_ID`, and hit:
+
+```ts
+return res.status(503).json({ code: 'TENANT_NOT_CONFIGURED' });
+```
+
+Deploying the tenancy work to production as-is would have returned **503 on
+every single request** — a total outage, caused by a default chosen to be safe.
+
+This invalidates part of an earlier claim in this document. "Warn mode changes no
+behaviour" was true of *query results* and false of the *middleware gate*. The
+two are different things and were verified separately only after this was found.
+
+**Fix:** a 503 is correct only when someone *explicitly* set `TENANT_MODE=pinned`
+and omitted `ORG_ID` — a real misconfiguration. An unconfigured deployment is not
+misconfigured, it is pre-migration, and now falls through with no context,
+exactly as before the middleware existed.
+
+**Third occurrence of the same class of bug**, after the cron default and the
+warn-mode read filter. The pattern is now explicit in `config.ts`:
+
+> A safe default for **tenancy** is not automatically a safe default for
+> **behaviour**. Decide them separately, and verify against the environment
+> production actually has.
+
+`npm run safety:deployment` boots the **real Express app** under five
+environments — production's current one, deliberate misconfiguration, api-legacy,
+api-platform, and the off switch. No unit test of the tenancy layer would have
+caught this; only booting the app with production's env did.
+
+---
+
 ## 5g. Lazy-thenable bug found and fixed
 
 Found while writing the two-org test, on a call that looked entirely correct:
@@ -691,3 +752,4 @@ unexpected action. **If any occurs: stop, diagnose, roll back.**
 | **P1 tenancy** | 2026-08-17 | ✅ ALS context + global plugin shipped in warn mode · 55 models verified (54 scoped, 1 exempt, 0 missing) · Org 001 seed rehearsed on scratch, idempotent · API contract UNCHANGED · cron-disable regression caught and fixed before wiring · no production behaviour changed |
 | **P1 worker/cron** | 2026-08-17 | ✅ forEachOrg with per-org failure isolation · both crons wrapped at the scheduling boundary · QueueService + BullMQ stamp orgId at enqueue and open a fresh context in the processor · standalone worker entrypoint registers tenancy · fallback proven: cron still runs when no Org documents exist · 24 tenancy checks green · API contract UNCHANGED |
 | **P1 deployment prep** | 2026-08-17 | Webhook investigated and resolved (dead scaffolding, now disabled + hardened, 9 tests) · api-legacy/api-platform env configs written · lazy-thenable context bug found and fixed · 44 tenancy + 9 webhook + 9 two-org + 22 backfill-verify checks · legacy suites 13/13, 23/23, 178/178, 21/21 · contract UNCHANGED · nothing deployed, nothing enforced |
+| **Deployment prep** | 2026-08-17 | Railway commit correlated to 102s of the baseline commit but NOT proven (no version endpoint) · **total-outage bug caught: defaulted pinned mode 503d every request** · deployment-modes suite added (boots the real app under 5 envs) · 44 tenancy + 9 webhook + 8 deployment + contract UNCHANGED · nothing deployed, nothing enforced |
