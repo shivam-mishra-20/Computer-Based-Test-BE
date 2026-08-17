@@ -35,7 +35,9 @@
     "safety:tenant-coverage": "ts-node --transpile-only scripts/safety/verify-tenant-coverage.ts",
     "safety:all": "npm run safety:guard && npm run safety:tenancy && npm run safety:api-check && npm run safety:tenant-coverage && npm run safety:lookup-audit",
     "safety:seed-org": "ts-node --transpile-only scripts/safety/seed-org-001.ts",
-    "safety:lookup-audit": "ts-node --transpile-only scripts/safety/lookup-audit.ts --check"
+    "safety:lookup-audit": "ts-node --transpile-only scripts/safety/lookup-audit.ts --check",
+    "safety:backfill": "ts-node --transpile-only scripts/safety/backfill-org.ts",
+    "safety:backfill-verify": "ts-node --transpile-only scripts/safety/backfill-verify.ts"
   },
   "keywords": [],
   "author": "",

@@ -7,7 +7,7 @@ what do we go back to, and how do we know it worked?"*
 | | |
 |---|---|
 | **Current phase** | P1 — tenancy runtime (warn mode) |
-| **Status** | ✅ P0 · ✅ P1 step 2 · ✅ tenancy runtime (warn) · ✅ worker/cron context · ⏭ next: public routes, then backfill |
+| **Status** | ✅ P0 · ✅ tenancy runtime (warn) · ✅ worker/cron · ✅  · ✅ public routes · ✅ backfill rehearsed · ⛔ NOT executed on production |
 | **Established** | 2026-08-17 |
 | **Next phase** | Public/pre-auth routes → backfill rehearsal. Deployment split still blocked (§12). |
 
@@ -325,6 +325,76 @@ Rehearsed twice on the scratch restore: created once, no-op on re-run.
 
 ---
 
+
+## 5d. Lookups, public routes, and the backfill (P1 continued)
+
+### `$lookup` inventory — measured, not assumed
+
+`npm run safety:lookup-audit` — a standing CI gate, not a one-off report.
+
+7 raw occurrences; 3 are comments. **4 real call sites**, all joining `users`:
+`teacherRoutes.ts:267,315` and `AttendanceController.ts:81,154`.
+
+All four were **SAFE-BY-KEY** — the join key is an `_id` taken from an
+already-scoped source document. Sound, but sound by *referential integrity*
+rather than by an enforced filter. All four now use `tenantLookup()`, which is
+enforcement-aware: identical stage under warn, orgId-constrained sub-pipeline
+under enforce.
+
+### Public-route allowlist — 19 bypasses
+
+`src/core/tenancy/publicRoutes.ts`. Applies **only** in claim mode with no org
+resolved; pinned mode always has a context.
+
+| Classification | Count |
+|---|---|
+| pre-auth | 8 |
+| public-global | 8 |
+| diagnostic | 3 |
+
+A test asserts the exact list size so it cannot grow quietly, and that
+tenant-data routes, wrong methods and prefix-confusion paths are not matched.
+
+**Deliberately NOT allowlisted:** `POST /api/webhooks/attendance` — see §7.
+
+### Backfill tooling
+
+`npm run safety:backfill` / `safety:backfill-verify`. Dry-run by default,
+batched (1000), resumable, idempotent, reversible via `--undo`.
+
+**Rehearsed 4 times on the scratch restore:**
+
+| Rehearsal | Result |
+|---|---|
+| 1. Dry run | 225,571 of 225,572 need orgId; `orgs` correctly skipped |
+| 1. Execute | 225,571 updated, 266s |
+| 2. Re-run | **Idempotent** — 0 needed, 0.0s |
+| 2. Undo | 225,571 reverted; orgId + branchId gone, counts unchanged, Org intact |
+| 3. SIGKILL at 12s | Genuine partial: 6/62 collections, 172,861 still missing |
+| 3. Resume | Skipped the 6, completed the rest, 0 missing |
+| 4. Clean cycle | 225,571 attributed, 0 missing, counter matches |
+
+**Verification: 22 checks passed** — no non-TTL collection lost documents, every
+tenant collection fully attributed, `orgs` never stamped, relationships resolve
+and stay within one org, and all 11 required entity classes confirmed.
+
+> **Counter bug found and fixed during rehearsal.** After the SIGKILL the tool
+> reported 181,117 writes when 225,571 documents were actually attributed — the
+> kill landed mid-`auditlogs`, so those writes landed but their progress entry
+> never saved, and the resume correctly wrote only the remainder. The data was
+> right; the number was not. It now counts from the database at the end, because
+> in a migration tool a misleading number is dangerous in both directions.
+
+### PUBLIC_LEARNER note
+
+Public learners architecturally belong to Org 000, not Org 001. The backfill
+assigns them to Org 001 anyway and reports the count separately, because Org 000
+does not exist yet and assigning them now is **reversible** by a later targeted
+migration, whereas leaving them unattributed would make them invisible and
+unrepairable under enforce.
+
+---
+
 ## 6. Rollback procedure
 
 | Failure | Rollback | Time | Data loss |
@@ -376,6 +446,23 @@ signature instead), and login/register. Two deserve review before P1:
 |---|---|
 | `GET /api/automation/logs` | Streams logs with no authentication and no router-level guard. Verified genuinely unguarded, not a parser artifact. |
 | `POST /api/auth/welcome-tutorial/complete` | Writes user state with no auth. |
+
+### Found during P1 — pre-existing, NOT caused by the migration
+
+| # | Finding | Status |
+|---|---|---|
+| 1 | **`POST /api/webhooks/attendance` is unauthenticated and WRITES.** Its signature check is commented out (`WebhookController.ts:14-19`), so anyone can POST attendance for any `studentId` straight into the processing queue. | **Open — needs your decision.** Deliberately not allowlisted. Left unmodified because enforcing a signature could break the live eTimeOffice integration. |
+| 2 | **Teacher performance analytics silently returns nothing.** `teacherRoutes.ts` joins `localField: 'user'`, but `Attempt` has no such field — it is `userId`. Verified: 0 of 48 attempts carry `user`. With `$unwind` and no `preserveNullAndEmptyArrays`, both aggregations always yield an empty result. | **Open — reported, not fixed.** Fixing changes an endpoint from returning `[]` to returning data, which is a behaviour change mid-migration. |
+| 3 | `verify-learner-isolation.ts` assertion had an object-key collision (`...INSTITUTE_ACCOUNT_CLAUSE` overwrote `accountType: { $exists: false }`), comparing 136 against 135. Proven pre-existing by reproducing with `TENANT_ENFORCEMENT=off`. | **Fixed** — uses `$and`; suite is 21/21. |
+| 4 | 9 of 48 attempts reference exams that no longer exist (orphans from deletes predating the cascade). | Informational — the verifier tolerates pre-existing orphans by design. |
+
+### Two corrections to earlier reporting
+
+`GET /api/automation/logs` is **NOT** unguarded — it verifies a JWT from a query
+parameter inside the handler, because EventSource cannot set headers. I reported
+it as a real security finding in the P0 report; that was wrong. The contract
+snapshot mislabels it because the parser only reads middleware.
+`POST /api/auth/welcome-tutorial/complete` authenticates inline the same way.
 
 ### Carried from the audit
 
