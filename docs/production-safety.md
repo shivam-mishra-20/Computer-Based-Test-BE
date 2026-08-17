@@ -9,7 +9,7 @@ what do we go back to, and how do we know it worked?"*
 | **Current phase** | P1 — tenancy runtime (warn mode) |
 | **Status** | ✅ P0 · ✅ P1 step 2 · ✅ tenancy runtime (warn) · ✅ worker/cron context · ⏭ next: public routes, then backfill |
 | **Established** | 2026-08-17 |
-| **Next phase** | Worker/cron context → backfill rehearsal. Deployment split still blocked (§12). |
+| **Next phase** | Public/pre-auth routes → backfill rehearsal. Deployment split still blocked (§12). |
 
 ---
 
