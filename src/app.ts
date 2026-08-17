@@ -53,6 +53,7 @@ import scholarshipRoutes from './routes/api/scholarshipRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import { globalLimiter } from './middlewares/rateLimiter';
 import { tenantContextMiddleware } from './middlewares/tenantContext';
+import meContextRoutes from './routes/api/meContextRoutes';
 import path from 'path';
 // Use require to avoid transient module resolution issues in some TS setups
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -241,6 +242,9 @@ app.get('/register', (_req, res) => {
 });
 
 // API routes
+// Client bootstrap: org + branding + modules + limits in ONE call. Additive —
+// the legacy app never calls it.
+app.use('/api/me', meContextRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/auth', passwordResetRoutes); // Password reset under /api/auth
 app.use('/api/learner', learnerRoutes); // Public Learner profile, home, saves, progress
