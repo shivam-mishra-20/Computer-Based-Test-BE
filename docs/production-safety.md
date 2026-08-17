@@ -9,7 +9,7 @@ what do we go back to, and how do we know it worked?"*
 | **Current phase** | P1 — tenancy runtime (warn mode) |
 | **Status** | ✅ P0 · ✅ P1 step 2 · ✅ P1 tenancy runtime (warn) · ⏭ next: worker/cron context, then backfill |
 | **Established** | 2026-08-17 |
-| **Next phase** | P1 step 3 — deployment split (BLOCKED: see *Open items*) |
+| **Next phase** | Worker/cron context → backfill rehearsal. Deployment split still blocked (§12). |
 
 ---
 
@@ -33,7 +33,9 @@ point for the `api-legacy` deployment.
 > do not survive a lost machine. Pushing them is the first outward-facing action
 > of P1 and needs explicit approval.
 
-**Work branch:** `phase/p0-safety` (branched from `main`). `main` is untouched.
+**Work branches:** `phase/p0-safety`, then `phase/p1-tenant-foundation`
+(branched from it). **`main` is untouched.** Nothing has been pushed to any
+remote — all tags and branches are local, pending manual sync.
 
 ---
 
