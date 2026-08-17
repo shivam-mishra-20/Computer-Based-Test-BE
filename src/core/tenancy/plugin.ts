@@ -116,12 +116,47 @@ function isTenantScoped(schema: Schema): boolean {
   return (schema.options as Record<string, unknown>).tenantScoped !== false;
 }
 
+/**
+ * Is this a NESTED schema rather than a model's own schema?
+ *
+ * `mongoose.plugin()` applies to EVERY schema the process compiles — including
+ * the ones Mongoose creates implicitly for a nested object definition like:
+ *
+ *     branding: { type: { logoUrl: String, primaryColor: String }, _id: false }
+ *
+ * Without this check the plugin added `orgId` and `branchId` INSIDE every such
+ * object across the whole codebase — `User.settings`, `Org.branding`,
+ * `Exam.schedule`, `OrgPolicy.exam` and dozens more. Documents gained
+ * meaningless duplicated keys, and a nested object could carry an `orgId` that
+ * looks authoritative but is scoped by nothing, because query middleware only
+ * ever runs on the PARENT model.
+ *
+ * Caught by a configuration-seeding equivalence check that compared resolver
+ * output before and after seeding and found the two differing by exactly this
+ * stray field.
+ *
+ * A tenant key belongs on the document a query can actually filter — the model's
+ * own schema. Embedded objects are reached only through that parent, which is
+ * already scoped.
+ */
+function isNestedSchema(schema: Schema): boolean {
+  const s = schema as unknown as {
+    $implicitlyCreated?: boolean;
+    $isSingleNested?: boolean;
+    $isArraySubdocument?: boolean;
+  };
+  return Boolean(s.$implicitlyCreated || s.$isSingleNested || s.$isArraySubdocument);
+}
+
 function modelNameOf(thing: { model?: { modelName?: string }; modelName?: string }): string {
   return thing?.model?.modelName || thing?.modelName || 'UnknownModel';
 }
 
 export function tenantPlugin(schema: Schema): void {
   if (!isTenantScoped(schema)) return;
+  // A tenant key belongs on the document a query can filter, not inside an
+  // embedded object that is only ever reached through an already-scoped parent.
+  if (isNestedSchema(schema)) return;
   if ((schema as unknown as { __tenantPluginApplied?: boolean }).__tenantPluginApplied) return;
   (schema as unknown as { __tenantPluginApplied?: boolean }).__tenantPluginApplied = true;
 

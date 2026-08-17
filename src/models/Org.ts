@@ -28,8 +28,14 @@ export interface IOrgBranding {
   primaryColor?: string;
   secondaryColor?: string;
   appName?: string;
+  accentColor?: string;
+  /** Mobile splash background; app.json currently hardcodes #F7F7F7. */
+  splashBackgroundColor?: string;
+  splashImageUrl?: string;
   /** Shown on exported PDFs; replaces the hardcoded institute header. */
   documentHeader?: string;
+  /** Footer/sender identity for outbound email. */
+  emailFromName?: string;
 }
 
 export interface IOrgLocale {
@@ -83,7 +89,11 @@ const orgSchema = new Schema<IOrg>(
         primaryColor: String,
         secondaryColor: String,
         appName: String,
+        accentColor: String,
+        splashBackgroundColor: String,
+        splashImageUrl: String,
         documentHeader: String,
+        emailFromName: String,
       },
       required: false,
       _id: false,

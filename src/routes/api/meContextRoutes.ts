@@ -19,6 +19,8 @@ import { Router, Request, Response } from 'express';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import { currentOrgId, withoutTenantScope } from '../../core/tenancy';
 import { getEntitlement } from '../../core/entitlements/resolve';
+import { getOrgConfiguration } from '../../core/config/orgConfig';
+import { getOrgPolicy } from '../../core/config/policy';
 
 const router = Router();
 
@@ -43,13 +45,15 @@ router.get('/context', authMiddleware, async (req: Request, res: Response) => {
       });
     }
 
-    const [org, entitlement] = await Promise.all([
+    const [org, entitlement, configuration, policy] = await Promise.all([
       withoutTenantScope('context:read-org', async () => {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const Org = require('../../models/Org').default;
         return Org.findById(orgId).lean();
       }),
       getEntitlement(orgId),
+      getOrgConfiguration(orgId),
+      getOrgPolicy(orgId),
     ]);
 
     const organization = org as {
@@ -89,7 +93,13 @@ router.get('/context', authMiddleware, async (req: Request, res: Response) => {
       modules: entitlement.modules,
       limits: entitlement.limits,
       usage: {},
-      configuration: {},
+      configuration: {
+        classLevels: configuration.classLevels,
+        subjects: configuration.subjects,
+        rooms: configuration.rooms,
+        usingDefaults: configuration.usingDefaults,
+        policy,
+      },
       subscriptionStatus: entitlement.status,
       writable: entitlement.writable,
       version: entitlement.version,

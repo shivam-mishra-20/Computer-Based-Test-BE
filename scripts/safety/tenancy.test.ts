@@ -104,6 +104,38 @@ async function main() {
   check('orgId is NOT required in P1', Scoped.schema.path('orgId').isRequired !== true);
   check('exempt model has no orgId', !Exempt.schema.path('orgId'));
 
+  // ── Nested sub-schemas must NOT be stamped ───────────────────────────────
+  // mongoose.plugin() applies to EVERY schema the process compiles, including
+  // the ones Mongoose creates implicitly for a nested `type: {...}` definition.
+  // Without a guard the plugin added orgId/branchId INSIDE User.settings,
+  // Org.branding, OrgPolicy.exam and dozens more — meaningless duplicated keys
+  // that look authoritative but are scoped by nothing, because query middleware
+  // only ever runs on the parent model.
+  console.log('\nnested sub-schemas');
+  {
+    const Nested = mongoose.model(
+      'TestNested',
+      new mongoose.Schema<TestDoc>({
+        title: String,
+        // Implicitly-created child schema — the shape that leaked.
+        meta: { type: { colour: String, size: Number }, required: false, _id: false },
+      } as never),
+    );
+
+    check('the model itself is stamped', Boolean(Nested.schema.path('orgId')));
+
+    const child = (Nested.schema.path('meta') as unknown as { schema?: mongoose.Schema })?.schema;
+    check(
+      'its nested object is NOT stamped with orgId',
+      !child || !child.path('orgId'),
+      'a tenant key inside an embedded object is filtered by nothing',
+    );
+    check(
+      'its nested object is NOT stamped with branchId',
+      !child || !child.path('branchId'),
+    );
+  }
+
   // ── Property 1: warn never filters ───────────────────────────────────────
   console.log('\nwarn mode — the property that makes this deployable');
   setEnv('warn');
