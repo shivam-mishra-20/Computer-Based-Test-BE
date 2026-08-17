@@ -17,20 +17,38 @@
   }
 })();
 
+// ── Tenancy must be registered before ANY model is compiled ─────────────────
+// mongoose.plugin() applies only to schemas built after the call, and models
+// compile at import time. Registering after `require('./app')` below would
+// produce models with no orgId and no scoping hooks — and it would do so
+// silently, which is the worst failure mode for a security control.
+// verifyTenantPluginApplied() below turns that silence into a loud error.
+import { registerTenancy, verifyTenantPluginApplied } from './core/tenancy';
+registerTenancy();
+
 import http from 'http';
 import cluster from 'cluster';
 import SocketService from './services/SocketService';
 import { closeRedis } from './config/redis';
+import { shouldRunScheduledJobs } from './core/tenancy';
 
 // Import application after credentials are configured
 const app = require('./app').default || require('./app');
 const { connectDB } = require('./config/db');
+
+// Every model is now loaded. Prove the plugin reached all of them.
+verifyTenantPluginApplied();
 
 const PORT = parseInt(process.env.PORT || '5000', 10);
 const WORKER_ID = process.env.WORKER_ID || process.pid;
 
 function shouldRunCronJobs(): boolean {
   if (process.env.ENABLE_CRON === 'false') return false;
+  // The api-legacy deployment must not schedule jobs: both deployments share
+  // one database, so duplicate cron would give Abhigyan two attendance syncs
+  // and two EOD reminders a day. Only an explicit TENANT_MODE=pinned disables
+  // this — a defaulted value must not change today's production behaviour.
+  if (!shouldRunScheduledJobs()) return false;
   if (process.env.CRON_ON_ALL_WORKERS === 'true') return true;
   if (!cluster.isWorker) return true;
   return cluster.worker?.id === 1;

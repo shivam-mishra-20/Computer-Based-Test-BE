@@ -30,7 +30,10 @@
     "safety:guard": "ts-node scripts/safety/guard.test.ts",
     "safety:api-snapshot": "ts-node scripts/safety/api-contract-snapshot.ts",
     "safety:api-check": "ts-node scripts/safety/api-contract-snapshot.ts --check docs/baselines/api-contract-2026-08-17.txt",
-    "safety:client-surface": "ts-node scripts/safety/legacy-client-surface.ts"
+    "safety:client-surface": "ts-node scripts/safety/legacy-client-surface.ts",
+    "safety:tenancy": "ts-node scripts/safety/tenancy.test.ts",
+    "safety:tenant-coverage": "ts-node --transpile-only scripts/safety/verify-tenant-coverage.ts",
+    "safety:all": "npm run safety:guard && npm run safety:tenancy && npm run safety:api-check && npm run safety:tenant-coverage"
   },
   "keywords": [],
   "author": "",

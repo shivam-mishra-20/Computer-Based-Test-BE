@@ -52,6 +52,7 @@ import playlistRoutes from './routes/api/playlistRoutes';
 import scholarshipRoutes from './routes/api/scholarshipRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import { globalLimiter } from './middlewares/rateLimiter';
+import { tenantContextMiddleware } from './middlewares/tenantContext';
 import path from 'path';
 // Use require to avoid transient module resolution issues in some TS setups
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -192,6 +193,15 @@ app.use(helmet({ contentSecurityPolicy: false }));
 app.use(morgan(MORGAN_FORMAT, {
 	skip: (req) => req.path === '/api/health' || req.path.startsWith('/.well-known/'),
 }));
+
+// Open a tenant context for every request, before any route runs, so handlers
+// and the services they call are scoped without needing to know it. Mounted
+// after body parsing (it reads headers only) and before the routes.
+//
+// Under TENANT_ENFORCEMENT=warn — the default and the only setting used during
+// migration — this changes no query result. It establishes the context and
+// observes; read filtering begins only under `enforce`.
+app.use(tenantContextMiddleware);
 
 // Serve static uploads (images) from /uploads
 app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
