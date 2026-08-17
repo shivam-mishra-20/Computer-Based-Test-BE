@@ -33,7 +33,8 @@
     "safety:client-surface": "ts-node scripts/safety/legacy-client-surface.ts",
     "safety:tenancy": "ts-node scripts/safety/tenancy.test.ts",
     "safety:tenant-coverage": "ts-node --transpile-only scripts/safety/verify-tenant-coverage.ts",
-    "safety:all": "npm run safety:guard && npm run safety:tenancy && npm run safety:api-check && npm run safety:tenant-coverage"
+    "safety:all": "npm run safety:guard && npm run safety:tenancy && npm run safety:api-check && npm run safety:tenant-coverage",
+    "safety:seed-org": "ts-node --transpile-only scripts/safety/seed-org-001.ts"
   },
   "keywords": [],
   "author": "",

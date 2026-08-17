@@ -6,8 +6,8 @@ what do we go back to, and how do we know it worked?"*
 
 | | |
 |---|---|
-| **Current phase** | P1 step 2 — legacy compatibility harness |
-| **Status** | ✅ P0 complete (restore gate satisfied) · ✅ P1 step 2 complete · ⛔ P1 step 3 blocked |
+| **Current phase** | P1 — tenancy runtime (warn mode) |
+| **Status** | ✅ P0 · ✅ P1 step 2 · ✅ P1 tenancy runtime (warn) · ⏭ next: worker/cron context, then backfill |
 | **Established** | 2026-08-17 |
 | **Next phase** | P1 step 3 — deployment split (BLOCKED: see *Open items*) |
 
@@ -235,6 +235,94 @@ behaviour" — including behaviour that is already wrong.
 
 ---
 
+## 5c. Tenancy runtime (P1) — shipped in warn mode
+
+`src/core/tenancy/` + `src/middlewares/tenantContext.ts` + `src/models/Org.ts`.
+
+**Ships with zero behaviour change.** The context is established and unscoped
+access is observed; no read is filtered until `TENANT_ENFORCEMENT=enforce`.
+
+### Configuration
+
+| Variable | Values | Default | Effect |
+|---|---|---|---|
+| `TENANT_MODE` | `pinned` \| `claim` | `pinned` | `pinned` = api-legacy (org fixed by `ORG_ID`); `claim` = api-platform (org from token) |
+| `ORG_ID` | Org 001's `_id` | unset | Required in `pinned` mode |
+| `TENANT_ENFORCEMENT` | `off` \| `warn` \| `enforce` | `warn` | The migration kill switch |
+
+### The read/write asymmetry
+
+This is the single property that makes the change deployable to a live system:
+
+- **Writes are stamped** under `warn` and `enforce`. Additive — sets a field on
+  documents being created anyway, and nothing reads it yet. Shrinks the backfill
+  to pre-existing rows and closes the race where a row created mid-backfill is
+  missed.
+- **Reads are filtered only under `enforce`.** Subtractive. During the warn
+  period `orgId` is not backfilled, so adding `{ orgId }` to a read would match
+  nothing and **every screen in production would go blank**.
+
+`scripts/safety/tenancy.test.ts` asserts this directly so it cannot regress.
+
+### Production-behaviour bug caught before wiring
+
+`tenantMode()` defaults to `pinned` (safest tenancy setting), and pinned is the
+api-legacy deployment, which must not run cron. But **today's production sets no
+`TENANT_MODE` at all** — so deriving "disable cron" from the *defaulted* value
+would have silently stopped the four daily attendance syncs and the EOD reminder
+on the live system.
+
+Cron is now disabled only by an **explicit** `TENANT_MODE=pinned`. Covered by a
+regression test that asserts an unset `TENANT_MODE` still runs cron.
+
+### Silent-failure protection
+
+`mongoose.plugin()` applies only to schemas compiled *after* the call. A model
+imported before `registerTenancy()` gets no `orgId` and no hooks — and boots,
+tests and serves normally while being permanently unscoped. That is the quietest
+possible way to lose isolation.
+
+- `registerTenancy()` runs at the very top of `src/server.ts`, above the
+  `require('./app')` that compiles every model.
+- `verifyTenantPluginApplied()` asserts coverage once models are loaded:
+  **logs** under `warn`, **refuses to boot** under `enforce`.
+- `npm run safety:tenant-coverage` gates this in CI.
+
+**Verified:** 55 models compiled · 54 tenant-scoped · 1 exempt (`Org`) · 0
+missing. All scoped models carry an `orgId` index.
+
+### Escape hatch
+
+```ts
+await withoutTenantScope('auth:resolve-org-by-email', () => User.findOne({ email }));
+```
+
+`reason` is mandatory, so `grep -rn "withoutTenantScope(" src/` produces a
+complete, reviewable list of every sanctioned bypass.
+
+### Org 001 seed
+
+`npm run safety:seed-org` — idempotent, refuses to guess a target.
+
+```bash
+npx ts-node --transpile-only scripts/safety/seed-org-001.ts --scratch-suffix restore_2026_08_17
+npx ts-node --transpile-only scripts/safety/seed-org-001.ts --production   # when approved
+```
+
+Rehearsed twice on the scratch restore: created once, no-op on re-run.
+**Not yet run against production.**
+
+### Known limits — recorded, not hidden
+
+| Limit | Consequence |
+|---|---|
+| `$lookup` sub-pipelines | The plugin scopes the pipeline's own collection but cannot reach into a joined one. Every `$lookup` needs its own `orgId` match. Permanent code-review item. |
+| Public routes under `claim` | With no token there is no context. Under `enforce` a public route touching the database will throw until it is wrapped in `withoutTenantScope`. Must be resolved before enforce is switched on. |
+| `estimatedDocumentCount` | Collection-level; cannot be filtered by tenant. Avoid on scoped models. |
+| Workers / cron | Do not yet open their own context. Next task; jobs must never inherit an ambient one. |
+
+---
+
 ## 6. Rollback procedure
 
 | Failure | Rollback | Time | Data loss |
@@ -402,3 +490,4 @@ unexpected action. **If any occurs: stop, diagnose, roll back.**
 |---|---|---|
 | **P0 — Safety** | 2026-08-17 | ✅ 4 repos tagged · 87 MB / 226,963 doc backup taken · **restore verified by count and fingerprint** · 463-endpoint API contract captured · 2 hazard scripts quarantined · `backups/` git-ignored · guard test 10/10 · no production behaviour changed |
 | **P1 step 2** | 2026-08-17 | ✅ Client consumption surface mapped: 158 of 385 routes are load-bearing on the legacy mobile app. 3 tool bugs found and fixed. 1 pre-existing dead-code defect recorded. No production behaviour changed. |
+| **P1 tenancy** | 2026-08-17 | ✅ ALS context + global plugin shipped in warn mode · 55 models verified (54 scoped, 1 exempt, 0 missing) · Org 001 seed rehearsed on scratch, idempotent · API contract UNCHANGED · cron-disable regression caught and fixed before wiring · no production behaviour changed |
