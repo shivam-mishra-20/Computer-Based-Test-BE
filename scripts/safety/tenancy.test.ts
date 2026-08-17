@@ -230,6 +230,54 @@ async function main() {
     check('explicit TENANT_MODE=pinned (api-legacy): cron disabled', cfg2.shouldRunScheduledJobs() === false);
   }
 
+  // ── forEachOrg ───────────────────────────────────────────────────────────
+  // Cron is the one place where "no tenant context" is the normal state, which
+  // makes it the likeliest source of a silent cross-tenant mistake.
+  console.log('\nforEachOrg — cron and scheduled work');
+  setEnv('warn');
+  {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { forEachOrg } = require('../../src/core/tenancy/forEachOrg');
+    const { currentOrgId } = require('../../src/core/tenancy/context');
+
+    // 1. Pinned deployment — exactly one org, taken from configuration.
+    process.env.TENANT_MODE = 'pinned';
+    process.env.ORG_ID = 'ORG_001';
+    const seenPinned: (string | null)[] = [];
+    const pinnedSummary = await forEachOrg('test-pinned', async () => {
+      seenPinned.push(currentOrgId());
+    });
+    check('pinned: runs exactly once', pinnedSummary.total === 1 && pinnedSummary.succeeded === 1);
+    check('pinned: inside the configured org context', seenPinned[0] === 'ORG_001');
+
+    // 2. THE FALLBACK THAT KEEPS PRODUCTION WORKING.
+    //    Today's production has no Org documents. If cron required them, the
+    //    four daily attendance syncs would stop the moment this deployed.
+    delete process.env.TENANT_MODE;
+    delete process.env.ORG_ID;
+    let ranWithoutOrgs = 0;
+    const emptySummary = await forEachOrg('test-empty', async () => {
+      ranWithoutOrgs++;
+    });
+    check(
+      'no orgs seeded yet: work STILL RUNS (pre-migration behaviour preserved)',
+      ranWithoutOrgs === 1 && emptySummary.mode === 'uncontextualized',
+      'requiring Org documents would stop attendance sync on deploy',
+    );
+
+    // 3. Failure isolation — one org failing must not abort the rest.
+    process.env.TENANT_MODE = 'pinned';
+    process.env.ORG_ID = 'ORG_001';
+    const failSummary = await forEachOrg('test-fail', async () => {
+      throw new Error('simulated org failure');
+    });
+    check(
+      'a failing org is reported, not rethrown',
+      failSummary.failed === 1 && failSummary.succeeded === 0,
+    );
+    delete process.env.ORG_ID;
+  }
+
   console.log('');
   if (failures) {
     console.error(`TENANCY TESTS FAILED — ${failures} of ${checks} checks.`);

@@ -27,6 +27,8 @@ export {
 
 export { registerTenancy, verifyTenantPluginApplied } from './bootstrap';
 
+export { forEachOrg, type ForEachOrgSummary, type OrgRunResult } from './forEachOrg';
+
 export { getUnscopedReport, resetUnscopedReport, tenancyStatus, type UnscopedEvent } from './plugin';
 
 export { TenantContextMissing, TenantMismatch } from './errors';

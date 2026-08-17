@@ -16,6 +16,7 @@ import { Worker, type Job } from 'bullmq';
 import { Emitter } from '@socket.io/redis-emitter';
 import { redisPublisher } from '../config/redis';
 import { bucket } from '../config/firebase';
+import { runWithTenant } from '../core/tenancy';
 import AiGeneration from '../models/AiGeneration';
 import TeachingKnowledgeGraphModel from '../models/TeachingKnowledgeGraph';
 import { AiOrchestratorService } from '../services/aiOrchestrator';
@@ -177,7 +178,27 @@ async function processPaperJob(job: Job<PptPipelineJobData>, doc: any): Promise<
   deleteStagedFile(stagedFileRef);
 }
 
+/**
+ * Entry point BullMQ calls. Opens a FRESH tenant context from the job payload
+ * before any database work happens.
+ *
+ * Deliberately never inherits an ambient context: this runs on a worker tick
+ * with no request behind it, possibly in a separate process, possibly minutes
+ * after enqueue and after a restart. Whatever context might happen to be open
+ * belongs to someone else's work.
+ *
+ * A job with no orgId predates this field and still sits in the queue — it runs
+ * uncontextualized, exactly as it did before, rather than being dropped.
+ */
 async function processJob(job: Job<PptPipelineJobData>): Promise<void> {
+  const orgId = job.data.orgId;
+  if (!orgId) return processJobInContext(job);
+  return runWithTenant({ orgId, userId: job.data.ownerId, source: 'job' }, () =>
+    processJobInContext(job),
+  );
+}
+
+async function processJobInContext(job: Job<PptPipelineJobData>): Promise<void> {
   const { generationId, ownerId, mode, options, stagedFileRef } = job.data;
 
   const doc = await AiGeneration.findById(generationId);

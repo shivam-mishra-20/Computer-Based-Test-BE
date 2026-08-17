@@ -7,7 +7,7 @@ what do we go back to, and how do we know it worked?"*
 | | |
 |---|---|
 | **Current phase** | P1 — tenancy runtime (warn mode) |
-| **Status** | ✅ P0 · ✅ P1 step 2 · ✅ P1 tenancy runtime (warn) · ⏭ next: worker/cron context, then backfill |
+| **Status** | ✅ P0 · ✅ P1 step 2 · ✅ tenancy runtime (warn) · ✅ worker/cron context · ⏭ next: public routes, then backfill |
 | **Established** | 2026-08-17 |
 | **Next phase** | Worker/cron context → backfill rehearsal. Deployment split still blocked (§12). |
 
@@ -321,7 +321,7 @@ Rehearsed twice on the scratch restore: created once, no-op on re-run.
 | `$lookup` sub-pipelines | The plugin scopes the pipeline's own collection but cannot reach into a joined one. Every `$lookup` needs its own `orgId` match. Permanent code-review item. |
 | Public routes under `claim` | With no token there is no context. Under `enforce` a public route touching the database will throw until it is wrapped in `withoutTenantScope`. Must be resolved before enforce is switched on. |
 | `estimatedDocumentCount` | Collection-level; cannot be filtered by tenant. Avoid on scoped models. |
-| Workers / cron | Do not yet open their own context. Next task; jobs must never inherit an ambient one. |
+| ~~Workers / cron~~ | **Resolved.** Both crons run via `forEachOrg`; both queues stamp `orgId` at enqueue and open a fresh context in the processor. |
 
 ---
 
@@ -493,3 +493,4 @@ unexpected action. **If any occurs: stop, diagnose, roll back.**
 | **P0 — Safety** | 2026-08-17 | ✅ 4 repos tagged · 87 MB / 226,963 doc backup taken · **restore verified by count and fingerprint** · 463-endpoint API contract captured · 2 hazard scripts quarantined · `backups/` git-ignored · guard test 10/10 · no production behaviour changed |
 | **P1 step 2** | 2026-08-17 | ✅ Client consumption surface mapped: 158 of 385 routes are load-bearing on the legacy mobile app. 3 tool bugs found and fixed. 1 pre-existing dead-code defect recorded. No production behaviour changed. |
 | **P1 tenancy** | 2026-08-17 | ✅ ALS context + global plugin shipped in warn mode · 55 models verified (54 scoped, 1 exempt, 0 missing) · Org 001 seed rehearsed on scratch, idempotent · API contract UNCHANGED · cron-disable regression caught and fixed before wiring · no production behaviour changed |
+| **P1 worker/cron** | 2026-08-17 | ✅ forEachOrg with per-org failure isolation · both crons wrapped at the scheduling boundary · QueueService + BullMQ stamp orgId at enqueue and open a fresh context in the processor · standalone worker entrypoint registers tenancy · fallback proven: cron still runs when no Org documents exist · 24 tenancy checks green · API contract UNCHANGED |

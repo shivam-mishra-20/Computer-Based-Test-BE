@@ -1,5 +1,6 @@
 import cron from 'node-cron';
 import User from '../models/User';
+import { forEachOrg } from '../core/tenancy';
 import { broadcastNotification } from './notificationService';
 
 export class TeacherEodReminderCron {
@@ -14,7 +15,10 @@ export class TeacherEodReminderCron {
 
     cron.schedule(this.REMINDER_CRON, async () => {
       console.log('[TeacherEodReminderCron] Running 8 PM daily reminder job...');
-      await this.sendDailyReminder();
+      // Per-organization context. Without it, a multi-tenant platform would
+      // resolve "all approved teachers" across every customer and send one
+      // institute's staff a reminder generated from another's roster.
+      await forEachOrg('eod-reminder', () => this.sendDailyReminder());
     }, {
       timezone: 'Asia/Kolkata'
     });

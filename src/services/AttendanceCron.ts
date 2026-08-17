@@ -1,4 +1,5 @@
 import cron from 'node-cron';
+import { forEachOrg } from '../core/tenancy';
 import EtimeService from './EtimeService';
 import AuditLog from '../models/AuditLog';
 import { broadcastNotification } from './notificationService';
@@ -36,7 +37,13 @@ export class AttendanceCron {
     for (const schedule of this.SYNC_TIMES) {
       cron.schedule(schedule.cron, async () => {
         console.log(`[AttendanceCron] Starting scheduled auto-sync at ${schedule.label}...`);
-        await this.runAutoSync();
+        // Wrapped at the SCHEDULING boundary, not inside runAutoSync(), so the
+        // method stays callable from a request handler — where the request's
+        // own tenant context is already open and must not be replaced.
+        //
+        // forEachOrg isolates failures: one organization with a bad eTimeOffice
+        // credential must not stop attendance sync for every other tenant.
+        await forEachOrg('attendance-sync', () => this.runAutoSync());
       }, {
         timezone: 'Asia/Kolkata' // IST timezone
       });
