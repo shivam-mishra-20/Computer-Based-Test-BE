@@ -9,6 +9,7 @@ import { uploadAiContent } from '../../middlewares/uploadAiContent';
 import { aiLimiter } from '../../middlewares/rateLimiter';
 import { buildClassVariants } from '../../utils/audienceTargeting';
 import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
+import { tenantLookup } from '../../core/tenancy';
 import {
   generate as aiContentGenerate,
   listHistory as aiContentListHistory,
@@ -263,14 +264,15 @@ router.get('/performance', authMiddleware, async (req: AuthRequest, res: Respons
     // Aggregate performance data
     const performance = await Attempt.aggregate([
       { $match: matchFilter },
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'user',
-          foreignField: '_id',
-          as: 'student'
-        }
-      },
+      // The plugin scopes Attempt but cannot reach inside a $lookup; this
+      // constrains the joined users to the same tenant under enforce, and is
+      // byte-identical to the previous stage under warn.
+      tenantLookup({
+        from: 'users',
+        localField: 'user',
+        foreignField: '_id',
+        as: 'student',
+      }),
       { $unwind: '$student' },
       {
         $match: batch ? { 'student.batch': batch } : {}
@@ -311,14 +313,12 @@ router.get('/performance', authMiddleware, async (req: AuthRequest, res: Respons
     // Get batch-level stats
     const batchStats = await Attempt.aggregate([
       { $match: matchFilter },
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'user',
-          foreignField: '_id',
-          as: 'student'
-        }
-      },
+      tenantLookup({
+        from: 'users',
+        localField: 'user',
+        foreignField: '_id',
+        as: 'student',
+      }),
       { $unwind: '$student' },
       {
         $group: {

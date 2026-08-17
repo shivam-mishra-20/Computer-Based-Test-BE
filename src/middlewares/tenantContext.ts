@@ -22,7 +22,8 @@
 
 import { NextFunction, Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
-import { runWithTenant, type TenantContext } from '../core/tenancy/context';
+import { runWithTenant, withoutTenantScope, type TenantContext } from '../core/tenancy/context';
+import { findPublicRoute } from '../core/tenancy/publicRoutes';
 import { pinnedOrgId, tenantEnforcement, tenantMode } from '../core/tenancy/config';
 
 interface TokenClaims {
@@ -96,9 +97,19 @@ export function tenantContextMiddleware(req: Request, res: Response, next: NextF
     return runWithTenant(context, () => next());
   }
 
-  // No usable organization. Pre-authentication routes (login, health, org
-  // resolution) legitimately land here and opt out explicitly where they touch
-  // the database. Under warn this is observed; under enforce a tenant-data
-  // route reaching the database from here throws, which is the intent.
+  // No usable organization. Two possibilities, and they are treated very
+  // differently on purpose.
+  const allowed = findPublicRoute(req.method, req.path);
+
+  if (allowed) {
+    // A reviewed, justified entry in the allowlist. The reason string reaches
+    // the logs, so every bypass that actually fires is traceable.
+    return withoutTenantScope(allowed.reason, () => next());
+  }
+
+  // NOT allowlisted. Fall through with no context: under warn this is merely
+  // observed, and under enforce the first database call throws. That is the
+  // intent — a tenant-data route reaching the database without a context is a
+  // bug, and it should fail loudly rather than be granted a blanket bypass.
   return next();
 }

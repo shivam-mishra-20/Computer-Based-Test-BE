@@ -278,6 +278,118 @@ async function main() {
     delete process.env.ORG_ID;
   }
 
+  // ── tenantLookup ─────────────────────────────────────────────────────────
+  // The plugin scopes the collection an aggregation runs ON but cannot reach
+  // inside a $lookup — the joined collection is read without passing through
+  // its own middleware.
+  console.log('\ntenantLookup — the join the plugin cannot reach');
+  {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { tenantLookup } = require('../../src/core/tenancy/tenantLookup');
+    const spec = { from: 'users', localField: 'user', foreignField: '_id', as: 'student' };
+
+    setEnv('warn');
+    const warnStage = tenantLookup(spec) as any;
+    check(
+      'WARN: emits the plain stage, byte-identical to the original code',
+      warnStage.$lookup.localField === 'user' &&
+        warnStage.$lookup.foreignField === '_id' &&
+        !warnStage.$lookup.pipeline,
+      'a scoped sub-pipeline under warn would match nothing — orgId is not backfilled yet',
+    );
+
+    setEnv('enforce');
+    await runWithTenant({ orgId: 'ORG_001', source: 'test' }, async () => {
+      const stage = tenantLookup(spec) as any;
+      const match = stage.$lookup.pipeline?.[0]?.$match;
+      check('ENFORCE: emits a sub-pipeline', Array.isArray(stage.$lookup.pipeline));
+      check('ENFORCE: sub-pipeline constrains orgId', match?.orgId === 'ORG_001');
+      check(
+        'ENFORCE: join predicate preserved alongside the orgId constraint',
+        Boolean(match?.$expr),
+        'dropping $expr would join every row in the collection',
+      );
+      check(
+        'ENFORCE: orgId and join predicate share ONE $match',
+        match?.orgId !== undefined && match?.$expr !== undefined,
+        'separating them invites a refactor that drops the tenant constraint',
+      );
+    });
+
+    // A global collection has no orgId — constraining it would match nothing.
+    await runWithTenant({ orgId: 'ORG_001', source: 'test' }, async () => {
+      const stage = tenantLookup({ ...spec, from: 'orgs', global: true }) as any;
+      check('ENFORCE + global:true: stays a plain join', !stage.$lookup.pipeline);
+    });
+
+    // Inside an explicit opt-out the caller has taken responsibility.
+    setEnv('enforce');
+    await withoutTenantScope('test:lookup-optout', async () => {
+      const stage = tenantLookup(spec) as any;
+      check('ENFORCE + withoutTenantScope: plain join, opt-out honoured', !stage.$lookup.pipeline);
+    });
+  }
+
+  // ── Public-route allowlist ───────────────────────────────────────────────
+  console.log('\npublic-route allowlist — every bypass explicit and justified');
+  {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const {
+      PUBLIC_ROUTE_ALLOWLIST,
+      DELIBERATELY_NOT_ALLOWLISTED,
+      findPublicRoute,
+    } = require('../../src/core/tenancy/publicRoutes');
+
+    check(
+      'every entry carries a reason',
+      PUBLIC_ROUTE_ALLOWLIST.every((e: any) => e.reason && e.reason.trim().length > 3),
+    );
+    check(
+      'every entry carries a justification',
+      PUBLIC_ROUTE_ALLOWLIST.every((e: any) => e.justification && e.justification.length > 20),
+    );
+    check(
+      'every entry is classified',
+      PUBLIC_ROUTE_ALLOWLIST.every((e: any) =>
+        ['pre-auth', 'public-global', 'platform-global', 'diagnostic'].includes(e.classification),
+      ),
+    );
+
+    // The count is asserted so the list cannot grow quietly. Changing it is
+    // meant to require editing this number, which forces a reviewer to look.
+    check(
+      `allowlist size is exactly ${PUBLIC_ROUTE_ALLOWLIST.length} (update deliberately)`,
+      PUBLIC_ROUTE_ALLOWLIST.length === 19,
+      `got ${PUBLIC_ROUTE_ALLOWLIST.length} — if intentional, update the test`,
+    );
+
+    check('login is allowlisted', findPublicRoute('POST', '/api/auth/login') !== null);
+    check(
+      'param routes match',
+      findPublicRoute('GET', '/api/scholarship/tests/abc123') !== null,
+    );
+    check(
+      'method is respected — DELETE on an allowlisted GET path is NOT bypassed',
+      findPublicRoute('DELETE', '/api/scholarship/tests') === null,
+    );
+    check(
+      'tenant data routes are NOT bypassed',
+      findPublicRoute('GET', '/api/users') === null &&
+        findPublicRoute('GET', '/api/attempts/assigned') === null &&
+        findPublicRoute('GET', '/api/exams') === null,
+    );
+    check(
+      'prefix confusion rejected — /api/auth/loginX is not /api/auth/login',
+      findPublicRoute('POST', '/api/auth/loginX') === null,
+    );
+    check(
+      'the unauthenticated webhook is deliberately NOT allowlisted',
+      findPublicRoute('POST', '/api/webhooks/attendance') === null &&
+        DELIBERATELY_NOT_ALLOWLISTED.includes('POST /api/webhooks/attendance'),
+      'allowlisting it would bless an unauthenticated write',
+    );
+  }
+
   console.log('');
   if (failures) {
     console.error(`TENANCY TESTS FAILED — ${failures} of ${checks} checks.`);

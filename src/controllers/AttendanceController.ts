@@ -9,6 +9,7 @@ import {
   formatMinutes,
 } from '../services/attendanceRuleService';
 import { INSTITUTE_ACCOUNT_CLAUSE } from '../utils/instituteAudience';
+import { tenantLookup } from '../core/tenancy';
 
 export class AttendanceController {
   
@@ -77,14 +78,15 @@ export class AttendanceController {
   private static async aggregateAttendance(matchQuery: any, sort: any = { date: -1 }, pagination?: { page: number, limit: number }, postFilter: any = {}) {
     const aggregation: any[] = [
       { $match: matchQuery },
-      { 
-        $lookup: {
-          from: 'users',
-          localField: 'studentId',
-          foreignField: '_id',
-          as: 'user'
-        }
-      },
+      // Attendance is scoped by the plugin; the joined users are not, because
+      // $lookup bypasses that collection's middleware. Constrained under
+      // enforce, unchanged under warn.
+      tenantLookup({
+        from: 'users',
+        localField: 'studentId',
+        foreignField: '_id',
+        as: 'user',
+      }),
       { $unwind: '$user' },
       { 
         $project: {
@@ -150,14 +152,12 @@ export class AttendanceController {
         }
       },
       // Lookup user info
-      { 
-        $lookup: {
-          from: 'users',
-          localField: '_id',
-          foreignField: '_id',
-          as: 'user'
-        }
-      },
+      tenantLookup({
+        from: 'users',
+        localField: '_id',
+        foreignField: '_id',
+        as: 'user',
+      }),
       { $unwind: '$user' },
       // Project final shape
       { 

@@ -217,12 +217,25 @@ async function main() {
       `institute students found (${totalInstituteStudents}); raw role:'student' = ${totalStudentsRaw}, learners = ${learnerCount}`,
       totalInstituteStudents === totalStudentsRaw - learnerCount,
     );
+    // NOTE (2026-08-17): this assertion used to spread INSTITUTE_ACCOUNT_CLAUSE
+    // into the same object literal as `accountType: { $exists: false }`. Both
+    // set the key `accountType`, so the spread silently OVERWROTE the $exists
+    // clause and the query degraded to plain `$ne` — comparing 136 against 135
+    // and failing, while appearing to test something else entirely.
+    //
+    // It only ever passed while no account carried an explicit accountType. The
+    // moment one did (the schema default writes INSTITUTE_STUDENT on save) the
+    // check broke, for reasons unrelated to what it claims to verify.
+    //
+    // $and keeps both conditions. The property under test is the real one:
+    // in MongoDB `{ field: { $ne: X } }` matches documents where the field is
+    // MISSING, which is what lets legacy rows stay inside every institute
+    // audience with no backfill.
     assertTrue(
       'legacy accounts without accountType are still institute students',
       (await User.countDocuments({
         role: 'student',
-        accountType: { $exists: false },
-        ...INSTITUTE_ACCOUNT_CLAUSE,
+        $and: [{ accountType: { $exists: false } }, INSTITUTE_ACCOUNT_CLAUSE],
       })) === (await User.countDocuments({ role: 'student', accountType: { $exists: false } })),
     );
     if (totalInstituteStudents === 0) {

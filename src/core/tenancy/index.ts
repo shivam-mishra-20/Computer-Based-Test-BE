@@ -29,6 +29,16 @@ export { registerTenancy, verifyTenantPluginApplied } from './bootstrap';
 
 export { forEachOrg, type ForEachOrgSummary, type OrgRunResult } from './forEachOrg';
 
+export { tenantLookup, type TenantLookupSpec } from './tenantLookup';
+
 export { getUnscopedReport, resetUnscopedReport, tenancyStatus, type UnscopedEvent } from './plugin';
 
 export { TenantContextMissing, TenantMismatch } from './errors';
+
+export {
+  PUBLIC_ROUTE_ALLOWLIST,
+  DELIBERATELY_NOT_ALLOWLISTED,
+  findPublicRoute,
+  type PublicRouteEntry,
+  type BypassClassification,
+} from './publicRoutes';
