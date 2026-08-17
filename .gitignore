@@ -26,3 +26,13 @@ vision-key.json
 firebase-admin.json
 
 google-services.json
+
+# Database backups produced by scripts/safety/db-backup.ts.
+# These contain full production data — every user record, every attempt, every
+# doubt message. They must never enter git history, where they would be
+# effectively impossible to remove from every clone and fork.
+# The MANIFEST is also excluded: its per-collection fingerprints are harmless,
+# but keeping the whole directory out is one rule instead of two, and a rule
+# with an exception is a rule someone gets wrong at 2am.
+backups/
+*.ejson

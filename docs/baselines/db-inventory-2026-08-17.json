@@ -1,0 +1,3702 @@
+{
+  "capturedAt": "2026-08-17T05:41:29.269Z",
+  "uri": "mongodb+srv://<credentials>@abhigyangurukul.guvhko7.mongodb.net/abhigyangurukul",
+  "database": "abhigyangurukul",
+  "totals": {
+    "collections": 62,
+    "documents": 226963,
+    "dataSizeBytes": 70572182,
+    "storageSizeBytes": 19484672,
+    "indexSizeBytes": 29859840
+  },
+  "collections": [
+    {
+      "name": "aigenerations",
+      "documents": 15,
+      "storageBytes": 498054,
+      "avgObjSize": 33203,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "feature_1",
+          "keys": {
+            "feature": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdBy_1",
+          "keys": {
+            "createdBy": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdBy_1_createdAt_-1",
+          "keys": {
+            "createdBy": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "jobId_1",
+          "keys": {
+            "jobId": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "announcements",
+      "documents": 0,
+      "storageBytes": 0,
+      "avgObjSize": 0,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "targetClass_1",
+          "keys": {
+            "targetClass": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "targetBatch_1",
+          "keys": {
+            "targetBatch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isPublished_1",
+          "keys": {
+            "isPublished": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isPublished_1_createdAt_-1",
+          "keys": {
+            "isPublished": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "target_1_targetClass_1_targetBatch_1",
+          "keys": {
+            "target": 1,
+            "targetClass": 1,
+            "targetBatch": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "appsettings",
+      "documents": 3,
+      "storageBytes": 1513,
+      "avgObjSize": 504,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "key_1",
+          "keys": {
+            "key": 1
+          },
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "attempts",
+      "documents": 48,
+      "storageBytes": 439376,
+      "avgObjSize": 9153,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "examId_1",
+          "keys": {
+            "examId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "userId_1",
+          "keys": {
+            "userId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "mode_1",
+          "keys": {
+            "mode": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "practiceTestId_1",
+          "keys": {
+            "practiceTestId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "examId_1_userId_1",
+          "keys": {
+            "examId": 1,
+            "userId": 1
+          },
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "attendancerules",
+      "documents": 1,
+      "storageBytes": 428,
+      "avgObjSize": 428,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "userId_1",
+          "keys": {
+            "userId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "role_1",
+          "keys": {
+            "role": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "attendances",
+      "documents": 7643,
+      "storageBytes": 2979742,
+      "avgObjSize": 389,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "studentId_1",
+          "keys": {
+            "studentId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "date_1",
+          "keys": {
+            "date": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1",
+          "keys": {
+            "classLevel": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "batch_1",
+          "keys": {
+            "batch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "studentId_1_date_-1",
+          "keys": {
+            "studentId": 1,
+            "date": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "date_1_classLevel_1_batch_1",
+          "keys": {
+            "date": 1,
+            "classLevel": 1,
+            "batch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "idempotencyKey_1",
+          "keys": {
+            "idempotencyKey": 1
+          },
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "auditlogs",
+      "documents": 181199,
+      "storageBytes": 44184831,
+      "avgObjSize": 243,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "action_1",
+          "keys": {
+            "action": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "entity_1",
+          "keys": {
+            "entity": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdAt_1",
+          "keys": {
+            "createdAt": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "automationstatuses",
+      "documents": 1,
+      "storageBytes": 258,
+      "avgObjSize": 258,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "batches",
+      "documents": 12,
+      "storageBytes": 1906,
+      "avgObjSize": 158,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "name_1",
+          "keys": {
+            "name": 1
+          },
+          "unique": true
+        },
+        {
+          "name": "classLevels_1",
+          "keys": {
+            "classLevels": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "blueprints",
+      "documents": 0,
+      "storageBytes": 0,
+      "avgObjSize": 0,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "owner_1",
+          "keys": {
+            "owner": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "blueprinttemplates",
+      "documents": 0,
+      "storageBytes": 0,
+      "avgObjSize": 0,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "ownerId_1",
+          "keys": {
+            "ownerId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "ownerId_1_createdAt_-1",
+          "keys": {
+            "ownerId": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "bookmarks",
+      "documents": 0,
+      "storageBytes": 0,
+      "avgObjSize": 0,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "studentId_1",
+          "keys": {
+            "studentId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "courseId_1",
+          "keys": {
+            "courseId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "studentId_1_courseId_1_lectureId_1",
+          "keys": {
+            "studentId": 1,
+            "courseId": 1,
+            "lectureId": 1
+          },
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "class_10",
+      "documents": 616,
+      "storageBytes": 295974,
+      "avgObjSize": 480,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "board_1",
+          "keys": {
+            "board": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "chapter_1",
+          "keys": {
+            "chapter": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "topic_1",
+          "keys": {
+            "topic": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "difficulty_1",
+          "keys": {
+            "difficulty": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdBy_1",
+          "keys": {
+            "createdBy": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1_board_1_chapter_1_type_1",
+          "keys": {
+            "subject": 1,
+            "board": 1,
+            "chapter": 1,
+            "type": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "text_text",
+          "keys": {
+            "_fts": "text",
+            "_ftsx": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isPYQ_1",
+          "keys": {
+            "isPYQ": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "pyqYear_1",
+          "keys": {
+            "pyqYear": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "class_11",
+      "documents": 3483,
+      "storageBytes": 2736570,
+      "avgObjSize": 785,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "board_1",
+          "keys": {
+            "board": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "chapter_1",
+          "keys": {
+            "chapter": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "topic_1",
+          "keys": {
+            "topic": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "difficulty_1",
+          "keys": {
+            "difficulty": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdBy_1",
+          "keys": {
+            "createdBy": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1_board_1_chapter_1_type_1",
+          "keys": {
+            "subject": 1,
+            "board": 1,
+            "chapter": 1,
+            "type": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "text_text",
+          "keys": {
+            "_fts": "text",
+            "_ftsx": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isPYQ_1",
+          "keys": {
+            "isPYQ": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "pyqYear_1",
+          "keys": {
+            "pyqYear": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "class_12",
+      "documents": 1856,
+      "storageBytes": 1221592,
+      "avgObjSize": 658,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "board_1",
+          "keys": {
+            "board": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "chapter_1",
+          "keys": {
+            "chapter": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "topic_1",
+          "keys": {
+            "topic": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "difficulty_1",
+          "keys": {
+            "difficulty": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdBy_1",
+          "keys": {
+            "createdBy": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1_board_1_chapter_1_type_1",
+          "keys": {
+            "subject": 1,
+            "board": 1,
+            "chapter": 1,
+            "type": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "text_text",
+          "keys": {
+            "_fts": "text",
+            "_ftsx": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isPYQ_1",
+          "keys": {
+            "isPYQ": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "pyqYear_1",
+          "keys": {
+            "pyqYear": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "class_6",
+      "documents": 60,
+      "storageBytes": 33248,
+      "avgObjSize": 554,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "board_1",
+          "keys": {
+            "board": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "chapter_1",
+          "keys": {
+            "chapter": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "topic_1",
+          "keys": {
+            "topic": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "difficulty_1",
+          "keys": {
+            "difficulty": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdBy_1",
+          "keys": {
+            "createdBy": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1_board_1_chapter_1_type_1",
+          "keys": {
+            "subject": 1,
+            "board": 1,
+            "chapter": 1,
+            "type": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "text_text",
+          "keys": {
+            "_fts": "text",
+            "_ftsx": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isPYQ_1",
+          "keys": {
+            "isPYQ": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "pyqYear_1",
+          "keys": {
+            "pyqYear": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "class_7",
+      "documents": 77,
+      "storageBytes": 48847,
+      "avgObjSize": 634,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "board_1",
+          "keys": {
+            "board": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "chapter_1",
+          "keys": {
+            "chapter": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "topic_1",
+          "keys": {
+            "topic": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "difficulty_1",
+          "keys": {
+            "difficulty": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdBy_1",
+          "keys": {
+            "createdBy": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1_board_1_chapter_1_type_1",
+          "keys": {
+            "subject": 1,
+            "board": 1,
+            "chapter": 1,
+            "type": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "text_text",
+          "keys": {
+            "_fts": "text",
+            "_ftsx": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isPYQ_1",
+          "keys": {
+            "isPYQ": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "pyqYear_1",
+          "keys": {
+            "pyqYear": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "class_8",
+      "documents": 298,
+      "storageBytes": 146082,
+      "avgObjSize": 490,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "board_1",
+          "keys": {
+            "board": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "chapter_1",
+          "keys": {
+            "chapter": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "topic_1",
+          "keys": {
+            "topic": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "difficulty_1",
+          "keys": {
+            "difficulty": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdBy_1",
+          "keys": {
+            "createdBy": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1_board_1_chapter_1_type_1",
+          "keys": {
+            "subject": 1,
+            "board": 1,
+            "chapter": 1,
+            "type": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "text_text",
+          "keys": {
+            "_fts": "text",
+            "_ftsx": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isPYQ_1",
+          "keys": {
+            "isPYQ": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "pyqYear_1",
+          "keys": {
+            "pyqYear": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "class_9",
+      "documents": 856,
+      "storageBytes": 4796869,
+      "avgObjSize": 5603,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "board_1",
+          "keys": {
+            "board": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "chapter_1",
+          "keys": {
+            "chapter": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "topic_1",
+          "keys": {
+            "topic": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "difficulty_1",
+          "keys": {
+            "difficulty": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdBy_1",
+          "keys": {
+            "createdBy": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1_board_1_chapter_1_type_1",
+          "keys": {
+            "subject": 1,
+            "board": 1,
+            "chapter": 1,
+            "type": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "text_text",
+          "keys": {
+            "_fts": "text",
+            "_ftsx": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isPYQ_1",
+          "keys": {
+            "isPYQ": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "pyqYear_1",
+          "keys": {
+            "pyqYear": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "classrequests",
+      "documents": 0,
+      "storageBytes": 0,
+      "avgObjSize": 0,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classValue_1",
+          "keys": {
+            "classValue": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "source_1",
+          "keys": {
+            "source": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdAt_-1",
+          "keys": {
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1_createdAt_-1",
+          "keys": {
+            "status": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "courseprogresses",
+      "documents": 56,
+      "storageBytes": 17451,
+      "avgObjSize": 311,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "studentId_1",
+          "keys": {
+            "studentId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "courseId_1",
+          "keys": {
+            "courseId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "studentId_1_courseId_1",
+          "keys": {
+            "studentId": 1,
+            "courseId": 1
+          },
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "courses",
+      "documents": 19,
+      "storageBytes": 77704,
+      "avgObjSize": 4089,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1",
+          "keys": {
+            "classLevel": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "batch_1",
+          "keys": {
+            "batch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1_classLevel_1_subject_1",
+          "keys": {
+            "status": 1,
+            "classLevel": 1,
+            "subject": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "doubtfiles",
+      "documents": 0,
+      "storageBytes": 0,
+      "avgObjSize": 0,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "uploadedBy_1",
+          "keys": {
+            "uploadedBy": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "relatedDoubtId_1",
+          "keys": {
+            "relatedDoubtId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "relatedMessageId_1",
+          "keys": {
+            "relatedMessageId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "relatedDoubtId_1_createdAt_-1",
+          "keys": {
+            "relatedDoubtId": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "uploadedBy_1_createdAt_-1",
+          "keys": {
+            "uploadedBy": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "doubts",
+      "documents": 153,
+      "storageBytes": 228970,
+      "avgObjSize": 1496,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "student_1",
+          "keys": {
+            "student": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "teacher_1",
+          "keys": {
+            "teacher": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "batch_1",
+          "keys": {
+            "batch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1",
+          "keys": {
+            "classLevel": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1_teacher_1_createdAt_-1",
+          "keys": {
+            "status": 1,
+            "teacher": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "batch_1_subject_1_status_1",
+          "keys": {
+            "batch": 1,
+            "subject": 1,
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "student_1_createdAt_-1",
+          "keys": {
+            "student": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "lastActivity_1",
+          "keys": {
+            "lastActivity": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "eods",
+      "documents": 390,
+      "storageBytes": 355614,
+      "avgObjSize": 911,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "teacherId_1",
+          "keys": {
+            "teacherId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "date_1",
+          "keys": {
+            "date": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "teacherId_1_date_1",
+          "keys": {
+            "teacherId": 1,
+            "date": 1
+          },
+          "unique": true
+        },
+        {
+          "name": "date_1_status_1",
+          "keys": {
+            "date": 1,
+            "status": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "examevaluations",
+      "documents": 11,
+      "storageBytes": 13121,
+      "avgObjSize": 1192,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "examId_1",
+          "keys": {
+            "examId": 1
+          },
+          "unique": true
+        },
+        {
+          "name": "reviewState_1",
+          "keys": {
+            "reviewState": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "exams",
+      "documents": 8,
+      "storageBytes": 10311,
+      "avgObjSize": 1288,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdBy_1",
+          "keys": {
+            "createdBy": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "mode_1",
+          "keys": {
+            "mode": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1",
+          "keys": {
+            "classLevel": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "batch_1",
+          "keys": {
+            "batch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isPublished_1",
+          "keys": {
+            "isPublished": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "filemetadatas",
+      "documents": 114,
+      "storageBytes": 55433,
+      "avgObjSize": 486,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "storagePath_1",
+          "keys": {
+            "storagePath": 1
+          },
+          "unique": true
+        },
+        {
+          "name": "uploadedBy_1",
+          "keys": {
+            "uploadedBy": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "relatedDoubtId_1",
+          "keys": {
+            "relatedDoubtId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "relatedMessageId_1",
+          "keys": {
+            "relatedMessageId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "relatedDoubtId_1_createdAt_-1",
+          "keys": {
+            "relatedDoubtId": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "uploadedBy_1_createdAt_-1",
+          "keys": {
+            "uploadedBy": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "guidances",
+      "documents": 0,
+      "storageBytes": 0,
+      "avgObjSize": 0,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "topic_1",
+          "keys": {
+            "topic": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "owner_1",
+          "keys": {
+            "owner": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isActive_1",
+          "keys": {
+            "isActive": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1_topic_1_isActive_1",
+          "keys": {
+            "subject": 1,
+            "topic": 1,
+            "isActive": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "holidays",
+      "documents": 11,
+      "storageBytes": 1803,
+      "avgObjSize": 163,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "date_1",
+          "keys": {
+            "date": 1
+          },
+          "unique": true
+        },
+        {
+          "name": "date_1_type_1",
+          "keys": {
+            "date": 1,
+            "type": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "homeworks",
+      "documents": 104,
+      "storageBytes": 59144,
+      "avgObjSize": 568,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1",
+          "keys": {
+            "classLevel": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdBy_1_status_1",
+          "keys": {
+            "createdBy": 1,
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "assignmentType_1_assignedClasses_1_status_1",
+          "keys": {
+            "assignmentType": 1,
+            "assignedClasses": 1,
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "assignmentType_1_assignedBatches_1_status_1",
+          "keys": {
+            "assignmentType": 1,
+            "assignedBatches": 1,
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "assignmentType_1_assignedStudents_1_status_1",
+          "keys": {
+            "assignmentType": 1,
+            "assignedStudents": 1,
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "dueDate_1_status_1",
+          "keys": {
+            "dueDate": 1,
+            "status": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "importbatches",
+      "documents": 645,
+      "storageBytes": 356935,
+      "avgObjSize": 553,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "uploadedBy_1_createdAt_-1",
+          "keys": {
+            "uploadedBy": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1_createdAt_-1",
+          "keys": {
+            "status": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "importedquestions",
+      "documents": 2731,
+      "storageBytes": 2618219,
+      "avgObjSize": 958,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "topic_1",
+          "keys": {
+            "topic": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "importBatch_1",
+          "keys": {
+            "importBatch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "needsReview_1",
+          "keys": {
+            "needsReview": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "class_1",
+          "keys": {
+            "class": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "board_1",
+          "keys": {
+            "board": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "chapter_1",
+          "keys": {
+            "chapter": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "importBatch_1_status_1",
+          "keys": {
+            "importBatch": 1,
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "extractedBy_1_createdAt_-1",
+          "keys": {
+            "extractedBy": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "needsReview_1_status_1",
+          "keys": {
+            "needsReview": 1,
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1_topic_1_difficulty_1",
+          "keys": {
+            "subject": 1,
+            "topic": 1,
+            "difficulty": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "semanticHash_1",
+          "keys": {
+            "semanticHash": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "imports",
+      "documents": 278,
+      "storageBytes": 94263,
+      "avgObjSize": 339,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "topic_1",
+          "keys": {
+            "topic": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "uploadedBy_1",
+          "keys": {
+            "uploadedBy": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "uploadedBy_1_subject_1_topic_1",
+          "keys": {
+            "uploadedBy": 1,
+            "subject": 1,
+            "topic": 1
+          },
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "learnerprogresses",
+      "documents": 1,
+      "storageBytes": 203,
+      "avgObjSize": 203,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "learnerId_1",
+          "keys": {
+            "learnerId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "learnerId_1_resourceId_1",
+          "keys": {
+            "learnerId": 1,
+            "resourceId": 1
+          },
+          "unique": true
+        },
+        {
+          "name": "learnerId_1_completed_1_lastAccessedAt_-1",
+          "keys": {
+            "learnerId": 1,
+            "completed": 1,
+            "lastAccessedAt": -1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "learnersaves",
+      "documents": 1,
+      "storageBytes": 139,
+      "avgObjSize": 139,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "learnerId_1",
+          "keys": {
+            "learnerId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "learnerId_1_itemType_1_resourceId_1",
+          "keys": {
+            "learnerId": 1,
+            "itemType": 1,
+            "resourceId": 1
+          },
+          "unique": true
+        },
+        {
+          "name": "learnerId_1_createdAt_-1",
+          "keys": {
+            "learnerId": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "leaves",
+      "documents": 61,
+      "storageBytes": 20370,
+      "avgObjSize": 333,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "teacherId_1",
+          "keys": {
+            "teacherId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "startDate_1",
+          "keys": {
+            "startDate": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "endDate_1",
+          "keys": {
+            "endDate": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "teacherId_1_status_1",
+          "keys": {
+            "teacherId": 1,
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "startDate_1_endDate_1",
+          "keys": {
+            "startDate": 1,
+            "endDate": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1_createdAt_-1",
+          "keys": {
+            "status": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "lectures",
+      "documents": 0,
+      "storageBytes": 0,
+      "avgObjSize": 0,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1",
+          "keys": {
+            "classLevel": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "chapter_1",
+          "keys": {
+            "chapter": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "instructor_1",
+          "keys": {
+            "instructor": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "instructor_1_status_1_classLevel_1",
+          "keys": {
+            "instructor": 1,
+            "status": 1,
+            "classLevel": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1_chapter_1_order_1",
+          "keys": {
+            "subject": 1,
+            "chapter": 1,
+            "order": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1_subject_1_status_1",
+          "keys": {
+            "classLevel": 1,
+            "subject": 1,
+            "status": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "materialcomments",
+      "documents": 15,
+      "storageBytes": 3209,
+      "avgObjSize": 213,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "targetType_1_targetId_1_createdAt_-1",
+          "keys": {
+            "targetType": 1,
+            "targetId": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "author_1_createdAt_-1",
+          "keys": {
+            "author": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "parentComment_1",
+          "keys": {
+            "parentComment": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "materials",
+      "documents": 130,
+      "storageBytes": 127694,
+      "avgObjSize": 982,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1",
+          "keys": {
+            "classLevel": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "batch_1",
+          "keys": {
+            "batch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isPublished_1",
+          "keys": {
+            "isPublished": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isPublished_1_classLevel_1_subject_1",
+          "keys": {
+            "isPublished": 1,
+            "classLevel": 1,
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "assignmentType_1_assignedClasses_1",
+          "keys": {
+            "assignmentType": 1,
+            "assignedClasses": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "assignmentType_1_assignedBatches_1",
+          "keys": {
+            "assignmentType": 1,
+            "assignedBatches": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "assignmentType_1_assignedStudents_1",
+          "keys": {
+            "assignmentType": 1,
+            "assignedStudents": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "notifications",
+      "documents": 22940,
+      "storageBytes": 6780064,
+      "avgObjSize": 295,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "userId_1",
+          "keys": {
+            "userId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "type_1",
+          "keys": {
+            "type": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "read_1",
+          "keys": {
+            "read": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "userId_1_read_1_createdAt_-1",
+          "keys": {
+            "userId": 1,
+            "read": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "offlineresults",
+      "documents": 7,
+      "storageBytes": 1340,
+      "avgObjSize": 191,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "class_1",
+          "keys": {
+            "class": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "name_1",
+          "keys": {
+            "name": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "batch_1",
+          "keys": {
+            "batch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "testDate_1",
+          "keys": {
+            "testDate": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdAt_1",
+          "keys": {
+            "createdAt": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "name_1_class_1",
+          "keys": {
+            "name": 1,
+            "class": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "class_1_batch_1",
+          "keys": {
+            "class": 1,
+            "batch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "testDate_-1",
+          "keys": {
+            "testDate": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdAt_-1",
+          "keys": {
+            "createdAt": -1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "paper",
+      "documents": 1,
+      "storageBytes": 14000,
+      "avgObjSize": 14000,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "owner_1",
+          "keys": {
+            "owner": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "owner_1_createdAt_-1",
+          "keys": {
+            "owner": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "playlistimports",
+      "documents": 13,
+      "storageBytes": 20251,
+      "avgObjSize": 1557,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "courseId_1",
+          "keys": {
+            "courseId": 1
+          },
+          "unique": true
+        },
+        {
+          "name": "playlistId_1",
+          "keys": {
+            "playlistId": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "practicetests",
+      "documents": 19,
+      "storageBytes": 14214,
+      "avgObjSize": 748,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "userId_1",
+          "keys": {
+            "userId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "userId_1_status_1_createdAt_-1",
+          "keys": {
+            "userId": 1,
+            "status": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "userId_1_createdAt_-1",
+          "keys": {
+            "userId": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1",
+          "keys": {
+            "classLevel": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "processingstats",
+      "documents": 62,
+      "storageBytes": 31720,
+      "avgObjSize": 511,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "publicattempts",
+      "documents": 3,
+      "storageBytes": 45621,
+      "avgObjSize": 15207,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "learnerId_1",
+          "keys": {
+            "learnerId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "testId_1",
+          "keys": {
+            "testId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "learnerId_1_createdAt_-1",
+          "keys": {
+            "learnerId": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "learnerId_1_testId_1_status_1",
+          "keys": {
+            "learnerId": 1,
+            "testId": 1,
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "learnerId_1_status_1_submittedAt_-1",
+          "keys": {
+            "learnerId": 1,
+            "status": 1,
+            "submittedAt": -1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "publictests",
+      "documents": 1,
+      "storageBytes": 1712,
+      "avgObjSize": 1712,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "kind_1",
+          "keys": {
+            "kind": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1",
+          "keys": {
+            "classLevel": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "exam_1",
+          "keys": {
+            "exam": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "difficulty_1",
+          "keys": {
+            "difficulty": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "seriesId_1",
+          "keys": {
+            "seriesId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdBy_1",
+          "keys": {
+            "createdBy": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1_kind_1_classLevel_1_subject_1",
+          "keys": {
+            "status": 1,
+            "kind": 1,
+            "classLevel": 1,
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1_exam_1_difficulty_1",
+          "keys": {
+            "status": 1,
+            "exam": 1,
+            "difficulty": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1_createdAt_-1",
+          "keys": {
+            "status": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "seriesId_1_orderInSeries_1",
+          "keys": {
+            "seriesId": 1,
+            "orderInSeries": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "title_text_description_text",
+          "keys": {
+            "_fts": "text",
+            "_ftsx": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "publictestseries",
+      "documents": 0,
+      "storageBytes": 0,
+      "avgObjSize": 0,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1",
+          "keys": {
+            "classLevel": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "exam_1",
+          "keys": {
+            "exam": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdBy_1",
+          "keys": {
+            "createdBy": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1_classLevel_1_subject_1",
+          "keys": {
+            "status": 1,
+            "classLevel": 1,
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1_createdAt_-1",
+          "keys": {
+            "status": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "title_text_description_text",
+          "keys": {
+            "_fts": "text",
+            "_ftsx": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "questions",
+      "documents": 0,
+      "storageBytes": 0,
+      "avgObjSize": 0,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "tags.subject_1",
+          "keys": {
+            "tags.subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "tags.topic_1",
+          "keys": {
+            "tags.topic": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "tags.difficulty_1",
+          "keys": {
+            "tags.difficulty": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdBy_1",
+          "keys": {
+            "createdBy": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "metadata.class_1",
+          "keys": {
+            "metadata.class": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "metadata.board_1",
+          "keys": {
+            "metadata.board": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "metadata.chapter_1",
+          "keys": {
+            "metadata.chapter": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "tags.subject_1_tags.topic_1_tags.difficulty_1_createdAt_-1",
+          "keys": {
+            "tags.subject": 1,
+            "tags.topic": 1,
+            "tags.difficulty": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "metadata.class_1_tags.subject_1_metadata.board_1",
+          "keys": {
+            "metadata.class": 1,
+            "tags.subject": 1,
+            "metadata.board": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "metadata.chapter_1_tags.subject_1",
+          "keys": {
+            "metadata.chapter": 1,
+            "tags.subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "text_text",
+          "keys": {
+            "_fts": "text",
+            "_ftsx": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "ragchunks",
+      "documents": 1,
+      "storageBytes": 31282,
+      "avgObjSize": 31282,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "scopeId_1",
+          "keys": {
+            "scopeId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "expiresAt_1",
+          "keys": {
+            "expiresAt": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "scopeId_1_chunkId_1",
+          "keys": {
+            "scopeId": 1,
+            "chunkId": 1
+          },
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "reviewauditlogs",
+      "documents": 47,
+      "storageBytes": 12493,
+      "avgObjSize": 265,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "examId_1",
+          "keys": {
+            "examId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "attemptId_1",
+          "keys": {
+            "attemptId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "actorId_1",
+          "keys": {
+            "actorId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "action_1",
+          "keys": {
+            "action": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "examId_1_createdAt_-1",
+          "keys": {
+            "examId": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "roomallocations",
+      "documents": 2,
+      "storageBytes": 11128,
+      "avgObjSize": 5564,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "testId_1",
+          "keys": {
+            "testId": 1
+          },
+          "unique": true
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "testId_1_assignments.studentId_1",
+          "keys": {
+            "testId": 1,
+            "assignments.studentId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "date_1",
+          "keys": {
+            "date": 1
+          },
+          "unique": true
+        },
+        {
+          "name": "date_1_assignments.studentId_1",
+          "keys": {
+            "date": 1,
+            "assignments.studentId": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "schedules",
+      "documents": 2116,
+      "storageBytes": 899026,
+      "avgObjSize": 424,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "startTime_1",
+          "keys": {
+            "startTime": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1",
+          "keys": {
+            "classLevel": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "batch_1",
+          "keys": {
+            "batch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "startTime_1_endTime_1",
+          "keys": {
+            "startTime": 1,
+            "endTime": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1_batch_1_startTime_1",
+          "keys": {
+            "classLevel": 1,
+            "batch": 1,
+            "startTime": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "scheduleType_1",
+          "keys": {
+            "scheduleType": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "dayOfWeek_1",
+          "keys": {
+            "dayOfWeek": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "date_1",
+          "keys": {
+            "date": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1_batch_1_dayOfWeek_1",
+          "keys": {
+            "classLevel": 1,
+            "batch": 1,
+            "dayOfWeek": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "teacherId_1_dayOfWeek_1",
+          "keys": {
+            "teacherId": 1,
+            "dayOfWeek": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "roomNumber_1_dayOfWeek_1_startTimeSlot_1",
+          "keys": {
+            "roomNumber": 1,
+            "dayOfWeek": 1,
+            "startTimeSlot": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "date_1_classLevel_1_batch_1",
+          "keys": {
+            "date": 1,
+            "classLevel": 1,
+            "batch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "batches_1",
+          "keys": {
+            "batches": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1_batches_1_dayOfWeek_1",
+          "keys": {
+            "classLevel": 1,
+            "batches": 1,
+            "dayOfWeek": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "date_1_classLevel_1_batches_1",
+          "keys": {
+            "date": 1,
+            "classLevel": 1,
+            "batches": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "scholarshipattempts",
+      "documents": 41,
+      "storageBytes": 388669,
+      "avgObjSize": 9479,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "attemptId_1",
+          "keys": {
+            "attemptId": 1
+          },
+          "unique": true
+        },
+        {
+          "name": "scholarshipTestId_1",
+          "keys": {
+            "scholarshipTestId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "scholarshipShareLink_1",
+          "keys": {
+            "scholarshipShareLink": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "phoneNormalized_1",
+          "keys": {
+            "phoneNormalized": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "attemptAccessKey_1",
+          "keys": {
+            "attemptAccessKey": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "batch_1",
+          "keys": {
+            "batch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "resultPublicToken_1",
+          "keys": {
+            "resultPublicToken": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "scholarshiptests",
+      "documents": 6,
+      "storageBytes": 2127,
+      "avgObjSize": 354,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "shareLink_1",
+          "keys": {
+            "shareLink": 1
+          },
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "studentprogresses",
+      "documents": 428,
+      "storageBytes": 75500,
+      "avgObjSize": 176,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "student_1",
+          "keys": {
+            "student": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "student_1_targetType_1_targetId_1",
+          "keys": {
+            "student": 1,
+            "targetType": 1,
+            "targetId": 1
+          },
+          "unique": true
+        },
+        {
+          "name": "targetType_1_targetId_1_status_1",
+          "keys": {
+            "targetType": 1,
+            "targetId": 1,
+            "status": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "studyresources",
+      "documents": 54,
+      "storageBytes": 102269,
+      "avgObjSize": 1893,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "type_1",
+          "keys": {
+            "type": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "category_1",
+          "keys": {
+            "category": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1",
+          "keys": {
+            "classLevel": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "batch_1",
+          "keys": {
+            "batch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "type_1_status_1_classLevel_1_subject_1",
+          "keys": {
+            "type": 1,
+            "status": 1,
+            "classLevel": 1,
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isPublic_1_isFeatured_1",
+          "keys": {
+            "isPublic": 1,
+            "isFeatured": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "tags_1",
+          "keys": {
+            "tags": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "contentCategory_1",
+          "keys": {
+            "contentCategory": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isPublic_1_status_1_contentCategory_1",
+          "keys": {
+            "isPublic": 1,
+            "status": 1,
+            "contentCategory": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isPublic_1_status_1_classLevel_1_subject_1_chapter_1",
+          "keys": {
+            "isPublic": 1,
+            "status": 1,
+            "classLevel": 1,
+            "subject": 1,
+            "chapter": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "board_1",
+          "keys": {
+            "board": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "syllabuses",
+      "documents": 15,
+      "storageBytes": 21206,
+      "avgObjSize": 1413,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "teacherId_1",
+          "keys": {
+            "teacherId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1",
+          "keys": {
+            "classLevel": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "batch_1",
+          "keys": {
+            "batch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "academicYear_1",
+          "keys": {
+            "academicYear": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "isActive_1",
+          "keys": {
+            "isActive": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1_subject_1_academicYear_1",
+          "keys": {
+            "classLevel": 1,
+            "subject": 1,
+            "academicYear": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "teacherId_1_isActive_1",
+          "keys": {
+            "teacherId": 1,
+            "isActive": 1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "teachingknowledgegraphs",
+      "documents": 14,
+      "storageBytes": 264826,
+      "avgObjSize": 18916,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "ownerId_1",
+          "keys": {
+            "ownerId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "expiresAt_1",
+          "keys": {
+            "expiresAt": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "contentHash_1_ownerId_1",
+          "keys": {
+            "contentHash": 1,
+            "ownerId": 1
+          },
+          "unique": true
+        }
+      ]
+    },
+    {
+      "name": "testresults",
+      "documents": 139,
+      "storageBytes": 284524,
+      "avgObjSize": 2046,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "testName_1",
+          "keys": {
+            "testName": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "testDate_1",
+          "keys": {
+            "testDate": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "class_1",
+          "keys": {
+            "class": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "batch_1",
+          "keys": {
+            "batch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "subject_1",
+          "keys": {
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "studentResults.studentId_1",
+          "keys": {
+            "studentResults.studentId": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdBy_1",
+          "keys": {
+            "createdBy": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "class_1_batch_1_testDate_-1",
+          "keys": {
+            "class": 1,
+            "batch": 1,
+            "testDate": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "class_1_subject_1",
+          "keys": {
+            "class": 1,
+            "subject": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "createdBy_1_createdAt_-1",
+          "keys": {
+            "createdBy": 1,
+            "createdAt": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "assignmentType_1",
+          "keys": {
+            "assignmentType": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "assignmentType_1_assignedClasses_1_testDate_-1",
+          "keys": {
+            "assignmentType": 1,
+            "assignedClasses": 1,
+            "testDate": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "assignmentType_1_assignedBatches_1_testDate_-1",
+          "keys": {
+            "assignmentType": 1,
+            "assignedBatches": 1,
+            "testDate": -1
+          },
+          "unique": false
+        },
+        {
+          "name": "assignmentType_1_assignedStudents_1_testDate_-1",
+          "keys": {
+            "assignmentType": 1,
+            "assignedStudents": 1,
+            "testDate": -1
+          },
+          "unique": false
+        }
+      ]
+    },
+    {
+      "name": "users",
+      "documents": 158,
+      "storageBytes": 144337,
+      "avgObjSize": 913,
+      "indexes": [
+        {
+          "name": "_id_",
+          "keys": {
+            "_id": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "email_1",
+          "keys": {
+            "email": 1
+          },
+          "unique": true
+        },
+        {
+          "name": "role_1",
+          "keys": {
+            "role": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "status_1",
+          "keys": {
+            "status": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "board_1",
+          "keys": {
+            "board": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "firebaseUid_1",
+          "keys": {
+            "firebaseUid": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "classLevel_1",
+          "keys": {
+            "classLevel": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "batch_1",
+          "keys": {
+            "batch": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "empCode_1",
+          "keys": {
+            "empCode": 1
+          },
+          "unique": true
+        },
+        {
+          "name": "registrationSource_1",
+          "keys": {
+            "registrationSource": 1
+          },
+          "unique": false
+        },
+        {
+          "name": "accountType_1",
+          "keys": {
+            "accountType": 1
+          },
+          "unique": false
+        }
+      ]
+    }
+  ]
+}

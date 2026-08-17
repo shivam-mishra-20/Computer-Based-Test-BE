@@ -8,10 +8,49 @@ config();
 const FIREBASE_STORAGE_BUCKET = process.env.FIREBASE_STORAGE_BUCKET || 'your-project.appspot.com';
 
 /**
+ * ⚠️ QUARANTINED — P0 production safety, 2026-08-17
+ *
+ * Rewrites stored URLs in FileMetadata and Doubt from signed, expiring URLs to
+ * permanent public ones. Together with make-storage-public.ts this is how the
+ * current world-readable file state came to exist.
+ *
+ * P1 reverses this direction: files move behind `orgs/{orgId}/…` with signed,
+ * short-lived access. Re-running this script would rewrite those URLs back to
+ * permanent public form across every tenant at once — a cross-tenant exposure
+ * with no error raised.
+ *
+ * Retained, not deleted: it records the shape of the historical URLs, which the
+ * P1 backward-compatibility path has to keep resolving for existing files.
+ *
+ * See docs/production-safety.md § Known hazards.
+ */
+function assertHazardAcknowledged(): void {
+  if (process.env.I_UNDERSTAND_THIS_MAKES_FILES_PUBLIC !== 'yes') {
+    console.error(
+      [
+        '',
+        '  ⚠️  REFUSED — this script rewrites stored URLs to permanent public URLs.',
+        '',
+        '  Running it re-opens the cross-tenant file exposure that the platform',
+        '  migration is closing. It is retained for historical reference only.',
+        '',
+        '  If you genuinely intend this, set:',
+        '    I_UNDERSTAND_THIS_MAKES_FILES_PUBLIC=yes',
+        '',
+        '  See docs/production-safety.md § Known hazards.',
+        '',
+      ].join('\n'),
+    );
+    process.exit(1);
+  }
+}
+
+/**
  * Migration script to convert all signed URLs to permanent public URLs
  * Run once to fix existing data
  */
 async function migrateUrlsToPublic() {
+  assertHazardAcknowledged();
   try {
     console.log('🔄 Starting URL migration to public URLs...');
     
