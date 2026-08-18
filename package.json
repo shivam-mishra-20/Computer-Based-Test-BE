@@ -50,7 +50,8 @@
     "safety:console-ui": "ts-node --transpile-only scripts/safety/console-ui.e2e.test.ts",
     "safety:web": "ts-node --transpile-only scripts/safety/client-platform-web.e2e.test.ts",
     "p6:seed": "node -r ./scripts/safety/dns-preload.js -r ts-node/register/transpile-only scripts/safety/seed-p6-fixture.ts",
-    "p6:serve": "node scripts/safety/p6-fixture-server.js"
+    "p6:serve": "node scripts/safety/p6-fixture-server.js",
+    "safety:appsetting": "node -r ./scripts/safety/dns-preload.js -r ts-node/register/transpile-only scripts/safety/appsetting-tenancy.test.ts"
   },
   "keywords": [],
   "author": "",

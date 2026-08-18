@@ -32,7 +32,7 @@ batchSchema.index({ classLevels: 1 });
  * and duplicates created in that window cannot be un-created.
  *
  * The old global index must still be dropped for multi-tenancy to work; that is
- * a deliberate migration step (scripts/safety/drop-legacy-batch-index.ts), not
+ * a deliberate migration step (scripts/safety/drop-legacy-global-indexes.ts), not
  * a side effect of deploying this file.
  */
 batchSchema.index({ orgId: 1, name: 1 }, { unique: true });

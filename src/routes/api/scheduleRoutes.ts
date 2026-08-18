@@ -25,6 +25,12 @@ import {
   validateSessionSet,
 } from '../../services/schedule/scheduleValidator';
 import { tenantScope } from '../../core/tenancy';
+import {
+  SLOT_KEYS,
+  invalidateSlotCache,
+  timeSlotsForOrg,
+  type TimeSlot,
+} from '../../core/config/timeSlots';
 import { getOrgConfiguration } from '../../core/config/orgConfig';
 import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
 
@@ -44,72 +50,6 @@ function getFirebaseAdmin() {
 
 const router = Router();
 
-let MORNING_TIME_SLOTS = [
-  { start: '10:30', end: '11:30', label: '10:30 AM - 11:30 AM' },
-  { start: '11:30', end: '12:30', label: '11:30 AM - 12:30 PM' },
-  { start: '12:30', end: '13:30', label: '12:30 PM - 1:30 PM' },
-  { start: '13:30', end: '14:30', label: '1:30 PM - 2:30 PM' },
-  { start: '14:30', end: '15:30', label: '2:30 PM - 3:30 PM' },
-];
-
-let MORNING2_TIME_SLOTS = [
-  { start: '09:00', end: '10:00', label: '9:00 AM - 10:00 AM' },
-  { start: '10:00', end: '11:00', label: '10:00 AM - 11:00 AM' },
-  { start: '11:00', end: '12:00', label: '11:00 AM - 12:00 PM' },
-  { start: '12:00', end: '13:00', label: '12:00 PM - 1:00 PM' },
-];
-
-let EVENING_TIME_SLOTS = [
-  { start: '15:30', end: '16:30', label: '3:30 PM - 4:30 PM' },
-  { start: '16:30', end: '17:30', label: '4:30 PM - 5:30 PM' },
-  { start: '17:30', end: '18:30', label: '5:30 PM - 6:30 PM' },
-  { start: '18:30', end: '19:30', label: '6:30 PM - 7:30 PM' },
-  { start: '19:30', end: '20:30', label: '7:30 PM - 8:30 PM' },
-  { start: '20:30', end: '21:30', label: '8:30 PM - 9:30 PM' },
-  { start: '21:30', end: '22:30', label: '9:30 PM - 10:30 PM' },
-];
-
-// All regular slots are used for live schedule, timetable grid defaults, and labels.
-function buildCombinedTimeSlots() {
-  return [...MORNING2_TIME_SLOTS, ...MORNING_TIME_SLOTS, ...EVENING_TIME_SLOTS]
-    .filter((slot) => slot?.start && slot?.end)
-    .sort((a, b) => parseTimeToMinutes(a.start) - parseTimeToMinutes(b.start));
-}
-
-let TIME_SLOTS = buildCombinedTimeSlots();
-
-// Load time slots from DB
-async function loadTimeSlots() {
-  try {
-    const morningSetting = await AppSetting.findOne({ key: 'MORNING_TIME_SLOTS' });
-    if (morningSetting && morningSetting.value && Array.isArray(morningSetting.value)) {
-      MORNING_TIME_SLOTS = morningSetting.value;
-    } else if (!morningSetting) {
-      await AppSetting.create({ key: 'MORNING_TIME_SLOTS', value: MORNING_TIME_SLOTS });
-    }
-
-    const morning2Setting = await AppSetting.findOne({ key: 'MORNING2_TIME_SLOTS' });
-    if (morning2Setting && morning2Setting.value && Array.isArray(morning2Setting.value)) {
-      MORNING2_TIME_SLOTS = morning2Setting.value;
-    } else if (!morning2Setting) {
-      await AppSetting.create({ key: 'MORNING2_TIME_SLOTS', value: MORNING2_TIME_SLOTS });
-    }
-
-    const eveningSetting = await AppSetting.findOne({ key: 'EVENING_TIME_SLOTS' });
-    if (eveningSetting && eveningSetting.value && Array.isArray(eveningSetting.value)) {
-      EVENING_TIME_SLOTS = eveningSetting.value;
-    } else if (!eveningSetting) {
-      await AppSetting.create({ key: 'EVENING_TIME_SLOTS', value: EVENING_TIME_SLOTS });
-    }
-
-    TIME_SLOTS = buildCombinedTimeSlots();
-  } catch (error) {
-    console.error('Failed to load time slots from DB:', error);
-  }
-}
-
-// Call on startup
-loadTimeSlots();
 
 const DAYS_OF_WEEK = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
@@ -131,29 +71,30 @@ function parseTimeToMinutes(time: string): number {
   return hours * 60 + minutes;
 }
 
-function getCurrentTimeSlot(): { currentSlot: string | null; nextSlot: string | null } {
+/** Takes the organization's slot table rather than reading a module global. */
+function getCurrentTimeSlot(slots: TimeSlot[]): { currentSlot: string | null; nextSlot: string | null } {
   const now = new Date();
   const currentMinutes = now.getHours() * 60 + now.getMinutes();
-  
+
   let currentSlot = null;
   let nextSlot = null;
-  
-  for (let i = 0; i < TIME_SLOTS.length; i++) {
-    const slotStart = parseTimeToMinutes(TIME_SLOTS[i].start);
-    const slotEnd = parseTimeToMinutes(TIME_SLOTS[i].end);
-    
+
+  for (let i = 0; i < slots.length; i++) {
+    const slotStart = parseTimeToMinutes(slots[i].start);
+    const slotEnd = parseTimeToMinutes(slots[i].end);
+
     if (currentMinutes >= slotStart && currentMinutes < slotEnd) {
-      currentSlot = TIME_SLOTS[i].start;
-      if (i + 1 < TIME_SLOTS.length) {
-        nextSlot = TIME_SLOTS[i + 1].start;
+      currentSlot = slots[i].start;
+      if (i + 1 < slots.length) {
+        nextSlot = slots[i + 1].start;
       }
       break;
     } else if (currentMinutes < slotStart) {
-      nextSlot = TIME_SLOTS[i].start;
+      nextSlot = slots[i].start;
       break;
     }
   }
-  
+
   return { currentSlot, nextSlot };
 }
 
@@ -381,10 +322,10 @@ type ScheduleConflictResult =
   | { ok: true }
   | { ok: false; status: number; body: { error: string; leaveDetails?: any } };
 
-/** Slot end time, from the row itself or the configured slot table. */
-function resolveEndTimeSlot(startTimeSlot: string, explicitEnd?: string): string {
+/** Slot end time, from the row itself or the organization's slot table. */
+function resolveEndTimeSlot(slots: TimeSlot[], startTimeSlot: string, explicitEnd?: string): string {
   if (isValidTimeString(explicitEnd)) return explicitEnd;
-  const slot = TIME_SLOTS.find((s) => s.start === startTimeSlot);
+  const slot = slots.find((s) => s.start === startTimeSlot);
   if (slot?.end) return slot.end;
   // Unknown slot — assume the institute's standard one-hour block rather than
   // silently treating the row as zero-length (which would never overlap).
@@ -392,14 +333,14 @@ function resolveEndTimeSlot(startTimeSlot: string, explicitEnd?: string): string
   return `${String(Math.floor(mins / 60) % 24).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
 }
 
-function docToSession(doc: any): ScheduleSession {
+function docToSession(slots: TimeSlot[], doc: any): ScheduleSession {
   return {
     id: String(doc._id || ''),
     classLevel: String(doc.classLevel ?? ''),
     batch: doc.batch || '',
     batches: Array.isArray(doc.batches) ? doc.batches : undefined,
     startTimeSlot: doc.startTimeSlot,
-    endTimeSlot: resolveEndTimeSlot(doc.startTimeSlot, doc.endTimeSlot),
+    endTimeSlot: resolveEndTimeSlot(slots, doc.startTimeSlot, doc.endTimeSlot),
     roomNumber: doc.roomNumber ?? null,
     teacherId: doc.teacherId ? String(doc.teacherId) : undefined,
     teacherName: doc.teacherName || undefined,
@@ -443,18 +384,22 @@ async function checkScheduleConflict(
   // apply proper overlap detection — the same rule the bulk importer uses.
   const existingDocs = await Schedule.find(conflictQuery).select(CONFLICT_CANDIDATE_FIELDS).lean();
 
+  // Resolved once per call, for this organization, and threaded through
+  // everything below — the slot table is no longer a module global.
+  const { combined: slots } = await timeSlotsForOrg();
+
   const candidate: ScheduleSession = {
     classLevel: String(input.classLevel ?? ''),
     batch: input.batch,
     batches: input.batches,
     startTimeSlot: input.startTimeSlot,
-    endTimeSlot: resolveEndTimeSlot(input.startTimeSlot, input.endTimeSlot),
+    endTimeSlot: resolveEndTimeSlot(slots, input.startTimeSlot, input.endTimeSlot),
     roomNumber: Number.isFinite(Number(input.roomNumber)) ? Number(input.roomNumber) : null,
     teacherId: input.teacherId ? String(input.teacherId) : undefined,
     teacherName: input.teacherName,
   };
 
-  const blocking = findSessionConflicts(candidate, existingDocs.map(docToSession), policy)
+  const blocking = findSessionConflicts(candidate, existingDocs.map((doc) => docToSession(slots, doc)), policy)
     .find((i) => i.severity === 'error');
   if (blocking) {
     return { ok: false, status: 400, body: { error: blocking.message } };
@@ -857,18 +802,14 @@ router.get('/rooms', authMiddleware, async (_req: Request, res: Response) => {
   }
 });
 
-// Get time slots
+// Get time slots — this organization's, or the platform defaults.
 router.get('/timeslots', authMiddleware, async (req: Request, res: Response) => {
-  await loadTimeSlots(); // ensure latest
+  const slots = await timeSlotsForOrg();
   const { view } = req.query;
-  if (view === 'morning') {
-    return res.json(MORNING_TIME_SLOTS);
-  } else if (view === 'morning2') {
-    return res.json(MORNING2_TIME_SLOTS);
-  } else if (view === 'all') {
-    return res.json(TIME_SLOTS);
-  }
-  res.json(EVENING_TIME_SLOTS); // Default
+  if (view === 'morning') return res.json(slots.morning);
+  if (view === 'morning2') return res.json(slots.morning2);
+  if (view === 'all') return res.json(slots.combined);
+  res.json(slots.evening); // Default
 });
 
 // Update time slots
@@ -880,38 +821,32 @@ router.put('/timeslots', authMiddleware, async (req: Request, res: Response) => 
     }
 
     const { morningSlots, morning2Slots, eveningSlots } = req.body;
-    
-    if (morningSlots && Array.isArray(morningSlots)) {
+
+    // Scoped, so one institute saving its timetable cannot overwrite another's
+    // row — which is exactly what a globally-unique `key` used to guarantee.
+    const scope = tenantScope();
+    const saves: Array<[string, unknown]> = [
+      [SLOT_KEYS.morning, morningSlots],
+      [SLOT_KEYS.morning2, morning2Slots],
+      [SLOT_KEYS.evening, eveningSlots],
+    ];
+    for (const [key, value] of saves) {
+      if (!Array.isArray(value)) continue;
       await AppSetting.findOneAndUpdate(
-        { key: 'MORNING_TIME_SLOTS' },
-        { value: morningSlots },
-        { upsert: true, new: true }
+        { ...scope, key },
+        { $set: { value, updatedBy: user?.id } },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
       );
     }
 
-    if (morning2Slots && Array.isArray(morning2Slots)) {
-      await AppSetting.findOneAndUpdate(
-        { key: 'MORNING2_TIME_SLOTS' },
-        { value: morning2Slots },
-        { upsert: true, new: true }
-      );
-    }
-    
-    if (eveningSlots && Array.isArray(eveningSlots)) {
-      await AppSetting.findOneAndUpdate(
-        { key: 'EVENING_TIME_SLOTS' },
-        { value: eveningSlots },
-        { upsert: true, new: true }
-      );
-    }
-    
-    await loadTimeSlots(); // refresh cache
-    
+    invalidateSlotCache();
+    const slots = await timeSlotsForOrg();
+
     res.json({
       success: true,
-      morningSlots: MORNING_TIME_SLOTS,
-      morning2Slots: MORNING2_TIME_SLOTS,
-      eveningSlots: EVENING_TIME_SLOTS
+      morningSlots: slots.morning,
+      morning2Slots: slots.morning2,
+      eveningSlots: slots.evening,
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -925,8 +860,9 @@ router.put('/timeslots', authMiddleware, async (req: Request, res: Response) => 
 // Get timetable grid for a class/batch
 router.get('/timetable', authMiddleware, async (req: Request, res: Response) => {
   try {
-    // Always refresh slots first so grid keys and response are consistent
-    await loadTimeSlots();
+    // Resolved first so the grid keys and the response are consistent, and so
+    // they belong to the organization asking rather than to whoever saved last.
+    const { combined: orgSlots } = await timeSlotsForOrg();
 
     const { classLevel, batch, dayOfWeek } = req.query;
 
@@ -969,7 +905,7 @@ router.get('/timetable', authMiddleware, async (req: Request, res: Response) => 
     const grid: any = {};
     DAYS_OF_WEEK.forEach((_day, index) => {
       grid[index] = {};
-      TIME_SLOTS.forEach(slot => { grid[index][slot.start] = null; });
+      orgSlots.forEach(slot => { grid[index][slot.start] = null; });
     });
 
     schedules.forEach(schedule => {
@@ -1005,7 +941,7 @@ router.get('/timetable', authMiddleware, async (req: Request, res: Response) => 
 
     res.json({
       grid,
-      timeSlots: TIME_SLOTS,
+      timeSlots: orgSlots,
       scheduleTimeSlots,   // extra: actual slots used by schedules
       days: DAYS_OF_WEEK
     });
@@ -1076,8 +1012,8 @@ router.get('/live', authMiddleware, cacheMiddleware({ ttl: 60, keyFn: (req) => `
     
     const today = new Date();
     const dayOfWeek = today.getDay();
-    await loadTimeSlots();
-    let { currentSlot, nextSlot } = getCurrentTimeSlot();
+    const { combined: liveSlots } = await timeSlotsForOrg();
+    let { currentSlot, nextSlot } = getCurrentTimeSlot(liveSlots);
     
     let currentClass = null;
     let nextClass = null;
@@ -1663,19 +1599,21 @@ router.post('/', authMiddleware, invalidateCacheOn(['schedule']), async (req: Re
         .select(`${CONFLICT_CANDIDATE_FIELDS} date`)
         .lean();
 
+      const { combined: slots } = await timeSlotsForOrg();
+
       const candidate: ScheduleSession = {
         classLevel: String(scheduleData.classLevel ?? ''),
         batch: primaryBatch,
         batches: normalizedBatches,
         startTimeSlot: scheduleData.startTimeSlot,
-        endTimeSlot: resolveEndTimeSlot(scheduleData.startTimeSlot, scheduleData.endTimeSlot),
+        endTimeSlot: resolveEndTimeSlot(slots, scheduleData.startTimeSlot, scheduleData.endTimeSlot),
         roomNumber: Number.isFinite(Number(scheduleData.roomNumber)) ? Number(scheduleData.roomNumber) : null,
         teacherId: teacherId ? String(teacherId) : undefined,
         teacherName,
       };
 
       for (const doc of futureCustomDocs) {
-        const blocking = findSessionConflicts(candidate, [docToSession(doc)]).find(
+        const blocking = findSessionConflicts(candidate, [docToSession(slots, doc)]).find(
           (i) => i.severity === 'error'
         );
         if (blocking) {
@@ -1702,7 +1640,8 @@ router.post('/', authMiddleware, invalidateCacheOn(['schedule']), async (req: Re
     
     // Send notifications
     const dayName = scheduleData.dayOfWeek !== undefined ? DAYS_OF_WEEK[scheduleData.dayOfWeek] : '';
-    const timeLabel = TIME_SLOTS.find(t => t.start === scheduleData.startTimeSlot)?.label || scheduleData.startTimeSlot;
+    const { combined: labelSlots } = await timeSlotsForOrg();
+    const timeLabel = labelSlots.find(t => t.start === scheduleData.startTimeSlot)?.label || scheduleData.startTimeSlot;
     
     const notificationTitle = `New Class: ${schedule.subject}`;
     const notificationBody = schedule.scheduleType === 'regular'
@@ -2621,7 +2560,8 @@ async function validateBulkEntries(
     })
       .select(CONFLICT_CANDIDATE_FIELDS)
       .lean();
-    existing = existingDocs.map(docToSession);
+    const { combined: validationSlots } = await timeSlotsForOrg();
+    existing = existingDocs.map((doc) => docToSession(validationSlots, doc));
   }
 
   issues.push(...validateSessionSet(sessions, existing));

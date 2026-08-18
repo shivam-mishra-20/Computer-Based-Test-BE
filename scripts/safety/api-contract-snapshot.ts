@@ -208,12 +208,28 @@ function main() {
   if (checkIndex > -1) {
     const expectedPath = process.argv[checkIndex + 1];
     const expected = readFileSync(expectedPath, 'utf8');
-    if (expected.trim() === output.trim()) {
+
+    // Line endings are normalised before comparison. Git rewrites LF to CRLF in
+    // the working copy on Windows, so a baseline that was byte-correct when it
+    // was written reports EVERY line as both removed and added after the next
+    // checkout — 485 phantom changes, which is exactly enough noise to hide the
+    // one real one.
+    const lines = (text: string) =>
+      text
+        .split(/\r?\n/)
+        .map((l) => l.replace(/\s+$/, ''))
+        .filter((l) => l && !l.startsWith('#'));
+
+    const expectedLines = new Set(lines(expected));
+    const actualLines = new Set(lines(output));
+
+    if (
+      expectedLines.size === actualLines.size &&
+      [...expectedLines].every((l) => actualLines.has(l))
+    ) {
       console.log(`[api-contract] unchanged — ${endpoints.length} endpoints match ${expectedPath}`);
       return;
     }
-    const expectedLines = new Set(expected.split('\n').filter((l) => l && !l.startsWith('#')));
-    const actualLines = new Set(output.split('\n').filter((l) => l && !l.startsWith('#')));
     const removed = [...expectedLines].filter((l) => !actualLines.has(l));
     const added = [...actualLines].filter((l) => !expectedLines.has(l));
 
