@@ -24,6 +24,8 @@ import {
   isValidTimeString,
   validateSessionSet,
 } from '../../services/schedule/scheduleValidator';
+import { tenantScope } from '../../core/tenancy';
+import { getOrgConfiguration } from '../../core/config/orgConfig';
 import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
 
 // Initialize Firebase Admin on module load
@@ -496,12 +498,13 @@ async function checkScheduleConflict(
 // ========================
 
 // Get all batches
+
 router.get('/batches', authMiddleware, async (req: Request, res: Response) => {
   try {
     await mergeAdvancedBasicBatchValues();
     const { classLevel } = req.query;
     
-    const query: any = {};
+    const query: any = tenantScope();
     if (classLevel) {
       const normalizedClass = normalizeClassValue(String(classLevel));
       query.classLevels = normalizedClass || classLevel;
@@ -556,10 +559,13 @@ router.put('/batches/:id', authMiddleware, async (req: Request, res: Response) =
       updatePayload.classLevels = normalizedClassLevels;
     }
 
-    const updatedBatch = await Batch.findByIdAndUpdate(req.params.id, updatePayload, {
-      new: true,
-      runValidators: true,
-    });
+    // Scoped by organization as well as by id: an id is guessable and a bare
+    // findByIdAndUpdate would let one institute rename another's batch.
+    const updatedBatch = await Batch.findOneAndUpdate(
+      { _id: req.params.id, ...tenantScope() },
+      updatePayload,
+      { new: true, runValidators: true },
+    );
 
     if (!updatedBatch) {
       return res.status(404).json({ error: 'Batch not found' });
@@ -579,7 +585,8 @@ router.delete('/batches/:id', authMiddleware, async (req: Request, res: Response
       return res.status(403).json({ error: 'Only admins can delete batches' });
     }
     
-    await Batch.findByIdAndDelete(req.params.id);
+    const removed = await Batch.findOneAndDelete({ _id: req.params.id, ...tenantScope() });
+    if (!removed) return res.status(404).json({ error: 'Batch not found' });
     res.json({ success: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
@@ -747,8 +754,8 @@ router.get('/firebase/batches', authMiddleware, async (req: Request, res: Respon
 
     await mergeAdvancedBasicBatchValues();
     
-    // Fetch all batches from MongoDB
-    const query: any = {};
+    // Fetch this organization's batches from MongoDB
+    const query: any = tenantScope();
     if (classLevel) {
       const normalizedClass = normalizeClassValue(String(classLevel));
       query.classLevels = normalizedClass || classLevel;
@@ -817,7 +824,11 @@ router.get('/students', authMiddleware, async (req: Request, res: Response) => {
 // Get all teachers
 router.get('/teachers', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const teachers = await User.find({ role: 'teacher' })
+    // Scoped explicitly, for the same reason as the batch endpoints above:
+    // reads are unfiltered under `warn`, and the P6 end-to-end suite caught
+    // "Abhigyan Gurukull Teacher" being offered in ABC Coaching's schedule
+    // form. Staff names are not a cosmetic leak.
+    const teachers = await User.find({ role: 'teacher', ...tenantScope() })
       .select('_id name email firebaseUid')
       .sort({ name: 1 });
     res.json(teachers);
@@ -826,13 +837,24 @@ router.get('/teachers', authMiddleware, async (req: Request, res: Response) => {
   }
 });
 
-// Get rooms (static list 1-11)
+/**
+ * The organization's rooms.
+ *
+ * Was a hardcoded 1–11 — Abhigyan's rooms, expressed as a loop. It now reads
+ * the configured rooms, which fall back to exactly that list for an
+ * organization that has configured none, so Abhigyan's response is unchanged
+ * while an institute with halls and labs gets its own.
+ *
+ * `number` is retained and remains the 1-based position, because the Schedule
+ * schema stores `roomNumber` as a number and every consumer of it expects one.
+ */
 router.get('/rooms', authMiddleware, async (_req: Request, res: Response) => {
-  const rooms = Array.from({ length: 11 }, (_, i) => ({
-    number: i + 1,
-    name: `Room ${i + 1}`
-  }));
-  res.json(rooms);
+  try {
+    const configuration = await getOrgConfiguration();
+    res.json(configuration.rooms.map((room, index) => ({ number: index + 1, name: room.name })));
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Get time slots

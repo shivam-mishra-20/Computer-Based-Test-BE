@@ -36,3 +36,8 @@ google-services.json
 # with an exception is a rule someone gets wrong at 2am.
 backups/
 *.ejson
+
+# P6 fixture connection string — a scratch database, never committed.
+.p6-uri
+
+.p6-uri-restore

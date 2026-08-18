@@ -374,7 +374,24 @@ async function main() {
     console.log('\nplatform staff');
     await go('/staff', 'table');
     t = await text();
-    check('staff list renders', t.includes('p5-console-owner@platform.local'), t.slice(0, 300));
+    // Asserted by SHAPE, not by a fixture's email address. Pinning
+    // `p5-console-owner@platform.local` made this suite pass against exactly one
+    // database and fail everywhere else with "staff list renders" — a message
+    // that says nothing about the actual cause. What the check means is "the
+    // table rendered real staff rows", so that is what it now asserts.
+    const staffRows = await page.$$eval('table tbody tr', (rows: Element[]) =>
+      rows.map((r) => (r.textContent || '').trim()).filter(Boolean),
+    );
+    check(
+      'staff list renders real rows',
+      staffRows.length > 0 && staffRows.some((r: string) => r.includes('@')),
+      `${staffRows.length} row(s): ${staffRows.slice(0, 2).join(' / ')}`,
+    );
+    check(
+      'and the signed-in owner account is among them',
+      staffRows.some((r: string) => /owner/i.test(r)),
+      staffRows.join(' / ').slice(0, 200),
+    );
     check('  roles are shown', has(t, 'owner') && has(t, 'support'));
     await shot('14-staff');
 

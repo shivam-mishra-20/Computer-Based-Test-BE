@@ -25,6 +25,8 @@ export {
   type TenantEnforcement,
 } from './config';
 
+export { tenantScope, tenantScopeActive } from './queryScope';
+
 export { registerTenancy, verifyTenantPluginApplied } from './bootstrap';
 
 export { forEachOrg, type ForEachOrgSummary, type OrgRunResult } from './forEachOrg';

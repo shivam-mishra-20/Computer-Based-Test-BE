@@ -54,6 +54,7 @@ import { errorHandler } from './middlewares/errorHandler';
 import { globalLimiter } from './middlewares/rateLimiter';
 import { tenantContextMiddleware } from './middlewares/tenantContext';
 import meContextRoutes from './routes/api/meContextRoutes';
+import orgPublicRoutes from './routes/api/orgPublicRoutes';
 import platformRoutes from './routes/api/platformRoutes';
 import path from 'path';
 // Use require to avoid transient module resolution issues in some TS setups
@@ -250,6 +251,7 @@ app.get('/register', (_req, res) => {
 // organization.
 app.use('/api/platform', platformRoutes);
 app.use('/api/me', meContextRoutes);
+app.use('/api/org', orgPublicRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/auth', passwordResetRoutes); // Password reset under /api/auth
 app.use('/api/learner', learnerRoutes); // Public Learner profile, home, saves, progress

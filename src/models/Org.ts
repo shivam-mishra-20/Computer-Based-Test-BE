@@ -28,6 +28,8 @@ export interface IOrgBranding {
   primaryColor?: string;
   secondaryColor?: string;
   appName?: string;
+  /** Second line under the name in navigation and on the landing page. */
+  tagline?: string;
   accentColor?: string;
   /** Mobile splash background; app.json currently hardcodes #F7F7F7. */
   splashBackgroundColor?: string;
@@ -89,6 +91,10 @@ const orgSchema = new Schema<IOrg>(
         primaryColor: String,
         secondaryColor: String,
         appName: String,
+        // The line under the name in the navbar and on the landing page.
+        // Abhigyan's is "Tree of Knowledge"; an institute that sets nothing
+        // gets no second line rather than someone else's.
+        tagline: String,
         accentColor: String,
         splashBackgroundColor: String,
         splashImageUrl: String,

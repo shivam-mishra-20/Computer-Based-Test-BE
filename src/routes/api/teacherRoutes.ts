@@ -10,6 +10,7 @@ import { aiLimiter } from '../../middlewares/rateLimiter';
 import { buildClassVariants } from '../../utils/audienceTargeting';
 import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
 import { tenantLookup } from '../../core/tenancy';
+import { tenantScope } from '../../core/tenancy';
 import {
   generate as aiContentGenerate,
   listHistory as aiContentListHistory,
@@ -89,10 +90,16 @@ router.get('/batches', authMiddleware, async (req: AuthRequest, res: Response) =
     const examBatches = await Exam.distinct('batch', { createdBy: req.user._id });
 
     // Also include batches that actually exist on students, so pickers work
-    // even before the teacher has created any batch-scoped exam
+    // even before the teacher has created any batch-scoped exam.
+    //
+    // Scoped by organization explicitly: the tenancy plugin filters reads only
+    // under `enforce`, and a `distinct` over every student in a shared database
+    // returns other institutes' batch names straight into this teacher's
+    // picker. No-op where there is no context.
     const studentBatches = await User.distinct('batch', {
       role: 'student',
       status: 'approved',
+      ...tenantScope(),
       ...INSTITUTE_ACCOUNT_CLAUSE,
     });
 
@@ -111,6 +118,7 @@ router.get('/batches', authMiddleware, async (req: AuthRequest, res: Response) =
           role: 'student',
           batch,
           status: 'approved',
+          ...tenantScope(),
           ...INSTITUTE_ACCOUNT_CLAUSE,
         });
         

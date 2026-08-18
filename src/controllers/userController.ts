@@ -2,10 +2,23 @@ import { Request, Response } from 'express';
 import User, { IUser, UserRole } from '../models/User';
 import { logAudit } from '../utils/logger';
 import { INSTITUTE_ACCOUNT_CLAUSE, instituteStudentFilter } from '../utils/instituteAudience';
+import { tenantScope } from '../core/tenancy';
+import { getOrgConfiguration, resolveClassKey } from '../core/config/orgConfig';
 import {
 	normalizeClassValue,
 	toClassLabel,
 } from '../config/studentBatchConfig';
+
+/**
+ * Escape a caller-supplied value for safe inclusion in a RegExp.
+ *
+ * The same expression the search branch already inlines, named because the
+ * class-level filter now needs it too — and two copies of an escaping rule is
+ * one copy too many.
+ */
+function escapeRegExp(value: string): string {
+	return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 import {
 	getStudentBatchConfigFromDatabase,
 	matchBatchName,
@@ -252,7 +265,7 @@ export const adminListUsers = async (req: Request, res: Response) => {
 		const batch = (req.query.batch as string) || undefined;
 		// Institute roster source for admin/teacher student pickers — public
 		// learners must never be selectable as an institute audience member.
-		const filter: any = { ...INSTITUTE_ACCOUNT_CLAUSE };
+		const filter: any = { ...INSTITUTE_ACCOUNT_CLAUSE, ...tenantScope() };
 		if (role && ['teacher', 'student', 'admin'].includes(role)) filter.role = role;
 		if (status && ['pending', 'approved', 'rejected'].includes(status)) filter.status = status;
 		if (registrationSource && ['website', 'app', 'admin', 'unknown'].includes(registrationSource)) {
@@ -263,12 +276,26 @@ export const adminListUsers = async (req: Request, res: Response) => {
 			filter.$or = [{ name: rx }, { email: rx }, { phone: rx }, { empCode: rx }];
 		}
 		if (classLevel) {
-			const normalizedClass = normalizeClassValue(classLevel);
-			if (normalizedClass) {
-				filter.classLevel = { $regex: new RegExp(`^(Class\\s*)?${normalizedClass}$`, 'i') };
-			} else {
-				filter.classLevel = classLevel;
-			}
+			// `resolveClassKey` against the organization's configured levels, not the
+			// digit-extracting `normalizeClassValue`: that helper returns null for any
+			// non-numeric level, so a coaching institute filtering by "Dropper" fell
+			// through to a case-SENSITIVE exact match, found nobody, and reported no
+			// error to explain why.
+			const { classLevels } = await getOrgConfiguration();
+			const resolved = resolveClassKey(classLevel, classLevels);
+			const level = resolved ? classLevels.find((c) => c.key === resolved) : undefined;
+			// Every spelling this organization recognises for the level, so the
+			// "11" / "Class 11" split already in production keeps matching.
+			const spellings = Array.from(
+				new Set(
+					[resolved, level?.label, ...(level?.aliases ?? []), classLevel].filter(
+						(value): value is string => Boolean(value),
+					),
+				),
+			);
+			filter.classLevel = {
+				$in: spellings.map((value) => new RegExp(`^${escapeRegExp(value)}$`, 'i')),
+			};
 		}
 		if (batch) filter.batch = String(batch).trim();
 		const users = await User.find(filter).select('-password');
@@ -393,10 +420,14 @@ export const adminDeleteUser = async (req: Request, res: Response) => {
 // Admin-only dashboard sample
 export const adminDashboard = async (_req: Request, res: Response) => {
 	try {
+		// Scoped by organization where that is safe — see core/tenancy/queryScope.
+		// Without it a claim-mode deployment reports the platform's total head
+		// count to every institute on it, which is both wrong and a disclosure.
+		const scope = tenantScope();
 		const [admins, teachers, students] = await Promise.all([
-			User.countDocuments({ role: 'admin' }),
-			User.countDocuments({ role: 'teacher' }),
-			User.countDocuments(instituteStudentFilter()),
+			User.countDocuments({ role: 'admin', ...scope }),
+			User.countDocuments({ role: 'teacher', ...scope }),
+			User.countDocuments(instituteStudentFilter(scope)),
 		]);
 		res.json({ stats: { admins, teachers, students } });
 	} catch (err) {

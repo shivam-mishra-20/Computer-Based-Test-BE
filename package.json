@@ -29,7 +29,7 @@
     "safety:verify": "ts-node scripts/safety/verify-restore.ts",
     "safety:guard": "ts-node scripts/safety/guard.test.ts",
     "safety:api-snapshot": "ts-node scripts/safety/api-contract-snapshot.ts",
-    "safety:api-check": "ts-node --transpile-only scripts/safety/api-contract-snapshot.ts --check docs/baselines/api-contract-2026-08-17.txt",
+    "safety:api-check": "ts-node --transpile-only scripts/safety/api-contract-snapshot.ts --check docs/baselines/api-contract-2026-08-18.txt",
     "safety:client-surface": "ts-node scripts/safety/legacy-client-surface.ts",
     "safety:tenancy": "ts-node --transpile-only scripts/safety/tenancy.test.ts",
     "safety:tenant-coverage": "ts-node --transpile-only scripts/safety/verify-tenant-coverage.ts",
@@ -47,7 +47,10 @@
     "safety:rbac": "ts-node --transpile-only scripts/safety/rbac.test.ts",
     "safety:custom-roles": "ts-node --transpile-only scripts/safety/custom-roles.e2e.test.ts",
     "safety:platform-e2e": "ts-node --transpile-only scripts/safety/platform-onboarding.e2e.test.ts",
-    "safety:console-ui": "ts-node --transpile-only scripts/safety/console-ui.e2e.test.ts"
+    "safety:console-ui": "ts-node --transpile-only scripts/safety/console-ui.e2e.test.ts",
+    "safety:web": "ts-node --transpile-only scripts/safety/client-platform-web.e2e.test.ts",
+    "p6:seed": "node -r ./scripts/safety/dns-preload.js -r ts-node/register/transpile-only scripts/safety/seed-p6-fixture.ts",
+    "p6:serve": "node scripts/safety/p6-fixture-server.js"
   },
   "keywords": [],
   "author": "",

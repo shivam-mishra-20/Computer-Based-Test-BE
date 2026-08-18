@@ -225,6 +225,19 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
  *                                   check and an org resolved from the payload —
  *                                   tracked as a security finding, not papered over
  *                                   here.
+ *   GET  /api/org/branding          Unauthenticated by design — a login page has to
+ *                                   be painted before the credential that would
+ *                                   reveal the branding is submitted. Allowlisting
+ *                                   it would BREAK it: an allowlisted route runs
+ *                                   inside `withoutTenantScope`, `currentOrgId()`
+ *                                   returns null, and the endpoint would answer
+ *                                   `organization: null` for every request. It
+ *                                   needs the context the middleware resolves from
+ *                                   the Host or `X-Org-Id`, which is exactly what
+ *                                   NOT allowlisting it provides. Returns name,
+ *                                   slug, status, branding and locale only —
+ *                                   nothing an institute's own login page does not
+ *                                   already show the world.
  */
 export const DELIBERATELY_NOT_ALLOWLISTED = [
   'GET /api/auth/login',
@@ -232,6 +245,7 @@ export const DELIBERATELY_NOT_ALLOWLISTED = [
   'GET /api/automation/logs',
   'POST /api/auth/welcome-tutorial/complete',
   'POST /api/webhooks/attendance',
+  'GET /api/org/branding',
 ] as const;
 
 /** Compile `/api/x/:id` into a matcher. Params match a single path segment. */

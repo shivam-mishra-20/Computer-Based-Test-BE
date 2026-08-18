@@ -110,3 +110,38 @@ export function verifyAny<T extends { aud?: string }>(raw: string): T & { aud: T
   const decoded = jwt.verify(raw, secret()) as T;
   return { ...decoded, aud: (decoded.aud ?? 'legacy') as TokenAudience };
 }
+
+/**
+ * The session token the login endpoints issue.
+ *
+ * ── Why this is not `signTenantToken` ───────────────────────────────────────
+ * P2 minted `tenant` tokens with a 15-minute expiry and an `aud` claim. Neither
+ * is safe here: the installed Abhigyan app has no refresh logic, so a 15-minute
+ * token logs every user out fifteen minutes after deploy with no way back, and
+ * a client that pins `aud: 'tenant'` cannot also be accepted by api-legacy.
+ *
+ * So this is the LEGACY SHAPE, byte-compatible with what production issues
+ * today — same claims, same 3650-day expiry, no `aud` — with exactly one
+ * addition: `orgId`, and only when the user actually has one.
+ *
+ * That single claim is what makes claim-mode multi-tenancy possible at all.
+ * Without it `tenantContextMiddleware` finds no organization on an
+ * authenticated request, `/api/me/context` returns `organization: null`, and no
+ * client can ever be tenant-aware. With it, one deployment serves every
+ * organization and the tenant is decided by who logged in.
+ *
+ * Additive by construction:
+ *   - api-legacy runs pinned, where the claim is never consulted.
+ *   - the installed app ignores unknown claims.
+ *   - a user with no orgId (pre-backfill) gets precisely today's token.
+ */
+export function signSessionToken(claims: {
+  id: string;
+  role?: string;
+  orgId?: string | null;
+}): string {
+  const payload: Record<string, unknown> = { id: claims.id };
+  if (claims.role) payload.role = claims.role;
+  if (claims.orgId) payload.orgId = String(claims.orgId);
+  return jwt.sign(payload, secret(), { expiresIn: TOKEN_TTL.legacy });
+}

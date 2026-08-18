@@ -25,6 +25,7 @@ import jwt from 'jsonwebtoken';
 import { runWithTenant, withoutTenantScope, type TenantContext } from '../core/tenancy/context';
 import { findPublicRoute } from '../core/tenancy/publicRoutes';
 import { isExplicitlyPinned, pinnedOrgId, tenantEnforcement, tenantMode } from '../core/tenancy/config';
+import { resolveOrgFromRequest } from '../core/tenancy/hostResolution';
 
 interface TokenClaims {
   id?: string;
@@ -47,11 +48,10 @@ function peekClaims(req: Request): TokenClaims | null {
   }
 }
 
-/** Organization hinted by the request's host — `abhigyan.example.com` → `abhigyan`. */
-function orgHintFromHost(req: Request): string | null {
+/** The explicit organization hint a client may send. Routing only — grants nothing. */
+function orgHintHeader(req: Request): string | null {
   const header = (req.header('X-Org-Id') || '').trim();
-  if (header) return header;
-  return null;
+  return header || null;
 }
 
 export function tenantContextMiddleware(req: Request, res: Response, next: NextFunction) {
@@ -96,25 +96,88 @@ export function tenantContextMiddleware(req: Request, res: Response, next: NextF
 
   // ── claim mode ───────────────────────────────────────────────────────────
   const claims = peekClaims(req);
-  const hint = orgHintFromHost(req);
+  const hint = orgHintHeader(req);
 
   if (claims?.orgId) {
-    if (hint && hint !== claims.orgId) {
-      return res.status(400).json({
-        message: 'Organization mismatch between credentials and request.',
-        code: 'TENANT_MISMATCH',
-      });
-    }
     const context: TenantContext = {
       orgId: claims.orgId,
       userId: claims.id ?? null,
       source: 'claim',
     };
+
+    // A hint alongside a claim still has to agree — a mismatch is either a bug
+    // or an attack, and silently picking one is how a cross-tenant request gets
+    // served. But it is compared RESOLVED, not as a string: a client may hold
+    // the organization's slug while the claim carries its id, and refusing that
+    // pairing would 400 a request that names exactly the right organization.
+    if (hint && hint !== claims.orgId) {
+      return resolveOrgFromRequest({ header: hint })
+        .then((resolved) => {
+          if (resolved && resolved === claims.orgId) {
+            return runWithTenant(context, () => next());
+          }
+          return res.status(400).json({
+            message: 'Organization mismatch between credentials and request.',
+            code: 'TENANT_MISMATCH',
+          });
+        })
+        .catch(() =>
+          res.status(400).json({
+            message: 'Organization mismatch between credentials and request.',
+            code: 'TENANT_MISMATCH',
+          }),
+        );
+    }
+
     return runWithTenant(context, () => next());
   }
 
-  // No usable organization. Two possibilities, and they are treated very
-  // differently on purpose.
+  // ── No claim: the PRE-AUTHENTICATION case ────────────────────────────────
+  // Login has to know which organization to authenticate against before a
+  // token exists, and a login page has to be branded before the credential
+  // that would reveal the branding is submitted. Both are answered by the
+  // request's own routing information — an explicit `X-Org-Id`, or the Host
+  // the browser actually asked for.
+  //
+  // This is a HINT, not a credential. It selects which tenant's data the
+  // request may see; it never decides who the caller is. The moment a token
+  // exists the signed claim takes over, and a hint that disagrees with it is
+  // rejected above rather than reconciled.
+  //
+  // The lookup is skipped entirely when there is nothing to look up, so a
+  // deployment with no domains configured pays nothing and behaves exactly as
+  // it did before.
+  //
+  // Platform routes are excluded outright. A PlatformUser's token carries no
+  // `orgId` — that is what makes it a platform token — so without this it would
+  // fall through to host resolution and every platform request served from a
+  // tenant's domain would run inside that tenant's context. Platform code opens
+  // its own scopes explicitly; inheriting one it did not ask for is how a
+  // cross-tenant read gets silently narrowed, or silently widened.
+  if (req.path.startsWith('/api/platform')) {
+    return continueWithoutOrg(req, next);
+  }
+
+  if (hint || req.headers.host) {
+    return resolveOrgFromRequest({ header: hint, host: req.headers.host })
+      .then((resolved) => {
+        if (resolved) {
+          const context: TenantContext = { orgId: resolved, userId: null, source: 'claim' };
+          return runWithTenant(context, () => next());
+        }
+        return continueWithoutOrg(req, next);
+      })
+      .catch(() => continueWithoutOrg(req, next));
+  }
+
+  return continueWithoutOrg(req, next);
+}
+
+/**
+ * No usable organization. Two possibilities, and they are treated very
+ * differently on purpose.
+ */
+function continueWithoutOrg(req: Request, next: NextFunction) {
   const allowed = findPublicRoute(req.method, req.path);
 
   if (allowed) {

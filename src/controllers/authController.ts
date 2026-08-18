@@ -1,10 +1,10 @@
 import { Request, Response } from 'express';
 import User from '../models/User';
-import jwt from 'jsonwebtoken';
 import { AuthPayload } from '../middlewares/authMiddleware';
 import { uploadToFirebase } from '../services/firebaseService';
 import { normalizeClassValue, toClassLabel } from '../config/studentBatchConfig';
 import { getStudentBatchConfigFromDatabase, matchBatchName } from '../services/batchConfigService';
+import { signSessionToken } from '../core/auth/tokens';
 
 const normalizeRegistrationSource = (value: unknown): 'website' | 'app' | 'unknown' => {
   const source = typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -197,7 +197,7 @@ export const register = async (req: Request, res: Response) => {
   });
     await user.save();
 
-  const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET as string, { expiresIn: '3650d' });
+  const token = signSessionToken({ id: String(user._id), role: user.role, orgId: (user as any).orgId });
   res.status(201).json({ token, user: { id: user._id, name: user.name, email: user.email, role: user.role } });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
@@ -240,11 +240,14 @@ export const login = async (req: Request, res: Response) => {
     // gates above. Nothing about the institute status handling changes.
 
     // User is approved, generate token (10 years - effectively permanent until manual logout)
-    const token = jwt.sign(
-      { id: user._id, role: user.role },
-      process.env.JWT_SECRET as string,
-      { expiresIn: '3650d' }
-    );
+    // Carries `orgId` so a claim-mode deployment knows which organization this
+    // session belongs to. Same shape and same expiry as before otherwise — see
+    // core/auth/tokens.ts for why this is not a `tenant`-audience token.
+    const token = signSessionToken({
+      id: String(user._id),
+      role: user.role,
+      orgId: (user as any).orgId,
+    });
     console.log(`Login debug: mongodb-local auth succeeded for ${lcEmail}`);
     return res.json({
       token,
