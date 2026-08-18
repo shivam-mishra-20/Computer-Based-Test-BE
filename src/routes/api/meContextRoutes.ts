@@ -21,6 +21,7 @@ import { currentOrgId, withoutTenantScope } from '../../core/tenancy';
 import { getEntitlement } from '../../core/entitlements/resolve';
 import { getOrgConfiguration } from '../../core/config/orgConfig';
 import { getOrgPolicy } from '../../core/config/policy';
+import { resolveUserPermissions } from '../../core/rbac/resolve';
 
 const router = Router();
 
@@ -45,7 +46,7 @@ router.get('/context', authMiddleware, async (req: Request, res: Response) => {
       });
     }
 
-    const [org, entitlement, configuration, policy] = await Promise.all([
+    const [org, entitlement, configuration, policy, access] = await Promise.all([
       withoutTenantScope('context:read-org', async () => {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const Org = require('../../models/Org').default;
@@ -54,6 +55,10 @@ router.get('/context', authMiddleware, async (req: Request, res: Response) => {
       getEntitlement(orgId),
       getOrgConfiguration(orgId),
       getOrgPolicy(orgId),
+      // Real permissions, from assigned roles or the legacy-role bridge. The
+      // placeholder [] shipped in P3 before RBAC existed; leaving it would make
+      // a client's permission-gated UI show nothing at all.
+      resolveUserPermissions({ ...(user ?? {}), orgId } as never),
     ]);
 
     const organization = org as {
@@ -86,10 +91,9 @@ router.get('/context', authMiddleware, async (req: Request, res: Response) => {
             batch: user.batch,
           }
         : null,
-      // Permission-based RBAC lands in a later phase. Returning the role now
-      // keeps the response shape stable, so adding real permissions later is
-      // additive rather than a breaking change for clients already reading it.
-      permissions: [],
+      permissions: [...access.permissions].sort(),
+      permissionSource: access.source,
+      roleNames: access.roleNames,
       modules: entitlement.modules,
       limits: entitlement.limits,
       usage: {},
@@ -97,6 +101,7 @@ router.get('/context', authMiddleware, async (req: Request, res: Response) => {
         classLevels: configuration.classLevels,
         subjects: configuration.subjects,
         rooms: configuration.rooms,
+        batches: configuration.batches,
         usingDefaults: configuration.usingDefaults,
         policy,
       },

@@ -33,7 +33,7 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
     // Fetch user from DB to get profile and latest role/assignment metadata
     const User = require('../models/User').default;
     const user = await User.findById(decoded.id)
-      .select('name role email classLevel batch firebaseUid status')
+      .select('name role email classLevel batch firebaseUid status roleIds orgId')
       .lean();
     
     if (!user) {
@@ -51,6 +51,11 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
       batch: (user as any).batch,
       firebaseUid: (user as any).firebaseUid,
       status: (user as any).status,
+      // Needed by resolveUserPermissions. Without these it cannot see assigned
+      // roles and silently falls back to the legacy-role mapping — which would
+      // hand a deliberately narrow custom role its old blanket permissions.
+      roleIds: (user as any).roleIds,
+      orgId: (user as any).orgId,
     };
     next();
   } catch (err) {
@@ -82,7 +87,7 @@ export const optionalAuthMiddleware = async (
     const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as AuthPayload;
     const User = require('../models/User').default;
     const user = await User.findById(decoded.id)
-      .select('name role email classLevel batch firebaseUid status')
+      .select('name role email classLevel batch firebaseUid status roleIds orgId')
       .lean();
 
     if (user) {
@@ -96,6 +101,8 @@ export const optionalAuthMiddleware = async (
         batch: (user as any).batch,
         firebaseUid: (user as any).firebaseUid,
         status: (user as any).status,
+        roleIds: (user as any).roleIds,
+        orgId: (user as any).orgId,
       };
     }
   } catch {

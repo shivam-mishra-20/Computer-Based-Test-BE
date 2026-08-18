@@ -46,7 +46,8 @@
     "safety:seed-config": "ts-node --transpile-only scripts/safety/seed-org-config.ts",
     "safety:rbac": "ts-node --transpile-only scripts/safety/rbac.test.ts",
     "safety:custom-roles": "ts-node --transpile-only scripts/safety/custom-roles.e2e.test.ts",
-    "safety:platform-e2e": "ts-node --transpile-only scripts/safety/platform-onboarding.e2e.test.ts"
+    "safety:platform-e2e": "ts-node --transpile-only scripts/safety/platform-onboarding.e2e.test.ts",
+    "safety:console-ui": "ts-node --transpile-only scripts/safety/console-ui.e2e.test.ts"
   },
   "keywords": [],
   "author": "",

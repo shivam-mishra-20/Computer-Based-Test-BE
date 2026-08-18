@@ -40,10 +40,21 @@ export interface ResolvedRoom {
   capacity: number;
 }
 
+export interface ResolvedBatch {
+  name: string;
+  classLevels: string[];
+}
+
 export interface OrgConfiguration {
   classLevels: ResolvedClassLevel[];
   subjects: string[];
   rooms: ResolvedRoom[];
+  /**
+   * Batches are REAL DATA, not a constant, so there is no legacy fallback:
+   * an organization with no batches genuinely has none, and inventing
+   * Abhigyan's would put another institute's groupings in their picker.
+   */
+  batches: ResolvedBatch[];
   /** True when these values came from the legacy constants, not the database. */
   usingDefaults: {
     classLevels: boolean;
@@ -95,11 +106,12 @@ export async function getOrgConfiguration(orgId?: string | null): Promise<OrgCon
       classLevels: legacyClassLevels(),
       subjects: legacySubjects(),
       rooms: legacyRooms(),
+      batches: [],
       usingDefaults: { classLevels: true, subjects: true, rooms: true },
     };
   }
 
-  const [classRows, subjectRows, roomRows] = await withoutTenantScope(
+  const [classRows, subjectRows, roomRows, batchRows] = await withoutTenantScope(
     'config:read-org-configuration',
     async () => {
       // Required lazily so this module is importable before models compile.
@@ -109,11 +121,14 @@ export async function getOrgConfiguration(orgId?: string | null): Promise<OrgCon
       const Subject = require('../../models/Subject').default;
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const OrgRoom = require('../../models/OrgRoom').default;
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const Batch = require('../../models/Batch').default;
 
       return Promise.all([
         ClassLevel.find({ orgId: org, isActive: true }).sort({ order: 1 }).lean(),
         Subject.find({ orgId: org, isActive: true }).sort({ order: 1, name: 1 }).lean(),
         OrgRoom.find({ orgId: org, isActive: true }).sort({ order: 1, name: 1 }).lean(),
+        Batch.find({ orgId: org }).select('name classLevels').sort({ name: 1 }).lean(),
       ]);
     },
   );
@@ -135,10 +150,16 @@ export async function getOrgConfiguration(orgId?: string | null): Promise<OrgCon
     ? (roomRows as ResolvedRoom[]).map((r) => ({ name: r.name, capacity: r.capacity }))
     : legacyRooms();
 
+  const batches = (batchRows as ResolvedBatch[]).map((b) => ({
+    name: b.name,
+    classLevels: b.classLevels ?? [],
+  }));
+
   return {
     classLevels,
     subjects,
     rooms,
+    batches,
     usingDefaults: {
       classLevels: !(classRows as unknown[]).length,
       subjects: !(subjectRows as unknown[]).length,
