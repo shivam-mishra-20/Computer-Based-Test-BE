@@ -137,14 +137,40 @@ export async function resolveEntitlement(
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { WRITABLE_STATUSES } = require('../../models/Subscription');
 
-    const subscription = await Subscription.findOne({ orgId });
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const Org = require('../../models/Org').default;
+
+    const [subscription, org] = await Promise.all([
+      Subscription.findOne({ orgId }),
+      Org.findById(orgId).select('status').lean(),
+    ]);
+
+    /**
+     * TWO independent statuses gate writability, and both must permit it.
+     *
+     *   Org.status           the tenant lifecycle, controlled by platform staff
+     *   Subscription.status  the commercial state
+     *
+     * They are genuinely different questions. Suspending an ORGANIZATION is an
+     * administrative act — a compliance hold, an offboarding — and it must block
+     * writes even while the subscription still reads `active`. The first version
+     * of this consulted only the subscription, so suspending an org through the
+     * console changed its status and nothing else, which is the most misleading
+     * possible outcome for whoever pressed the button.
+     */
+    const orgStatus = (org as { status?: string } | null)?.status;
+    const orgPermitsWrites = !orgStatus || WRITABLE_STATUSES.includes(orgStatus as never);
 
     let resolved: ResolvedEntitlement;
 
     if (!subscription) {
       resolved = unsubscribedEntitlement(orgId);
+      // An org suspended before it was ever subscribed must still be read-only.
+      resolved.writable = orgPermitsWrites;
+      if (orgStatus) resolved.status = orgStatus;
     } else if (subscription.isPlatformOwned) {
       resolved = platformOwnedEntitlement(orgId, subscription.status);
+      resolved.writable = orgPermitsWrites;
     } else {
       const plan = subscription.planId ? await Plan.findById(subscription.planId) : null;
 
@@ -162,7 +188,7 @@ export async function resolveEntitlement(
         modules,
         limits,
         status: subscription.status,
-        writable: WRITABLE_STATUSES.includes(subscription.status),
+        writable: WRITABLE_STATUSES.includes(subscription.status) && orgPermitsWrites,
         version: 0,
         resolvedAt: new Date(),
       };

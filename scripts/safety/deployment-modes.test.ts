@@ -30,6 +30,24 @@ import { registerTenancy } from '../../src/core/tenancy';
 process.env.ENABLE_CRON = 'false';
 process.env.PPT_WORKER_EMBEDDED = 'false';
 
+// Redis off, for the same two reasons the other app-booting harnesses use:
+// it would otherwise reach the SHARED PRODUCTION Redis, and a command timeout
+// there made this suite fail intermittently INSIDE the chained safety run while
+// passing on its own. A flaky check in a safety suite is worse than no check —
+// people learn to re-run red until it goes green. config/redis.ts documents
+// that everything Redis backs here is optional.
+process.env.REDIS_ENABLED = 'false';
+
+// server.ts installs this; booting `app` alone inherits none of it, and since
+// Node 15 one floated rejection from a third-party client terminates the
+// process mid-suite.
+process.on('unhandledRejection', (reason) => {
+  console.warn(
+    '  ⚠ unhandled rejection (harness continues, as production does):',
+    reason instanceof Error ? reason.message : String(reason),
+  );
+});
+
 let failures = 0;
 let checks = 0;
 

@@ -13,7 +13,7 @@
 
 import { NextFunction, Request, Response } from 'express';
 import { verifyToken, TokenAudienceMismatch } from '../core/auth/tokens';
-import { platformCapabilities } from '../models/PlatformUser';
+import { platformCapabilities, satisfiesCapability } from '../models/PlatformUser';
 
 export interface PlatformRequestUser {
   id: string;
@@ -82,7 +82,7 @@ export function requirePlatformCapability(capability: string) {
   return (req: Request, res: Response, next: NextFunction) => {
     const staff = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
     if (!staff) return res.status(401).json({ message: 'Platform credentials required.' });
-    if (!staff.capabilities.includes(capability)) {
+    if (!satisfiesCapability(staff.capabilities, capability)) {
       return res.status(403).json({
         message: 'Your platform role does not permit this.',
         code: 'PLATFORM_CAPABILITY_DENIED',
