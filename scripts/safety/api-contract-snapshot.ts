@@ -78,7 +78,24 @@ function extractGuards(args: string): string[] {
     const roles = match[1].replace(/['"\s]/g, '').split(',').filter(Boolean);
     guards.push(`requireRole(${roles.join('|')})`);
   }
-  for (const name of ['authMiddleware', 'optionalAuthMiddleware', 'requireModule', 'requirePermission']) {
+  for (const match of args.matchAll(/require(?:Any)?Permission\(([^)]*)\)/g)) {
+    const perms = match[1].replace(/['"\s]/g, '').split(',').filter(Boolean);
+    guards.push(`requirePermission(${perms.join('|')})`);
+  }
+  for (const match of args.matchAll(/requirePlatformCapability\(([^)]*)\)/g)) {
+    guards.push(`platformCapability(${match[1].replace(/['"\s]/g, '')})`);
+  }
+  // Keep this list current with every guard the codebase adds. A guard the
+  // parser does not recognise is reported as PUBLIC, which is the dangerous
+  // direction: it makes a protected route look unprotected, and the first real
+  // regression then gets dismissed as another false alarm.
+  for (const name of [
+    'authMiddleware',
+    'optionalAuthMiddleware',
+    'requireModule',
+    'requireWritable',
+    'platformAuthMiddleware',
+  ]) {
     if (new RegExp(`\\b${name}\\b`).test(args)) guards.push(name);
   }
   for (const match of args.matchAll(/\b(\w*[Ll]imiter)\b/g)) {
