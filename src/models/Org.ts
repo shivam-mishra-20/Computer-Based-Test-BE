@@ -36,6 +36,8 @@ export interface IOrgBranding {
   splashImageUrl?: string;
   /** Shown on exported PDFs; replaces the hardcoded institute header. */
   documentHeader?: string;
+  /** Printed under the header on exported PDFs. */
+  documentAddress?: string;
   /** Footer/sender identity for outbound email. */
   emailFromName?: string;
 }
@@ -99,6 +101,7 @@ const orgSchema = new Schema<IOrg>(
         splashBackgroundColor: String,
         splashImageUrl: String,
         documentHeader: String,
+        documentAddress: String,
         emailFromName: String,
       },
       required: false,

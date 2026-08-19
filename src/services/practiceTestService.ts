@@ -4,6 +4,7 @@ import PracticeTest, { IPracticeTest, IFilters, IDuration, IMarkingScheme } from
 import Attempt, { IAnswerItem } from '../models/Attempt';
 import User from '../models/User';
 import { shuffleArray } from '../utils/exam';
+import { tenantScope } from '../core/tenancy';
 
 /**
  * Get the question collection for a specific class level
@@ -103,8 +104,16 @@ export async function getAvailableMeta(userId: string): Promise<PracticeTestMeta
   const classLevel = await getUserClassLevel(userId);
   const collection = getClassQuestionCollection(classLevel);
   
-  // Filter for active questions (include undefined isActive as active)
-  const activeFilter = { isActive: { $ne: false } };
+  // Filter for active questions (include undefined isActive as active).
+  //
+  // ── Scoped explicitly, and this one matters ──────────────────────────────
+  // `getClassQuestionCollection` returns the RAW driver collection, so no
+  // Mongoose middleware runs and no `TENANT_ENFORCEMENT` setting can help. The
+  // per-class question collections are shared by every institute on the
+  // platform, so without this the counts below were computed across all of
+  // them — and the `$sample` further down would draw another organization's
+  // questions into a student's practice test.
+  const activeFilter = { isActive: { $ne: false }, ...tenantScope() };
 
   // Get subject statistics using native MongoDB collection
   const subjectStats = await collection.aggregate([
@@ -209,6 +218,10 @@ async function sampleQuestions(
     const matchStage: any = {
       isActive: { $ne: false },
       difficulty: diff,
+      // Raw driver: see the note on `activeFilter`. A `$sample` over an
+      // unscoped match is how one institute's questions end up in another
+      // institute's practice test.
+      ...tenantScope(),
     };
 
     if (subjects.length > 0) {

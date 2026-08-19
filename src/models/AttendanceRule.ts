@@ -70,7 +70,19 @@ const attendanceRuleSchema = new Schema<IAttendanceRule>(
 
 // Enforce: a rule is either user-specific OR role-level, not both.
 attendanceRuleSchema.index({ userId: 1 }, { unique: true, sparse: true });
-attendanceRuleSchema.index({ role: 1 }, {
+// Plain, not unique — uniqueness is per organization, declared below.
+attendanceRuleSchema.index({ role: 1 });
+//
+// ── Tenant-scoped uniqueness ────────────────────────────────────────────────
+// The legacy index below is globally unique, which on a shared database means
+// this constraint spans every institute on the platform. The compound index is
+// the replacement; the legacy one is removed by
+// `scripts/safety/drop-legacy-global-indexes.ts` as a separate, supervised
+// migration — create replacement, verify, only then remove.
+// `role` holds 'admin' | 'teacher' | 'student'. Globally unique therefore means
+// ONE role-level attendance rule per role for the entire platform: the second
+// institute to define teacher hours silently fails to save them.
+attendanceRuleSchema.index({ orgId: 1, role: 1 }, {
   unique: true,
   sparse: true,
   partialFilterExpression: { userId: { $exists: false } },

@@ -165,7 +165,7 @@ async function runAndStore(params: {
     doc.mimeType = 'application/pdf';
     await doc.save();
 
-    return { generation: doc.toObject(), previewHtml: buildPaperPreviewHtml(content.paper as any) };
+    return { generation: doc.toObject(), previewHtml: await buildPaperPreviewHtml(content.paper as any) };
   } catch (err: any) {
     const message = err?.message || 'Generation failed';
     console.error(`[aiContent] ${feature} generation failed:`, err);
@@ -541,7 +541,7 @@ export const getHistory = async (req: Request, res: Response) => {
               ? buildSlidesPreviewHtml(cj.slides, resolveTheme(cj.themeId))
               : buildDeckPreviewHtml(cj); // legacy pre-Phase-4 SlideDeck shape
         } else {
-          previewHtml = buildPaperPreviewHtml(cj);
+          previewHtml = await buildPaperPreviewHtml(cj);
         }
       }
     } catch {
@@ -681,7 +681,7 @@ export const regenerate = async (req: Request, res: Response) => {
           buffer = await renderPaperPdf(prev.contentJSON as any);
           ext = 'pdf';
           mimeType = 'application/pdf';
-          previewHtml = buildPaperPreviewHtml(prev.contentJSON as any);
+          previewHtml = await buildPaperPreviewHtml(prev.contentJSON as any);
         }
 
         const storagePath = `ai-content/${owner.toString()}/${newDoc._id.toString()}.${ext}`;

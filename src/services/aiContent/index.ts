@@ -93,7 +93,7 @@ export const aiContentService = {
       feature: 'question_paper',
       title: content.title,
       contentJSON: paper,
-      previewHtml: buildPaperPreviewHtml(paper),
+      previewHtml: await buildPaperPreviewHtml(paper),
       usedVision: content.usedVision,
       artifact: {
         buffer,

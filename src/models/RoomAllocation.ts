@@ -94,7 +94,9 @@ const roomAllocationSchema = new Schema<IRoomAllocation>(
     date: {
       type: String,
       required: true,
-      unique: true, // exactly one allocation document per exam date
+      // NOT `unique` — "one allocation per exam date" is per ORGANIZATION,
+      // declared below as a compound index. Existing databases keep the global
+      // one until drop-legacy-global-indexes.ts runs.
       index: true,
       match: /^\d{4}-\d{2}-\d{2}$/,
     },
@@ -115,6 +117,17 @@ const roomAllocationSchema = new Schema<IRoomAllocation>(
 );
 
 // Fast lookup of "is this student allocated on this date" for the student view.
+//
+// ── Tenant-scoped uniqueness ────────────────────────────────────────────────
+// The legacy index below is globally unique, which on a shared database means
+// this constraint spans every institute on the platform. The compound index is
+// the replacement; the legacy one is removed by
+// `scripts/safety/drop-legacy-global-indexes.ts` as a separate, supervised
+// migration — create replacement, verify, only then remove.
+// "Exactly one allocation document per exam date" was true across the whole
+// platform, not per institute — so the second organization seating students on
+// a given date could not create its allocation at all.
+roomAllocationSchema.index({ orgId: 1, date: 1 }, { unique: true });
 roomAllocationSchema.index({ date: 1, 'assignments.studentId': 1 });
 
 const RoomAllocation = mongoose.model<IRoomAllocation>('RoomAllocation', roomAllocationSchema);

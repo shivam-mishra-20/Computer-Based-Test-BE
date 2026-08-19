@@ -237,7 +237,13 @@ export async function getAttemptView(attemptId: string, userId: string) {
     const collection = mongoose.default.connection.collection(normalized);
     
     const qids = practiceTest.questionIds.map((id: any) => new mongoose.Types.ObjectId(id));
-    const questionDocs = await collection.find({ _id: { $in: qids } }).toArray();
+    // Explicitly scoped. This is the RAW driver, so no Mongoose middleware runs
+    // and `TENANT_ENFORCEMENT` cannot help it at any setting. The ids come from
+    // a PracticeTest the tenant owns, which makes it safe by key — the same
+    // defence-in-depth the $lookup audit requires of its SAFE-BY-KEY joins.
+    const questionDocs = await collection
+      .find({ _id: { $in: qids }, ...tenantScope() })
+      .toArray();
     
     // Build sections (practice tests have a single "main" section)
     const sections = [{
@@ -763,7 +769,13 @@ export async function submitAttempt(attemptId: string, userId: string, auto = fa
     const collection = mongoose.default.connection.collection(normalized);
     
     const qids = practiceTest.questionIds.map((id: any) => new mongoose.Types.ObjectId(id));
-    const questionDocs = await collection.find({ _id: { $in: qids } }).toArray();
+    // Explicitly scoped. This is the RAW driver, so no Mongoose middleware runs
+    // and `TENANT_ENFORCEMENT` cannot help it at any setting. The ids come from
+    // a PracticeTest the tenant owns, which makes it safe by key — the same
+    // defence-in-depth the $lookup audit requires of its SAFE-BY-KEY joins.
+    const questionDocs = await collection
+      .find({ _id: { $in: qids }, ...tenantScope() })
+      .toArray();
     qmap = new Map(questionDocs.map((q: any) => [q._id.toString(), q]));
   } else {
     // Regular exam

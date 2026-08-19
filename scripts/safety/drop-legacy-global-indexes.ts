@@ -61,6 +61,36 @@ const LEGACY_INDEXES: LegacyIndex[] = [
     compound: { orgId: 1, key: 1 },
     unlocks: 'Two organizations can hold different time slots and settings.',
   },
+  // ── Found by scripts/safety/index-audit.ts ───────────────────────────────
+  // Every one of these is a constraint that silently spans the whole platform.
+  // The failure mode is always the same and always quiet: the SECOND
+  // organization to use an ordinary value cannot save.
+  {
+    collection: 'attendancerules',
+    legacyName: 'role_1',
+    compound: { orgId: 1, role: 1 },
+    unlocks: 'Each organization can define its own role-level attendance rules.',
+  },
+  {
+    collection: 'holidays',
+    legacyName: 'date_1',
+    compound: { orgId: 1, date: 1 },
+    unlocks: 'Two organizations can declare a holiday on the same date.',
+  },
+  {
+    collection: 'roomallocations',
+    legacyName: 'date_1',
+    compound: { orgId: 1, date: 1 },
+    unlocks: 'Two organizations can seat students on the same exam date.',
+  },
+  {
+    collection: 'attendances',
+    legacyName: 'idempotencyKey_1',
+    compound: { orgId: 1, idempotencyKey: 1 },
+    unlocks:
+      'Two organizations can both have an employee punch code "101" without ' +
+      'the second one's attendance being swallowed as a duplicate.',
+  },
 ];
 
 function arg(flag: string): string | null {

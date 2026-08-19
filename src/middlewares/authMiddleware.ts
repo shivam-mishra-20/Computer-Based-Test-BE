@@ -5,6 +5,8 @@ export interface AuthPayload {
   id: string;
   role?: string;
   name?: string;
+  /** Present on tokens minted by the P2 audience-aware helpers. */
+  aud?: string;
 }
 
 export const authMiddleware = async (req: Request, res: Response, next: NextFunction) => {
@@ -29,7 +31,28 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as AuthPayload;
-    
+
+    // ── Audience, checked before anything else ────────────────────────────
+    // A platform-staff token must never authenticate a tenant request. It
+    // already failed here, but only by ACCIDENT: PlatformUser lives in its own
+    // collection, so `User.findById` found nothing and the request 401'd on
+    // "User not found". That is a coincidence of storage layout, not a
+    // security boundary — one shared collection, or one `upsert` on login, and
+    // the coincidence evaporates.
+    //
+    // Rejecting the audience explicitly makes it a boundary. `platformAuth`
+    // has always done the reverse check; this is the missing half.
+    //
+    // A token with NO `aud` is legacy and is accepted, exactly as before —
+    // every token in the field predates the audience work, and rejecting them
+    // would log out every user on deploy.
+    if (decoded.aud && decoded.aud !== 'tenant' && decoded.aud !== 'legacy') {
+      return res.status(403).json({
+        message: 'This credential is not valid here.',
+        code: 'TOKEN_AUDIENCE_MISMATCH',
+      });
+    }
+
     // Fetch user from DB to get profile and latest role/assignment metadata
     const User = require('../models/User').default;
     const user = await User.findById(decoded.id)
