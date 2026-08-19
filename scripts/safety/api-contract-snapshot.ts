@@ -178,7 +178,42 @@ function collect(): Endpoint[] {
     }
   }
 
+  // Fold in the app-level entitlement gates before sorting, so each endpoint's
+  // guard list is what a request actually passes through.
+  const moduleGates = readModuleGates();
+  for (const endpoint of endpoints) {
+    const gate = moduleGates.find(
+      ([prefix]) => endpoint.path === prefix || endpoint.path.startsWith(`${prefix}/`),
+    );
+    if (gate) endpoint.guards = [...endpoint.guards, `requireModule(${gate[1]})`];
+  }
+
   return endpoints.sort((a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
+}
+
+/**
+ * App-level module gates, from the `MODULE_GATED_ROUTES` table in app.ts.
+ *
+ * ── Why the parser has to know about these ──────────────────────────────────
+ * Entitlement gating is mounted with `app.use(prefix, requireModule(key))`,
+ * not on the route definitions. This parser reads ROUTE FILES, so it saw
+ * nothing: 23 endpoints gained a guard that can 403 a real customer and the
+ * contract snapshot reported "unchanged".
+ *
+ * A safety net that misses the change it exists to catch is worse than none,
+ * because it is trusted. Guards mounted at the app level are now resolved by
+ * prefix, longest first — `/api/admin/firebase` must win over `/api/admin`.
+ */
+function readModuleGates(): [string, string][] {
+  const source = readFileSync(APP_FILE, 'utf8');
+  const block = source.match(/const MODULE_GATED_ROUTES[^=]*=\s*\[([\s\S]*?)\];/);
+  if (!block) return [];
+  const gates: [string, string][] = [];
+  for (const match of block[1].matchAll(/\[\s*['"]([^'"]+)['"]\s*,\s*['"]([^'"]+)['"]\s*\]/g)) {
+    gates.push([match[1], match[2]]);
+  }
+  // Longest prefix first, so a more specific mount wins.
+  return gates.sort((a, b) => b[0].length - a[0].length);
 }
 
 function render(endpoints: Endpoint[]): string {

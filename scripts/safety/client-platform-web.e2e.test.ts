@@ -747,14 +747,25 @@ async function main() {
       );
       // The head count on the dashboard was reporting every user on the
       // platform to every institute — nine, for two organizations of four.
-      const totalUsers = await page.evaluate(() => {
+      // Wait for the STAT, not just for the tile. `contentReady()` resolves when
+      // the page has rendered, and the head count arrives afterwards — reading
+      // between the two returns null and looks exactly like the leak this check
+      // exists to catch.
+      const readTotalUsers = () => {
         const label = Array.from(document.querySelectorAll('*')).find(
           (el) => el.children.length === 0 && /^Total users$/.test((el.textContent || '').trim()),
         );
         const card = label?.closest('a') ?? label?.parentElement;
         const digits = (card?.textContent || '').match(/(\d[\d,]*)/);
         return digits ? Number(digits[1].replace(/,/g, '')) : null;
-      });
+      };
+      await page
+        .waitForFunction(
+          `(${readTotalUsers.toString()})() !== null`,
+          { timeout: 30000 },
+        )
+        .catch(() => {});
+      const totalUsers = await page.evaluate(readTotalUsers);
       check(
         "the user count is this organization's own, not the platform total",
         totalUsers !== null && totalUsers <= 6,
@@ -857,6 +868,48 @@ async function main() {
       return script ? script.src.split('/_next/static/')[1].split('/')[0] : null;
     });
     eq('the build identifier is the same as before the first tenant', buildAtEnd, buildAtStart);
+
+    // ══════════════════════════════════════════════════════════════════════
+    console.log('\n[10] entitlements are enforced by the SERVER, not just hidden');
+    // ══════════════════════════════════════════════════════════════════════
+    // Everything above proves the UI hides what an organization has not bought.
+    // Hiding is not enforcing: a client can be modified and `curl` ignores
+    // navigation entirely. These call the API directly, exactly as a determined
+    // user would.
+    const probe = async (token: string, path: string) => {
+      const res = await fetch(`${API_BASE}${path}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      let code: string | undefined;
+      try {
+        code = ((await res.json()) as { code?: string }).code;
+      } catch {
+        /* not json */
+      }
+      return { status: res.status, code };
+    };
+
+    const abcAi = await probe(t002, '/ai/questions/class/11/filters');
+    eq('ABC is refused the AI module at the API', abcAi.status, 403);
+    eq('and told why, in a machine-readable way', abcAi.code, 'MODULE_NOT_ENABLED');
+
+    const abcFirebase = await probe(t002, '/admin/firebase/stats');
+    eq('ABC is refused the integrations module', abcFirebase.status, 403);
+    check(
+      'which is what keeps a second tenant out of the single-tenant Firestore',
+      abcFirebase.code === 'MODULE_NOT_ENABLED',
+      JSON.stringify(abcFirebase),
+    );
+
+    const agAi = await probe(t001, '/ai/questions/class/11/filters');
+    check('Abhigyan, which has every module, is unaffected', agAi.status !== 403, JSON.stringify(agAi));
+
+    const abcExams = await probe(t002, '/exams');
+    check(
+      'and a module ABC DOES have is not refused',
+      abcExams.status !== 403,
+      JSON.stringify(abcExams),
+    );
 
     eq('no uncaught exceptions anywhere in the run', pageErrors, []);
     // Informational: the expected shape is HTTP status logging from the

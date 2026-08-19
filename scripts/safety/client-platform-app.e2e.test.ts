@@ -728,6 +728,78 @@ async function main() {
       return script ? script.src.split('/').pop() ?? null : null;
     });
     eq('the bundle filename is the same as before the first tenant', bundleAtEnd, bundleAtStart);
+    // ══════════════════════════════════════════════════════════════════════
+    console.log('\n[13] entitlements and isolation, enforced at the API');
+    // ══════════════════════════════════════════════════════════════════════
+    // A mobile binary is the easiest client to inspect and the easiest to point
+    // at a different server, so every gate the app applies has to hold when the
+    // app is bypassed entirely.
+    const teacher001Token = await login(ORG_001.teacher.email, ORG_001.teacher.password);
+    const probe = async (token: string, path: string) => {
+      const res = await fetch(`${API_BASE}${path}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      let body: unknown = null;
+      try {
+        body = await res.json();
+      } catch {
+        /* not json */
+      }
+      return { status: res.status, body: body as { code?: string } | null };
+    };
+
+    const abcAi = await probe(t002, '/ai/questions/class/11/filters');
+    eq('ABC is refused the AI module at the API, not merely in the UI', abcAi.status, 403);
+    eq('with a machine-readable reason', abcAi.body?.code, 'MODULE_NOT_ENABLED');
+
+    // A TEACHER token, deliberately. `/api/ai` is also `requireRole(teacher|admin)`,
+    // so a student is refused there for a completely different reason — and
+    // telling those two 403s apart is the entire point of this section. The
+    // code is what distinguishes them: a module denial says MODULE_NOT_ENABLED,
+    // a role denial does not.
+    const agAi = await probe(teacher001Token, '/ai/questions/class/11/filters');
+    check(
+      'Abhigyan, which has every module, is not refused for entitlement reasons',
+      agAi.body?.code !== 'MODULE_NOT_ENABLED',
+      `${agAi.status} ${JSON.stringify(agAi.body).slice(0, 80)}`,
+    );
+    const agStudentAi = await probe(t001, '/ai/questions/class/11/filters');
+    check(
+      "and a student's refusal there is a ROLE denial, not a module one",
+      agStudentAi.status === 403 && agStudentAi.body?.code !== 'MODULE_NOT_ENABLED',
+      `${agStudentAi.status} ${JSON.stringify(agStudentAi.body).slice(0, 80)}`,
+    );
+
+    // ── The practice-test isolation fix ──────────────────────────────────
+    // The per-class question collections are shared by every institute and are
+    // read through the raw driver, so no middleware protects them. This asks
+    // each organization for the same class and proves the banks are disjoint.
+    const bank = async (token: string) => {
+      const res = await fetch(`${API_BASE}/exams/questions/for-paper?class=11&limit=50`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const json = (await res.json()) as { items?: { text?: string }[] };
+      return (json.items ?? []).map((q) => q.text ?? '');
+    };
+    const agBank = await bank(teacher001Token);
+    const abcBank = await bank(teacher002);
+
+    check(
+      "Abhigyan's class-11 bank holds only its own questions",
+      agBank.length > 0 && agBank.every((t) => !t.includes('ABC Q')),
+      agBank.join(' | ').slice(0, 160),
+    );
+    check(
+      "ABC's class-11 bank holds only its own questions",
+      abcBank.length > 0 && abcBank.every((t) => !t.includes('AG Q')),
+      abcBank.join(' | ').slice(0, 160),
+    );
+    check(
+      'and the two banks share no question at all',
+      agBank.every((t) => !abcBank.includes(t)),
+      `AG ${agBank.length} · ABC ${abcBank.length}`,
+    );
+
     eq('no uncaught exceptions anywhere in the run', pageErrors.slice(0, 5), []);
   } finally {
     await browser.close();
