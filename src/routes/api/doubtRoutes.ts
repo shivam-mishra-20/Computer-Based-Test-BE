@@ -16,6 +16,8 @@ import FileMetadata from '../../models/FileMetadata';
 import { bucket } from '../../config/firebase';
 import SocketService from '../../services/SocketService';
 import { createAndSendNotification } from '../../services/notificationService';
+import { currentOrgId } from '../../core/tenancy';
+import { isLegacyPath, pathBelongsToOrg } from '../../core/storage/paths';
 import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
 
 interface AuthRequest extends Request {
@@ -54,14 +56,18 @@ router.post('/save-file-metadata', authMiddleware, uploadLimiter, async (req: Au
       return res.status(400).json({ error: 'Missing required fields' });
     }
 
-    // Make the file publicly accessible so the public URL works
-    try {
-      await bucket.file(storagePath).makePublic();
-    } catch (err) {
-      console.warn('[save-file-metadata] Could not make file public, will use signed URL:', err);
+    // ── No longer made public ───────────────────────────────────────────
+    // This endpoint records metadata for a file the CLIENT uploaded directly,
+    // and it used to make that object world-readable as a side effect. A path
+    // supplied by the caller is now checked against the caller's organization
+    // before it is recorded at all — otherwise a client could register, and
+    // then read, an arbitrary object belonging to someone else.
+    if (!isLegacyPath(storagePath) && !pathBelongsToOrg(storagePath, currentOrgId())) {
+      return res.status(403).json({ error: 'That file does not belong to your organization.' });
     }
 
-    const publicUrl = `https://storage.googleapis.com/${bucket.name}/${storagePath}`;
+    // The stored value is the PATH; it is signed per request on the way out.
+    const publicUrl = storagePath;
 
     // Save metadata to MongoDB
     const fileMetadata = new FileMetadata({

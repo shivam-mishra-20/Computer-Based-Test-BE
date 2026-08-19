@@ -84,6 +84,14 @@ const LEGACY_INDEXES: LegacyIndex[] = [
     unlocks: 'Two organizations can seat students on the same exam date.',
   },
   {
+    collection: 'filemetadatas',
+    legacyName: 'storagePath_1',
+    compound: { orgId: 1, storagePath: 1 },
+    unlocks:
+      'A storage path is unique per organization rather than platform-wide, ' +
+      'which is what the organizations/{orgId}/ prefix already guarantees.',
+  },
+  {
     collection: 'attendances',
     legacyName: 'idempotencyKey_1',
     compound: { orgId: 1, idempotencyKey: 1 },

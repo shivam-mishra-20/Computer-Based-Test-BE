@@ -4,6 +4,7 @@ import { AuthPayload } from '../middlewares/authMiddleware';
 import { uploadToFirebase } from '../services/firebaseService';
 import { normalizeClassValue, toClassLabel } from '../config/studentBatchConfig';
 import { getStudentBatchConfigFromDatabase, matchBatchName } from '../services/batchConfigService';
+import { putPublicTenantAsset } from '../core/storage/storageService';
 import { signSessionToken } from '../core/auth/tokens';
 
 const normalizeRegistrationSource = (value: unknown): 'website' | 'app' | 'unknown' => {
@@ -491,11 +492,18 @@ export const uploadProfileImage = async (req: Request, res: Response) => {
 
     // Generate unique filename
     const ext = file.originalname.split('.').pop() || 'jpg';
-    const fileName = `profile-images/${current.id}_${Date.now()}.${ext}`;
 
     // Upload to Firebase Storage
-    console.log('[UploadProfileImage] Uploading to Firebase Storage:', fileName);
-    const imageUrl = await uploadToFirebase(file.buffer, fileName, file.mimetype);
+    console.log('[UploadProfileImage] Uploading to Firebase Storage');
+    const imageUrl = (
+      await putPublicTenantAsset({
+        buffer: file.buffer,
+        fileName: `profile.${ext}`,
+        contentType: file.mimetype,
+        module: 'profile',
+        entityId: String(current.id),
+      })
+    ).url;
     console.log('[UploadProfileImage] Upload successful, URL:', imageUrl);
 
     // Update user's profile image URL
@@ -552,8 +560,17 @@ export const publicUploadProfileImage = async (req: Request, res: Response) => {
     }
 
     const ext = (file.originalname?.split('.').pop() || 'jpg').toLowerCase();
-    const fileName = `registration-profiles/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
-    const imageUrl = await uploadToFirebase(file.buffer, fileName, file.mimetype);
+    // Public registration: there is no signed-in user yet, and there may be no
+    // tenant context either. `putPublicTenantAsset` falls back to a flat path
+    // when it cannot attribute the file, which is the pre-migration behaviour.
+    const imageUrl = (
+      await putPublicTenantAsset({
+        buffer: file.buffer,
+        fileName: `profile.${ext}`,
+        contentType: file.mimetype,
+        module: 'profile',
+      })
+    ).url;
 
     res.status(201).json({ profileImage: imageUrl });
   } catch (err) {

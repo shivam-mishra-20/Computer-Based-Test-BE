@@ -32,6 +32,7 @@ import {
   type TimeSlot,
 } from '../../core/config/timeSlots';
 import { getOrgConfiguration } from '../../core/config/orgConfig';
+import { putTenantFile } from '../../core/storage/storageService';
 import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
 
 // Initialize Firebase Admin on module load
@@ -2309,11 +2310,16 @@ router.post(
       // Upload the ORIGINAL bytes (not the downscaled copy sent to the model) so the
       // review screen's compare-to-original panel is full quality.
       const ext = (req.file.mimetype.split('/')[1] || 'jpg').replace('jpeg', 'jpg');
-      const imageUrl = await uploadToFirebase(
-        req.file.buffer,
-        `schedule-imports/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`,
-        req.file.mimetype
-      );
+      // Org-namespaced. A schedule photo is an internal working document, so it
+      // is uploaded PRIVATE and the review screen fetches it through a signed
+      // URL like every other tenant file.
+      const storedImage = await putTenantFile({
+        buffer: req.file.buffer,
+        fileName: `schedule-import.${ext}`,
+        contentType: req.file.mimetype,
+        module: 'schedule',
+      });
+      const imageUrl = storedImage.storagePath;
 
       const [batchConfig, teacherDocs] = await Promise.all([
         getStudentBatchConfigFromDatabase(),

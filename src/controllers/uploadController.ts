@@ -1,4 +1,5 @@
 import { Request, Response } from 'express';
+import { putPublicTenantAsset } from '../core/storage/storageService';
 import { uploadToFirebase } from '../services/firebaseService';
 
 // Handles single image upload (expects req.file from multer)
@@ -12,19 +13,19 @@ export const uploadImageCtrl = async (req: Request, res: Response) => {
 
     // Create a unique filename preserving extension
     const safeBase = (file.originalname || 'image').replace(/[^a-zA-Z0-9-_\.]/g, '_');
-    const ts = Date.now();
-    const fileName = `images/${ts}_${safeBase}`;
+    // Org-namespaced: `images/{ts}_{name}` carried no organization and was
+    // unique only if no two uploads shared a millisecond.
 
     // Upload to Firebase Storage
-    console.log(`Uploading image to Firebase: ${fileName}`);
-    const publicUrl = await uploadToFirebase(
-      file.buffer,
-      fileName,
-      file.mimetype || 'image/jpeg'
-    );
+    const stored = await putPublicTenantAsset({
+      buffer: file.buffer,
+      fileName: safeBase,
+      contentType: file.mimetype || 'image/jpeg',
+      module: 'images',
+    });
 
-    console.log(`Image uploaded successfully: ${publicUrl}`);
-    res.status(201).json({ url: publicUrl, fileName });
+    console.log(`Image uploaded successfully: ${stored.storagePath}`);
+    res.status(201).json({ url: stored.url, fileName: stored.storagePath });
   } catch (err: any) {
     console.error('Failed to upload image to Firebase:', err);
     res.status(500).json({ 

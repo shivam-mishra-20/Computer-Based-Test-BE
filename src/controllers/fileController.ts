@@ -1,6 +1,9 @@
 import { Request, Response } from 'express';
 import { bucket } from '../config/firebase';
 import FileMetadata from '../models/FileMetadata';
+import { currentOrgId, tenantScope } from '../core/tenancy';
+import { isLegacyPath, pathBelongsToOrg } from '../core/storage/paths';
+import { putTenantFile, resolveFileUrl } from '../core/storage/storageService';
 import mongoose from 'mongoose';
 
 // Allowed MIME types
@@ -75,42 +78,22 @@ export const uploadDoubtFile = async (req: AuthRequest, res: Response) => {
     const fileExtension = file.originalname.split('.').pop();
     const sanitizedFilename = `${timestamp}_${file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
 
-    // Storage path structure: /doubts/{doubtId}/{messageId}/{timestamp}_{originalFileName}
-    const storagePath = messageId
-      ? `doubts/${doubtId}/${messageId}/${sanitizedFilename}`
-      : `doubts/${doubtId}/${sanitizedFilename}`;
-
-    // Upload to Firebase Storage
-    const blob = bucket.file(storagePath);
-    const blobStream = blob.createWriteStream({
-      metadata: {
-        contentType: file.mimetype,
-        metadata: {
-          uploadedBy: req.user?._id || req.user?.id,
-          doubtId,
-          messageId: messageId || '',
-          originalName: file.originalname,
-        },
-      },
-      resumable: false,
+    // ── Tenant-safe and PRIVATE ─────────────────────────────────────────
+    // A doubt attachment is a photograph of a student's homework. It was
+    // uploaded under `doubts/{doubtId}/…` and then made WORLD-READABLE, so
+    // anyone with the URL — or willing to guess an ObjectId — could read it.
+    // It is now private under organizations/{orgId}/ and reachable only
+    // through a signed URL minted for someone whose organization owns it.
+    const stored = await putTenantFile({
+      buffer: file.buffer,
+      fileName: sanitizedFilename,
+      contentType: file.mimetype,
+      module: 'doubts',
+      entityId: messageId ? `${doubtId}_${messageId}` : String(doubtId),
     });
-
-    await new Promise<void>((resolve, reject) => {
-      blobStream.on('error', (err) => {
-        console.error('Firebase upload error:', err);
-        reject(err);
-      });
-
-      blobStream.on('finish', () => {
-        resolve();
-      });
-
-      blobStream.end(file.buffer);
-    });
-
-    // Make file public and get permanent public URL
-    await blob.makePublic();
-    const publicUrl = `https://storage.googleapis.com/${bucket.name}/${storagePath}`;
+    const storagePath = stored.storagePath;
+    // The stored value is the PATH. `getFileSignedUrl` signs it per request.
+    const publicUrl = storagePath;
 
     // Save metadata to MongoDB
     const fileMetadata = new FileMetadata({
@@ -157,29 +140,46 @@ export const uploadDoubtFile = async (req: AuthRequest, res: Response) => {
  * Get fresh signed URL for an existing file
  * GET /api/doubts/files/:fileId/url
  */
+/**
+ * A URL for a file the caller is entitled to.
+ *
+ * ── What this used to do ────────────────────────────────────────────────────
+ * Despite the name, it returned a PERMANENT PUBLIC URL with
+ * `expiresIn: 'never'`, and it performed no ownership check at all — any
+ * authenticated user of any organization could exchange any file id for a URL
+ * that never expired. The lookup was `findById` with no tenant scope, so under
+ * `warn` it resolved another institute's file quite happily.
+ *
+ * Now: scoped lookup, explicit organization check, and a real signed URL that
+ * expires. Legacy objects still carry a public ACL that only a supervised
+ * production migration can remove, so for those the honest answer is the
+ * public URL — but it is only handed to someone whose organization owns the
+ * record.
+ */
 export const getFileSignedUrl = async (req: AuthRequest, res: Response) => {
   try {
     const { fileId } = req.params;
 
-    const fileMetadata = await FileMetadata.findById(fileId);
+    const orgId = currentOrgId();
+    const fileMetadata = await FileMetadata.findOne({ _id: fileId, ...tenantScope() });
 
     if (!fileMetadata) {
       return res.status(404).json({ error: 'File not found' });
     }
 
-    // Return permanent public URL (no expiration)
-    const publicUrl = `https://storage.googleapis.com/${bucket.name}/${fileMetadata.storagePath}`;
-
-    // Update URL in database if different
-    if (fileMetadata.url !== publicUrl) {
-      fileMetadata.url = publicUrl;
-      await fileMetadata.save();
+    // Defence in depth: the row was already scoped, and the PATH is checked
+    // too, so a mis-stamped row cannot leak an object it does not own.
+    if (!isLegacyPath(fileMetadata.storagePath) && !pathBelongsToOrg(fileMetadata.storagePath, orgId)) {
+      return res.status(403).json({ error: 'This file does not belong to your organization.' });
     }
+
+    const url = await resolveFileUrl(fileMetadata.storagePath, { orgId });
+    if (!url) return res.status(404).json({ error: 'File not available' });
 
     return res.json({
       success: true,
-      url: publicUrl,
-      expiresIn: 'never',
+      url,
+      expiresIn: isLegacyPath(fileMetadata.storagePath) ? 'never (legacy public object)' : '7d',
     });
   } catch (error) {
     console.error('Error generating signed URL:', error);
@@ -198,13 +198,17 @@ export const deleteDoubtFile = async (req: AuthRequest, res: Response) => {
   try {
     const { fileId } = req.params;
 
-    const fileMetadata = await FileMetadata.findById(fileId);
+    // Scoped: `findById` alone resolved another organization's file, and the
+    // admin branch below would then have let THEIR admin delete it.
+    const fileMetadata = await FileMetadata.findOne({ _id: fileId, ...tenantScope() });
 
     if (!fileMetadata) {
       return res.status(404).json({ error: 'File not found' });
     }
 
-    // Check if user is authorized (file owner or admin)
+    // Check if user is authorized (file owner or admin OF THIS ORGANIZATION —
+    // the row is already scoped, so `role === 'admin'` can no longer reach
+    // across the tenant boundary).
     if (
       fileMetadata.uploadedBy.toString() !== req.user?._id &&
       fileMetadata.uploadedBy.toString() !== req.user?.id &&
