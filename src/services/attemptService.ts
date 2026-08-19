@@ -7,6 +7,7 @@ import ExamEvaluation from '../models/ExamEvaluation';
 import { computeMaxScoreForExam, sanitizeQuestion, shuffleArray } from '../utils/exam';
 import { getDeadline, getStartWindowState, getSubmitUnlockAt, isPastDeadline } from '../utils/examTiming';
 import { gradeSubjectiveAnswerGroq } from './aiService';
+import { tenantScope } from '../core/tenancy';
 import { getClassQuestionModel } from '../models/ClassQuestion';
 
 function makeError(message: string, code: string, extra?: Record<string, any>) {
@@ -156,7 +157,9 @@ export async function startAttempt(examId: string, userId: string) {
   let questions: IQuestion[];
   if (exam.classLevel) {
     const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
-    questions = await ClassQuestionModel.find({ _id: { $in: qids } });
+    // Scoped: the per-class collections are shared across organizations, and an
+    // exam must never resolve a question belonging to another institute.
+    questions = await ClassQuestionModel.find({ _id: { $in: qids }, ...tenantScope() });
   } else {
     questions = await Question.find({ _id: { $in: qids } });
   }
@@ -307,7 +310,9 @@ export async function getAttemptView(attemptId: string, userId: string) {
   let questions: IQuestion[];
   if (exam.classLevel) {
     const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
-    questions = await ClassQuestionModel.find({ _id: { $in: qids } });
+    // Scoped: the per-class collections are shared across organizations, and an
+    // exam must never resolve a question belonging to another institute.
+    questions = await ClassQuestionModel.find({ _id: { $in: qids }, ...tenantScope() });
   } else {
     questions = await Question.find({ _id: { $in: qids } });
   }
@@ -440,7 +445,9 @@ export async function getAttemptViewForTeacher(attemptId: string) {
   let questions: IQuestion[];
   if (exam.classLevel) {
     const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
-    questions = await ClassQuestionModel.find({ _id: { $in: qids } });
+    // Scoped: the per-class collections are shared across organizations, and an
+    // exam must never resolve a question belonging to another institute.
+    questions = await ClassQuestionModel.find({ _id: { $in: qids }, ...tenantScope() });
   } else {
     questions = await Question.find({ _id: { $in: qids } });
   }
@@ -1023,7 +1030,9 @@ export async function nextAdaptiveQuestion(attemptId: string, userId: string) {
   let questions: IQuestion[];
   if (exam.classLevel) {
     const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
-    questions = await ClassQuestionModel.find({ _id: { $in: qids } });
+    // Scoped: the per-class collections are shared across organizations, and an
+    // exam must never resolve a question belonging to another institute.
+    questions = await ClassQuestionModel.find({ _id: { $in: qids }, ...tenantScope() });
   } else {
     questions = await Question.find({ _id: { $in: qids } });
   }

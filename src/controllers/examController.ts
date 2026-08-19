@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { Types } from 'mongoose';
 import { assignExam, createExam, createQuestion, deleteExam, deleteQuestion, getExam, listExams, listQuestions, updateExam, updateQuestion, createBlueprint, listBlueprints, updateBlueprint, deleteBlueprint, createExamFromPaper } from '../services/examService';
 import { logAudit } from '../utils/logger';
+import { tenantScope } from '../core/tenancy';
 import type { GeneratedPaperResult } from '../services/aiService';
 
 export const createQuestionCtrl = async (req: Request, res: Response) => {
@@ -148,7 +149,11 @@ export const getTopicsCtrl = async (req: Request, res: Response) => {
     const { getClassQuestionModel } = await import('../models/ClassQuestion');
     const ClassQuestion = getClassQuestionModel(className);
 
-    const filter: any = { isActive: true };
+    // Scoped by organization explicitly. The tenancy plugin filters reads only
+    // under `enforce`, and the per-class question collections are shared across
+    // every institute — without this, one organization's teacher browsing a
+    // class sees another institute's question bank.
+    const filter: any = { isActive: true, ...tenantScope() };
     if (subject) filter.subject = subject;
     if (board) filter.board = board;
 
@@ -198,7 +203,11 @@ export const getQuestionsForPaperCtrl = async (req: Request, res: Response) => {
     const ClassQuestion = getClassQuestionModel(className);
 
   const ci = (v?: string) => (v && v.trim() ? new RegExp(`^${v.trim().replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}$`, 'i') : undefined);
-  const filter: any = { isActive: true };
+  // Scoped by organization explicitly. The tenancy plugin filters reads only
+  // under `enforce`, and the per-class question collections are shared across
+  // every institute — without this, one organization's teacher browsing a
+  // class sees another institute's question bank.
+  const filter: any = { isActive: true, ...tenantScope() };
   const subj = ci(subject);
   const top = ci(topic);
   const diff = ci(difficulty);
@@ -253,7 +262,11 @@ export const getChaptersCtrl = async (req: Request, res: Response) => {
     const ClassQuestion = getClassQuestionModel(className);
 
   const ci = (v?: string) => (v && v.trim() ? new RegExp(`^${v.trim().replace(/[.*+?^${}()|[\\]\\]/g, "\\$&")}$`, 'i') : undefined);
-  const filter: any = { isActive: true };
+  // Scoped by organization explicitly. The tenancy plugin filters reads only
+  // under `enforce`, and the per-class question collections are shared across
+  // every institute — without this, one organization's teacher browsing a
+  // class sees another institute's question bank.
+  const filter: any = { isActive: true, ...tenantScope() };
   const subj = ci(subject);
   const brd = ci(board);
   if (subj) filter.subject = subj;
