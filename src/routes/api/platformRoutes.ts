@@ -35,9 +35,118 @@ import {
   OrgSlugTaken,
 } from '../../core/platform/organizations';
 import type { PlatformRequestUser } from '../../middlewares/platformAuth';
-import { PLATFORM_ROLES } from '../../models/PlatformUser';
+import { PLATFORM_ROLES, platformCapabilities } from '../../models/PlatformUser';
+import { signPlatformToken } from '../../core/auth/tokens';
+import { authLimiter } from '../../middlewares/rateLimiter';
+import bcrypt from 'bcrypt';
+
+/**
+ * A real bcrypt hash of a value nobody knows, compared against when the account
+ * does not exist so that a missing account and a wrong password take the same
+ * time. Without it, "unknown email" returns in microseconds and "wrong
+ * password" takes ~80ms, which is a perfectly usable account oracle.
+ */
+const DUMMY_HASH = '$2b$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy';
 
 const router = Router();
+
+/**
+ * POST /api/platform/login — the ONLY unauthenticated route on this surface.
+ *
+ * ── Why it is declared above `router.use(platformAuthMiddleware)` ───────────
+ * The guard below is deliberately structural: every route added after it is
+ * protected whether or not its author remembered to say so. Login is the one
+ * route that cannot be, because it is what produces the credential. Putting it
+ * here — above the guard, alone, with a comment — makes the exception visible
+ * instead of hiding it behind a per-route opt-out that the next endpoint could
+ * copy by accident.
+ *
+ * ── What it deliberately does not do ────────────────────────────────────────
+ * It does not look at tenancy. There is no `orgId` in the request, none in the
+ * response, and none in the token: platform staff belong to no organization by
+ * definition, and a platform token carrying one would invite exactly the
+ * confusion the separate audience exists to prevent.
+ *
+ * It also does not implement authentication. Password comparison lives on the
+ * model, token minting in `core/auth/tokens`, revocation in `tokenVersion` —
+ * all of which already existed. This route composes them.
+ */
+router.post('/login', authLimiter, async (req: Request, res: Response) => {
+  try {
+    const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+    const password = typeof req.body?.password === 'string' ? req.body.password : '';
+
+    // Bounded before anything touches the database. bcrypt on an unbounded
+    // string is a denial-of-service primitive.
+    if (!email || !password || email.length > 254 || password.length > 200) {
+      return res.status(400).json({ message: 'Email and password are required.' });
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const PlatformUser = require('../../models/PlatformUser').default;
+    const staff = await PlatformUser.findOne({ email });
+
+    /**
+     * ONE message for unknown-account, wrong-password and disabled-account.
+     *
+     * Distinguishing them turns this endpoint into an oracle that confirms
+     * which of your staff addresses are real — useful to nobody but an
+     * attacker, since a legitimate operator who has forgotten which is wrong
+     * asks a colleague rather than the login form.
+     *
+     * The bcrypt comparison runs even when the account does not exist, so the
+     * response time does not leak the answer either.
+     */
+    const DENIED = { message: 'Invalid credentials.' };
+    const hash = staff?.password ?? DUMMY_HASH;
+    const passwordMatches = await bcrypt.compare(password, hash);
+
+    if (!staff || !passwordMatches || !staff.isActive) {
+      return res.status(401).json(DENIED);
+    }
+
+    const token = signPlatformToken({
+      id: String(staff._id),
+      role: staff.role,
+      // Carried so a bump to `tokenVersion` revokes this token immediately,
+      // rather than at expiry. `platformAuthMiddleware` compares them.
+      tokenVersion: staff.tokenVersion,
+    });
+
+    staff.lastLoginAt = new Date();
+    await staff.save();
+
+    // The audit actor is normally read from `req.platformUser`, which the
+    // guard sets — and the guard did not run here. Setting it now is accurate:
+    // authentication has just succeeded, and this IS who acted.
+    (req as Request & { platformUser?: PlatformRequestUser }).platformUser = {
+      id: String(staff._id),
+      role: staff.role,
+      capabilities: platformCapabilities(staff.role),
+    };
+    await recordPlatformAction(req, {
+      action: 'platform.login',
+      entity: 'PlatformUser',
+      entityId: String(staff._id),
+    });
+
+    // No password, no hash, no tokenVersion. The console needs identity and
+    // capabilities; anything else here is a field someone later logs.
+    return res.json({
+      token,
+      user: {
+        id: String(staff._id),
+        name: staff.name,
+        email: staff.email,
+        role: staff.role,
+        capabilities: platformCapabilities(staff.role),
+      },
+    });
+  } catch (error) {
+    console.error('[platform/login] failed:', (error as Error).message);
+    return res.status(500).json({ message: 'Login failed.' });
+  }
+});
 
 router.use(platformAuthMiddleware);
 

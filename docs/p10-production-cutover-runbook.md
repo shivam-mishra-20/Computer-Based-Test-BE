@@ -419,11 +419,13 @@ like data corruption.
 
 # STEP 10 — Platform console
 
-**BLOCKED — see blockers below.** The console cannot be operated in production
-as it stands.
+**UNBLOCKED by P10A** — see the addendum at the end of this document. The
+console now signs in with an email and a password against
+`POST /api/platform/login`, and `scripts/bootstrap-platform-owner.ts` creates
+the first account.
 
-Once unblocked, configuration is: `NEXT_PUBLIC_PLATFORM_API` → api-platform's
-hostname; deploy privately (the repo already sets noindex / DENY / no-referrer).
+Configuration: `NEXT_PUBLIC_API_BASE_URL` → api-platform's hostname; deploy
+privately (the repo already sets noindex / DENY / no-referrer).
 
 Verify: staff login, organization list, org detail (6 tabs), plan CRUD,
 subscription change, module list, audit log, and the onboarding wizard.
@@ -549,7 +551,7 @@ flipping Storage ACLs without a recorded list. Everything else is reversible.
 | 22 | PLATFORM | Deploy api-platform | 21 | `/api/health` 200 | Error | Stop service |
 | 23 | PLATFORM | Move cron; disable on old | 22 | Runs once | Twice | Re-enable old |
 | 24 | PLATFORM | `/api/me/context` resolves Org 001 | 22 | Name correct | Null | Rollback 22 |
-| 25 | PLATFORM | **Create first platform staff account** | 22 | Can log in | **BLOCKED** | — |
+| 25 | PLATFORM | **Create first platform staff account** (`bootstrap-platform-owner.ts --production`) | 22 | Can log in at the console | Refusal | `--remove` on scratch only; disable via console in production |
 | 26 | PLATFORM | Deploy platform-console | 25 | Console loads | Error | Stop service |
 | 27 | ORG 002 | Onboard via console | 26 | 8 steps complete | Any fail | Delete Org |
 | 28 | ORG 002 | Isolation suites | 27 | web 109, mobile 99 | Any fail | **STOP** |
@@ -563,24 +565,24 @@ flipping Storage ACLs without a recorded list. Everything else is reversible.
 
 # ## NOT READY FOR PRODUCTION CUTOVER
 
+> **Status after P10A:** blockers 1 and 2 are closed. Blockers 3 and 4 —
+> production deployment state and Firebase credentials — are unchanged, and both
+> require you. The verdict below is the P10 assessment, kept as written; the
+> addendum at the end of this document records what changed.
+
 Steps 1–8 (through index migration) **are** ready — the tooling is written,
 rehearsed and verified. What is not ready is the platform half.
 
 ### Concrete blockers
 
-1. **No platform login endpoint.** There is no `POST /api/platform/login`
-   anywhere in the 487-endpoint contract. `platform-console` expects a token to
-   already be in `sessionStorage`; during P5 those were minted by a test script.
-   Nobody can sign in to the console in production.
+1. ~~**No platform login endpoint.**~~ **RESOLVED — P10A.** `POST
+   /api/platform/login` exists, declared above `router.use(platformAuthMiddleware)`
+   so that signing in does not require already being signed in. Contract entry
+   488.
 
-2. **No way to create the first platform staff account.** `PlatformUser` is
-   created in exactly two places: `POST /api/platform/staff`, which itself
-   requires an authenticated platform user with `staff.manage`, and
-   `mint-platform-tokens.ts`, which creates `@platform.test` accounts carrying a
-   test marker. That is a bootstrap deadlock.
-
-   *Both are small — one route and one seed script — but neither exists, and
-   together they block Steps 10, 11 and every future onboarding.*
+2. ~~**No way to create the first platform staff account.**~~ **RESOLVED —
+   P10A.** `scripts/bootstrap-platform-owner.ts` creates exactly one
+   `PlatformUser` and refuses once an owner exists.
 
 3. **Production deployment state is unverified.** I could not reach Railway,
    Vercel, Firebase or DNS. Step 5 depends on knowing the current environment
@@ -591,7 +593,8 @@ rehearsed and verified. What is not ready is the platform half.
    mechanism P9A's privacy rests on — have never been executed against a real
    bucket.
 
-Blockers 1 and 2 are code. 3 and 4 are things only you can check.
+Blockers 1 and 2 were code, and P10A closed them. **3 and 4 remain, and
+both are things only you can check.**
 
 ---
 
@@ -608,10 +611,7 @@ Blockers 1 and 2 are code. 3 and 4 are things only you can check.
 - All scratch rehearsals against `*_restore_*` databases.
 - `safety:all` (12 suites), `legacy-regression`, `two-org`, `platform-e2e`, and
   the web/mobile isolation suites.
-- **The two missing pieces**, if you want them: a platform login route
-  (email + password → platform-audience token, mirroring the existing
-  `platformAuthMiddleware` contract) and a `bootstrap-platform-owner.ts` seed
-  script guarded like `seed-org-001`.
+- ~~The two missing pieces~~ — **built in P10A.** See the addendum.
 - A `FileMetadata` ownership backfill script for Step 12.3.
 
 ### Production actions I must not execute
@@ -631,3 +631,147 @@ Out of scope here, and unchanged: **billing** (no payment gateway exists
 anywhere — `Plan.price` is a display field), **usage metering** (`UsageRecord`
 has no writer), **per-tenant monitoring/alerting**, **tenant data export and
 deletion**, and the **Firestore decision** for `abhigyan-gurukul-main`.
+
+---
+
+# ADDENDUM — P10A: platform authentication and bootstrap
+
+*Implemented after P10, on `phase/p10a-platform-auth`. Scope was exactly the two
+code blockers above and nothing else.*
+
+## What was built
+
+### 1. `POST /api/platform/login`
+
+`src/routes/api/platformRoutes.ts`. Email and password in; a `platform`-audience
+token and the caller's identity and capabilities out.
+
+Four properties are worth stating because each one is a decision, not a default:
+
+- **Declared above `router.use(platformAuthMiddleware)`.** That guard is
+  structural — every route added after it is protected whether or not its author
+  remembered — and login is the one route that cannot be, because it is what
+  produces the credential. The API-contract snapshot is what proves the ordering
+  survived: entry 488 reads `[authLimiter]` with no `platformAuthMiddleware`. A
+  login route mounted below the guard would need a platform session in order to
+  create one, and it would look completely normal in the source.
+- **One message for three outcomes.** Unknown account, wrong password and
+  disabled account all return `401 {"message":"Invalid credentials."}`. bcrypt
+  runs against a fixed dummy hash when the account does not exist, so the
+  response *time* does not answer the question the message declines to.
+- **No tenancy anywhere.** No `orgId` in the request, the response or the token.
+  Platform staff belong to no organization; a platform token carrying one would
+  invite exactly the confusion the separate audience exists to prevent.
+- **It implements no authentication of its own.** Password comparison is on the
+  model, minting is in `core/auth/tokens`, revocation is `tokenVersion`. This
+  route composes three things that already existed.
+
+Inputs are bounded (email ≤ 254, password ≤ 200) *before* the database is
+touched — bcrypt on an unbounded string is a denial-of-service primitive.
+
+### 2. `scripts/bootstrap-platform-owner.ts`
+
+Creates the first `PlatformUser` and nothing else: no organization, no tenant
+user, no tenant role. Guarded like `seed-org-001`, and then harder:
+
+| Guard | Behaviour |
+|---|---|
+| No target named | Refuses. `--scratch-suffix` or `--production`, never a guess. |
+| `--production` | Also requires `PLATFORM_BOOTSTRAP_ACK='I am creating a platform owner account'`. |
+| An owner already exists | Refuses and points at the console, which checks `staff.manage` and records who acted. |
+| Same email exists | Reports and changes nothing. The password is **not** reset. |
+| `--remove --production` | Refused outright. Disable through the console instead — that bumps `tokenVersion`, so outstanding tokens die immediately rather than at expiry. |
+| Password | From `PLATFORM_OWNER_PASSWORD` or a muted interactive prompt. Never a flag, never defaulted, never printed — not on success, not in an error. Minimum 12 characters, length only. |
+
+The account is created with `new` + `save()` so the model's pre-save hook hashes
+the password. `create()` with a pre-hashed value is how a plaintext password
+reaches a database.
+
+The creation is written to `PlatformAudit` via a new `recordPlatformEvent()` —
+the request-scoped writer reads its actor from `req.platformUser`, and a CLI has
+no request. Faking one would make the audit record lie about where the action
+came from.
+
+### 3. Console sign-in
+
+`platform-console` replaced its token-paste field with an email/password form
+calling the new route. The token stays in `sessionStorage` — the most privileged
+credential in the system should not outlive the tab.
+
+## Verification
+
+Everything below ran against **scratch databases** on the same Atlas cluster.
+Nothing touched `abhigyangurukul`.
+
+| Suite | Checks | Result |
+|---|---|---|
+| `safety:all` (14 suites) | — | pass (exit 0) |
+| `platform-auth.test.ts` | 61 | pass |
+| `console-login.e2e.test.ts` (new) | 39 | pass |
+| `console-ui.e2e.test.ts` | 39 | pass |
+| `token-audience.test.ts` | 9 | pass |
+| `platform-onboarding.e2e.test.ts` | 51 | pass |
+| `two-org-isolation.test.ts` | 9 | pass |
+| `legacy-regression.test.ts` | 32 | pass |
+| `appsetting-tenancy.test.ts` | 13 | pass |
+| `safety:api-check` | 488 endpoints | unchanged vs new baseline |
+
+`console-login.e2e.test.ts` drives a real Chrome against the real console and
+the real API — it types credentials into the form rather than injecting a token,
+which is the only arrangement that can catch a mis-mounted login route. It
+covers the unauthenticated gate, wrong password, unknown account, the two being
+indistinguishable, owner sign-in, audience and absent `orgId` in the stored
+token, session survival across reload, sign-out, a malformed token, a **tenant**
+token being refused by both the console and the server, and support capability
+filtering — asserting the server's 403 as well as the hidden nav, because only
+the former is a control.
+
+## Contract change
+
+```
++ POST   /api/platform/login                                         [authLimiter]
+```
+
+One addition. Nothing removed, and **no other route's guard list changed** —
+verified by diffing `api-contract-2026-08-19.txt` against
+`api-contract-2026-08-21.txt`, which is now the check target.
+
+One snapshot-tool fix was needed to produce that diff honestly: the parser
+applied `router.use(...)` guards to every route in a file regardless of
+declaration order, so it reported the new login route as authenticated when it
+is not. It now respects order. No other route's recorded guards changed as a
+result — which is the check that says the fix was a fix and not a cover-up.
+
+## What this does NOT unblock
+
+Blockers 3 and 4 stand. Production deployment state is still unverified, and the
+local Firebase service-account key still fails `invalid_grant` for Storage,
+Firestore and Auth — that is *this machine's* key, and says nothing either way
+about production's, which is precisely why it needs checking by someone who can
+reach the console.
+
+## Running it
+
+```bash
+# 1. Scratch rehearsal — bootstrap the first owner
+PLATFORM_OWNER_EMAIL=you@example.com PLATFORM_OWNER_NAME="Your Name" \
+  npx ts-node --transpile-only scripts/bootstrap-platform-owner.ts \
+    --scratch-suffix restore_YYYY_MM_DD
+
+# 2. Auth + bootstrap suite (needs a scratch DB with NO platform users)
+P10A_MONGO_URI=<scratch> npm run safety:platform-auth
+
+# 3. Console login suite (needs api-platform + console running)
+npm run safety:seed-console-login   # CONSOLE_FIXTURE_MONGO_URI=<scratch>
+API_URL=http://127.0.0.1:5055 CONSOLE_URL=http://127.0.0.1:3100 \
+  npm run safety:console-login
+```
+
+Production (Step 25) is yours to run:
+
+```bash
+PLATFORM_OWNER_EMAIL=… PLATFORM_OWNER_NAME=… \
+PLATFORM_BOOTSTRAP_ACK='I am creating a platform owner account' \
+  npx ts-node --transpile-only scripts/bootstrap-platform-owner.ts --production
+# password prompted, not echoed
+```

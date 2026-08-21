@@ -146,14 +146,14 @@ function expandSpreads(args: string, source: string): string {
  * Only `router.use()` calls with no path argument are file-wide; a call like
  * `router.use('/sub', x)` is scoped and is deliberately ignored here.
  */
-function extractRouterLevelGuards(source: string): string[] {
-  const guards: string[] = [];
+function extractRouterLevelGuards(source: string): { guards: string[]; at: number }[] {
+  const found: { guards: string[]; at: number }[] = [];
   for (const match of source.matchAll(/router\s*\.\s*use\s*\(\s*([^)]*(?:\([^)]*\))?[^)]*)\)\s*;/g)) {
     const args = match[1];
     if (/^\s*['"`]/.test(args)) continue; // path-scoped, not file-wide
-    guards.push(...extractGuards(args));
+    found.push({ guards: extractGuards(args), at: match.index ?? 0 });
   }
-  return [...new Set(guards)];
+  return found;
 }
 
 function collect(): Endpoint[] {
@@ -164,13 +164,23 @@ function collect(): Endpoint[] {
     const moduleName = file.replace(/\.ts$/, '');
     const prefixes = mounts.get(moduleName) ?? ['(unmounted)'];
     const source = readFileSync(join(ROUTES_DIR, file), 'utf8');
-    const fileGuards = extractRouterLevelGuards(source);
+    const routerGuards = extractRouterLevelGuards(source);
 
     for (const match of source.matchAll(
       /router\s*\.\s*(get|post|put|patch|delete|all)\s*\(\s*(['"`])([^'"`]*)\2\s*([\s\S]*?)\)\s*;/g,
     )) {
       const [, method, , routePath, rest] = match;
-      const guards = [...new Set([...fileGuards, ...extractGuards(expandSpreads(rest, source))])];
+      // ── Declaration ORDER decides which router.use() guards apply ────────
+      // Express applies middleware in the order it is registered, so a route
+      // declared ABOVE `router.use(guard)` is not protected by it. Attributing
+      // file-wide guards to every route regardless of position made the one
+      // deliberately unauthenticated route on the platform surface —
+      // POST /platform/login — read as `[platformAuthMiddleware]` in the
+      // contract. A security review artifact that reports an open route as
+      // guarded is worse than one that omits it.
+      const declaredAt = match.index ?? 0;
+      const applicable = routerGuards.filter((g) => g.at < declaredAt).flatMap((g) => g.guards);
+      const guards = [...new Set([...applicable, ...extractGuards(expandSpreads(rest, source))])];
       for (const prefix of prefixes) {
         const full = `${prefix}${routePath}`.replace(/\/+/g, '/').replace(/\/$/, '') || '/';
         endpoints.push({ method: method.toUpperCase(), path: full, guards, source: moduleName });

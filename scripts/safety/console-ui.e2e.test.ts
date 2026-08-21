@@ -172,7 +172,16 @@ async function main() {
     console.log('session gate');
     await signOutHard();
     await page.waitForSelector('form', { timeout: 20000 });
-    check('no token shows the sign-in screen', (await text()).includes('Platform token'));
+    // The gate now asks for a credential rather than for a pasted token — see
+    // console-login.e2e.test.ts, which exercises that form for real. Here it is
+    // only the "no session" branch that matters, so assert on the fields that
+    // identify the screen rather than on prose.
+    check(
+      'no token shows the sign-in screen',
+      (await page.$('[data-testid="login-email"]')) !== null &&
+        (await page.$('[data-testid="login-password"]')) !== null,
+      (await text()).slice(0, 200),
+    );
     await shot('01-signin');
 
     // ── Owner session ─────────────────────────────────────────────────────

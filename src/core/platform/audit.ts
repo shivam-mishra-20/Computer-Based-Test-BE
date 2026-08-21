@@ -98,3 +98,49 @@ export async function listPlatformAudit(query: AuditQuery) {
       .lean();
   });
 }
+
+/**
+ * Record a platform action that happened OUTSIDE a request.
+ *
+ * ── Why this exists ─────────────────────────────────────────────────────────
+ * `recordPlatformAction` reads its actor from `req.platformUser`, which the
+ * platform guard sets. A command-line bootstrap has no request and no guard —
+ * but creating the first platform owner is precisely the kind of event an audit
+ * trail exists for, and the alternative was faking a request object, which
+ * makes the audit record lie about where the action came from.
+ *
+ * The actor is stated explicitly instead, and `ip` is left unset because there
+ * genuinely was not one.
+ */
+export async function recordPlatformEvent(input: {
+  action: string;
+  actorId?: string;
+  actorEmail?: string;
+  actorRole?: string;
+  entity?: string;
+  entityId?: string;
+  metadata?: Record<string, unknown>;
+}): Promise<void> {
+  try {
+    await withoutTenantScope('platform:audit-write-cli', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const PlatformAudit = require('../../models/PlatformAudit').default;
+      await PlatformAudit.create({
+        actorId: input.actorId,
+        actorEmail: input.actorEmail,
+        actorRole: input.actorRole,
+        action: input.action,
+        entity: input.entity,
+        entityId: input.entityId,
+        metadata: input.metadata,
+      });
+    });
+  } catch (error) {
+    // Same rule as the request-scoped writer: the record is evidence of the
+    // action, not a precondition for it.
+    console.error(
+      `[platform-audit] FAILED to record "${input.action}":`,
+      (error as Error).message,
+    );
+  }
+}
