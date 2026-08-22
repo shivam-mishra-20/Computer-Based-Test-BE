@@ -99,6 +99,35 @@ Front desk is the interesting one: its *legacy* role is `admin`, so the route
 guard lets it in, while its assigned RBAC role narrows what it can actually do.
 That separation is what lets you tell a permission gate from a role redirect.
 
+### Named accounts
+
+Created through the real product endpoints — `POST /api/platform/staff` for the
+platform owner and `POST /api/users` for the tenant users — rather than seeded,
+so they exercise the same paths an operator uses and the platform one is
+audited.
+
+| Where | Email | Role |
+|---|---|---|
+| platform console | `admin@abhigyangurukul.com` | owner |
+| Abhigyan (Org 001) | `principal@abhigyangurukul.com` | admin |
+| Abhigyan (Org 001) | `teacher@abhigyangurukul.com` | teacher, empCode `AG-T-001` |
+| Abhigyan (Org 001) | `student@abhigyangurukul.com` | student, Class 11, batch Aarambh |
+
+**The password is deliberately not recorded here.** It is the one supplied when
+these were created; the fixture passwords above are in this file because they
+are already in source, and a chosen credential is not.
+
+Two things to know before testing the student flow with these:
+
+- `student@abhigyangurukul.com` has `classLevel: "Class 11"`, while the seeded
+  `p6.student@abhigyan.fixture` has `"11"`. Both are "correct" — the API's
+  `resolveStudentClassAndBatch` normalizes to the label form, and the fixture
+  writes the bare digit. Anything that targets a class by exact string will
+  match one and not the other.
+- Neither seeded exam is assigned to the new student: `assignedTo.users` names
+  specific accounts. Assigning one is itself part of the teacher workflow worth
+  testing. For a ready-made attempt, log in as `p6.student@abhigyan.fixture`.
+
 ---
 
 ## 3. The platform console
