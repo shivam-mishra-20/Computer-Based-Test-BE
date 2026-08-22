@@ -13,7 +13,7 @@
  * platform-core, which talks to a SCRATCH database.
  *
  * Prerequisites:
- *   1. platform-core on API_URL, TENANT_MODE=claim, scratch DB
+ *   1. platform-core on API_URL — `npm run p6:serve` gives exactly that
  *   2. an owner and a support account (bootstrap + POST /api/platform/staff)
  *   3. platform-console on CONSOLE_URL, NEXT_PUBLIC_API_BASE_URL=$API_URL
  *

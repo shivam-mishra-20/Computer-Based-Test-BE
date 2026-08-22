@@ -51,7 +51,6 @@
     "safety:platform-auth": "ts-node --transpile-only scripts/safety/platform-auth.test.ts",
     "safety:console-login": "ts-node --transpile-only scripts/safety/console-login.e2e.test.ts",
     "safety:seed-console-login": "ts-node --transpile-only scripts/safety/seed-console-login-fixture.ts",
-    "platform:serve": "node scripts/safety/serve-platform.js",
     "platform:uri": "node scripts/safety/scratch-uri.js",
     "safety:web": "ts-node --transpile-only scripts/safety/client-platform-web.e2e.test.ts",
     "p6:seed": "node -r ./scripts/safety/dns-preload.js -r ts-node/register/transpile-only scripts/safety/seed-p6-fixture.ts",

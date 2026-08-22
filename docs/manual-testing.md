@@ -37,16 +37,23 @@ Already seeded as of 2026-08-22 — skip this unless you have wiped the database
 
 ## 1. Start the backend
 
-One command, in its own terminal. It sets `TENANT_MODE=claim`,
-`TENANT_ENFORCEMENT=warn`, cron off, workers off — and refuses to start against
-production.
+One command, in its own terminal, and **no environment variables**:
 
 ```powershell
-npm run platform:serve p6_client_platform_web_scratch
-# -> http://127.0.0.1:5055
+npm run p6:serve
+# [p6] serving p6_client_platform_web_scratch on port 5055 (TENANT_MODE=claim)
 ```
 
-Leave it running. Everything else talks to it.
+It reads the scratch database name from `.p6-uri`, sets `TENANT_MODE=claim`,
+`TENANT_ENFORCEMENT=warn`, cron off, workers off, and refuses to start against
+production. Leave it running. Everything else talks to it.
+
+To serve a *different* scratch database, name it:
+
+```powershell
+$env:P6_MONGO_URI = npm run --silent platform:uri abhigyangurukul_restore_2026_08_17
+npm run p6:serve
+```
 
 > **`TENANT_ENFORCEMENT=warn` means writes are stamped with `orgId` but reads
 > are NOT filtered.** That is the production-safe setting for the migration
@@ -98,13 +105,17 @@ That separation is what lets you tell a permission gate from a role redirect.
 
 ```powershell
 cd c:/Users/Shivam/platform-console
-$env:NEXT_PUBLIC_API_BASE_URL = "http://127.0.0.1:5055"   # NO /api suffix
 npm run dev
 # -> http://127.0.0.1:3100
 ```
 
-> The console's base URL has **no** `/api` suffix; the web client's **does**.
-> They are different variables in different repos that happen to share a name.
+No environment variable: `platform-console/.env.local` already names the
+backend. If you see `ERR_CONNECTION_REFUSED` on `/api/platform/login`, that file
+is what to check — see [Troubleshooting](#troubleshooting).
+
+> The console's `NEXT_PUBLIC_API_BASE_URL` has **no** `/api` suffix; the web
+> client's variable of the same name **does**. Two repos, one name, two
+> conventions.
 
 ### Sign-in
 
@@ -244,7 +255,10 @@ npx ts-node --transpile-only scripts/bootstrap-platform-owner.ts --scratch-suffi
 Then confirm the account it made can actually sign in:
 
 ```powershell
-npm run platform:serve abhigyangurukul_p10a_scratch 5056
+$env:P6_MONGO_URI = npm run --silent platform:uri abhigyangurukul_p10a_scratch
+$env:P6_PORT = "5056"
+npm run p6:serve
+
 curl.exe -s -X POST http://127.0.0.1:5056/api/platform/login -H "Content-Type: application/json" -d '{\"email\":\"you@example.com\",\"password\":\"<what you typed>\"}'
 ```
 
@@ -261,12 +275,21 @@ npx ts-node --transpile-only scripts/bootstrap-platform-owner.ts --production
 
 ## 6. The tenant web client
 
+`cbt-exam/.env.local` points at port 5000 — the LEGACY backend — because that
+is what day-to-day work on that app uses. For platform testing it has to point
+at 5055, and the override must be set **in the same terminal, before**
+`npm run dev`:
+
 ```powershell
 cd c:/Users/Shivam/cbt-exam
 $env:NEXT_PUBLIC_API_BASE_URL = "http://127.0.0.1:5055/api"   # WITH /api suffix
 npm run dev
 # -> http://localhost:3000
 ```
+
+A shell variable does beat `.env.local` — Next.js will not overwrite something
+already in `process.env` — but only for the process that inherits it. Set it in
+a different window and the app silently uses 5000 instead.
 
 **The point is that this is ONE build serving both institutes.** No source
 change, no rebuild, no environment flip between them — the tenant comes from the
@@ -297,9 +320,10 @@ cd c:/Users/Shivam/client-platform-app
 npm start
 ```
 
-It already defaults to `http://127.0.0.1:5055/api`, which is right for a
-simulator on this machine. **On a physical device over Expo Go, `127.0.0.1` is
-the phone**, so point it at your laptop's LAN address:
+It already defaults to `http://127.0.0.1:5055/api`, which matches `p6:serve`
+exactly — nothing to configure for a simulator on this machine. **On a physical
+device over Expo Go, `127.0.0.1` is the phone**, so point it at your laptop's
+LAN address:
 
 ```powershell
 $env:EXPO_PUBLIC_API_BASE_URL = "http://192.168.x.x:5055/api"
@@ -322,7 +346,7 @@ npm run safety:all                      # 14 suites, no servers needed
 $env:P10A_MONGO_URI = npm run --silent platform:uri abhigyangurukul_p10a_scratch
 npm run safety:platform-auth            # 61 — login + bootstrap
 
-# with the API on 5055 and the console on 3100:
+# with p6:serve on 5055 and the console on 3100 (both suites default to those):
 npm run safety:console-login            # 39 — real browser, real credentials
 npm run safety:console-ui               # 39 — the twelve screens
 
@@ -342,13 +366,59 @@ mint immediately before the run.
 ## 9. Teardown
 
 ```powershell
-Get-NetTCPConnection -LocalPort 5055,3100,3000 -State Listen |
+Get-NetTCPConnection -LocalPort 5055,5056,3100,3000 -State Listen |
   Select-Object -ExpandProperty OwningProcess -Unique |
   ForEach-Object { Stop-Process -Id $_ -Force }
 ```
 
 Scratch databases can be left as they are: the suites clean up after themselves
 and the fixtures are idempotent.
+
+---
+
+## Troubleshooting
+
+### `ERR_CONNECTION_REFUSED` on `127.0.0.1:5000/api/platform/login`
+
+The console is pointed at the **legacy** backend's port instead of
+api-platform's. Two ports are in play and they are not interchangeable:
+
+| Port | What serves it | Tenancy |
+|---|---|---|
+| 5000 | the ordinary backend (`npm run dev`) | `pinned` / unset — one institute |
+| 5055 | api-platform (`npm run p6:serve`) | `claim` — tenant from the token |
+
+`/api/platform/*` exists on both, so the symptom depends on what is running:
+nothing on 5000 gives `ERR_CONNECTION_REFUSED`, and the legacy backend on 5000
+gives a working login against the *wrong database*.
+
+Fix `platform-console/.env.local`:
+
+```
+NEXT_PUBLIC_API_BASE_URL=http://127.0.0.1:5055
+```
+
+Then restart `npm run dev`. Next.js reads `.env.local` at startup, so an edit
+while the dev server is running has no effect until it restarts.
+
+### The console loads but every panel 401s
+
+The token expired — platform tokens last 15 minutes. Sign in again.
+
+### `EADDRINUSE` on 5055 when nothing appears to be running
+
+A previous server left the port held. Find and stop the owner:
+
+```powershell
+Get-NetTCPConnection -LocalPort 5055 -State Listen |
+  ForEach-Object { Get-Process -Id $_.OwningProcess }
+```
+
+### The web client shows Abhigyan's data no matter who logs in
+
+`NEXT_PUBLIC_API_BASE_URL` was not set in the terminal that started
+`npm run dev`, so it fell back to `.env.local` and is talking to the legacy
+backend on 5000 — which is pinned to one organization by design.
 
 ---
 
