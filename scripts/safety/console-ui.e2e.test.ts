@@ -10,12 +10,12 @@
  * are visible from curl.
  *
  * No mocks and no fixtures: Chrome talks to Next.js on 3100, which talks to
- * platform-core on 5000, which talks to the scratch restore of production.
+ * platform-core on 5055, which talks to a scratch database.
  *
  * Prerequisites (the harness checks and fails clearly if missing):
- *   platform-core   http://127.0.0.1:5000   TENANT_MODE=claim, scratch DB
+ *   platform-core    http://127.0.0.1:5055   `npm run p6:serve`
  *   platform-console http://127.0.0.1:3100
- *   /tmp/pc-tokens.env with OWNER_TOKEN and SUPPORT_TOKEN
+ *   pc-tokens.env with OWNER_TOKEN and SUPPORT_TOKEN — mint-platform-tokens.ts
  *
  *   npx ts-node --transpile-only scripts/safety/console-ui.e2e.test.ts
  */
@@ -25,7 +25,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 
 const CONSOLE_URL = process.env.CONSOLE_URL || 'http://127.0.0.1:3100';
-const API_URL = process.env.API_URL || 'http://127.0.0.1:5000';
+const API_URL = process.env.API_URL || 'http://127.0.0.1:5055';
 const SHOTS = join(process.cwd(), 'docs', 'console-screens');
 
 let failures = 0;
