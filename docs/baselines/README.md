@@ -11,7 +11,8 @@ it existed to provide.
 | `api-contract-2026-08-17.txt` | before P1 | 486 endpoints, with the auth middleware guarding each. The pre-tenancy reference. |
 | `api-contract-2026-08-18.txt` | end of P6 | 487 endpoints. Adds `GET /api/org/branding`. |
 | `api-contract-2026-08-19.txt` | end of P8 | 487 endpoints. Same routes, 23 routers newly carrying `requireModule(...)`. |
-| `api-contract-2026-08-21.txt` | end of P10A | 488 endpoints. Adds `POST /api/platform/login`. **Current check target.** |
+| `api-contract-2026-08-21.txt` | end of P10A | 488 endpoints. Adds `POST /api/platform/login`. |
+| `api-contract-2026-08-24.txt` | P11 hardening | 488 endpoints. All 23 `/api/platform/*` routes gain `requirePlatformDeployment`. **Current check target.** |
 | `db-inventory-2026-08-17.json` | before P1 | Collection names, document counts, index definitions. |
 | `legacy-client-surface-2026-08-17.txt` | before P1 | Every endpoint the installed mobile app and the web app actually call. |
 
@@ -61,6 +62,39 @@ what proves it is declared above: `[authLimiter]` alone, with no
 `authLimiter` is the same rate limiter the tenant login uses. It is the only
 protection on the route besides bcrypt, so its presence in the contract is not
 incidental detail.
+
+## The contract diff, 2026-08-21 -> 2026-08-24
+
+No endpoint added, removed or re-pathed. Every one of the 23 `/api/platform/*`
+routes gained one leading guard:
+
+```
+- POST   /api/platform/login    [authLimiter]
++ POST   /api/platform/login    [requirePlatformDeployment authLimiter]
+```
+
+`requirePlatformDeployment` makes the whole platform surface invisible unless
+`TENANT_MODE=claim`. api-legacy — the institute-facing deployment on a public
+hostname — therefore stops serving organization, plan, subscription and staff
+administration. It was serving all of it before, inert only because production
+has no platform staff yet; cutover Step 25 would have removed that accident.
+
+Note it lands on `login` too. A gate that closed the authenticated routes and
+left the door itself open would be no gate at all, so the contract showing
+`requirePlatformDeployment` **before** `authLimiter` on that line is the thing
+worth reading here.
+
+Nothing outside `/api/platform` changed — the diff is 46 lines, 23 pairs.
+
+### The parser needed fixing first
+
+`readMounts()` matched exactly two arguments, so
+`app.use('/api/platform', requirePlatformDeployment, platformRoutes)` stopped
+matching altogether: every platform route fell back to `(unmounted)` and the
+first run reported **25 endpoints REMOVED**. A contract tool that reports a
+guard addition as a mass deletion is one nobody will trust the next time it
+goes red, so mount-level middleware is now parsed and attributed to every route
+under the prefix.
 
 ## Re-checking
 

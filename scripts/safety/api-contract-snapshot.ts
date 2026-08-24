@@ -38,12 +38,29 @@ interface Endpoint {
   source: string;
 }
 
+interface Mount {
+  prefix: string;
+  /** Middleware named between the path and the router, in mount order. */
+  guards: string[];
+}
+
 /**
- * Map router module -> mount prefix, from the `app.use('/api/x', xRoutes)` calls.
+ * Map router module -> its mounts, from the `app.use('/api/x', xRoutes)` calls.
+ *
  * Several routers legitimately share a prefix (auth + passwordReset both mount
  * at /api/auth), so this is a multimap.
+ *
+ * ── Mount-level middleware has to be captured, not skipped ──────────────────
+ * The first version of this matched exactly two arguments. When
+ * `/api/platform` gained a deployment gate —
+ * `app.use('/api/platform', requirePlatformDeployment, platformRoutes)` — the
+ * regex stopped matching altogether, so every platform route silently fell back
+ * to `(unmounted)` and the diff reported 25 endpoints REMOVED. A contract tool
+ * that reports a guard addition as a mass deletion is one nobody will trust the
+ * next time it goes red, so the middle arguments are now parsed and attributed
+ * to every route under the prefix.
  */
-function readMounts(): Map<string, string[]> {
+function readMounts(): Map<string, Mount[]> {
   const source = readFileSync(APP_FILE, 'utf8');
   const importToFile = new Map<string, string>();
 
@@ -59,13 +76,18 @@ function readMounts(): Map<string, string[]> {
     importToFile.set(match[1], match[2]);
   }
 
-  const mounts = new Map<string, string[]>();
-  for (const match of source.matchAll(/app\.use\(\s*['"]([^'"]+)['"]\s*,\s*(\w+)\s*\)/g)) {
-    const [, prefix, identifier] = match;
+  const mounts = new Map<string, Mount[]>();
+  // path, then any number of middleware arguments, then the router identifier.
+  for (const match of source.matchAll(
+    /app\.use\(\s*['"]([^'"]+)['"]\s*,\s*([\s\S]*?)\)\s*;/g,
+  )) {
+    const [, prefix, argsRaw] = match;
+    const args = argsRaw.split(',').map((a) => a.trim()).filter(Boolean);
+    const identifier = args[args.length - 1];
     const file = importToFile.get(identifier);
     if (!file) continue;
     const list = mounts.get(file) ?? [];
-    list.push(prefix);
+    list.push({ prefix, guards: args.slice(0, -1).map((a) => a.replace(/\(.*/, '')) });
     mounts.set(file, list);
   }
   return mounts;
@@ -162,7 +184,7 @@ function collect(): Endpoint[] {
 
   for (const file of readdirSync(ROUTES_DIR).filter((f) => f.endsWith('.ts')).sort()) {
     const moduleName = file.replace(/\.ts$/, '');
-    const prefixes = mounts.get(moduleName) ?? ['(unmounted)'];
+    const mountsForFile: Mount[] = mounts.get(moduleName) ?? [{ prefix: '(unmounted)', guards: [] }];
     const source = readFileSync(join(ROUTES_DIR, file), 'utf8');
     const routerGuards = extractRouterLevelGuards(source);
 
@@ -181,9 +203,15 @@ function collect(): Endpoint[] {
       const declaredAt = match.index ?? 0;
       const applicable = routerGuards.filter((g) => g.at < declaredAt).flatMap((g) => g.guards);
       const guards = [...new Set([...applicable, ...extractGuards(expandSpreads(rest, source))])];
-      for (const prefix of prefixes) {
-        const full = `${prefix}${routePath}`.replace(/\/+/g, '/').replace(/\/$/, '') || '/';
-        endpoints.push({ method: method.toUpperCase(), path: full, guards, source: moduleName });
+      for (const mount of mountsForFile) {
+        const full = `${mount.prefix}${routePath}`.replace(/\/+/g, '/').replace(/\/$/, '') || '/';
+        // Mount guards run BEFORE anything in the router, so they lead.
+        endpoints.push({
+          method: method.toUpperCase(),
+          path: full,
+          guards: [...new Set([...mount.guards, ...guards])],
+          source: moduleName,
+        });
       }
     }
   }

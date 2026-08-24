@@ -775,3 +775,88 @@ PLATFORM_BOOTSTRAP_ACK='I am creating a platform owner account' \
   npx ts-node --transpile-only scripts/bootstrap-platform-owner.ts --production
 # password prompted, not echoed
 ```
+
+---
+
+# ADDENDUM — P11: platform API deployment isolation
+
+*Implemented after the console redesign, on `phase/p10a-platform-auth`.*
+
+## The finding
+
+`/api/platform/*` was mounted unconditionally, so **api-legacy served the whole
+platform control plane**. api-legacy is the institute-facing deployment on a
+public hostname.
+
+It was inert only by accident: production has no platform staff, so every login
+there failed. **Step 25 of this runbook removes that accident.** The moment the
+first owner exists in the shared database, those credentials would open every
+organization, plan, subscription and staff endpoint on a customer's public host.
+The separate token audience does not help — the token is genuine. It is the
+route being reachable there at all that is wrong.
+
+## The change
+
+`src/middlewares/requirePlatformDeployment.ts`, mounted in `app.ts`:
+
+```ts
+app.use('/api/platform', requirePlatformDeployment, platformRoutes);
+```
+
+| `TENANT_MODE` | `/api/platform/*` |
+|---|---|
+| `claim` (api-platform) | served, unchanged |
+| `pinned` (api-legacy) | absent |
+| unset (**today's production**) | absent — the default is `pinned` |
+
+That last row is the one that matters: production sets no `TENANT_MODE`, so it
+inherits the closed surface without anyone editing an environment file.
+
+**It applies to `/api/platform/login` too.** A gate that closed the
+authenticated routes and left the door itself open would be no gate at all.
+
+### Why a 404, and why *that* 404
+
+The middleware calls `next('router')`, so Express's own unmatched-route handler
+answers. The result is byte-identical to the route never having been mounted —
+same status, same content-type, same body. A bespoke
+`{"message":"Not available here"}` would be a different shape from every other
+unmatched path on the host, and that difference is itself the disclosure: it
+tells a prober that a platform API exists somewhere. A 403 would be worse
+still — "Forbidden" confirms the surface is real.
+
+Silence to the caller leaves the server log as the only diagnostic for an
+operator who has misconfigured api-platform, so refusals are logged, throttled
+to one line a minute because an internet-facing host is scanned continuously.
+
+### Authentication and RBAC are untouched
+
+The gate runs before them and changes neither. In claim mode an unauthenticated
+platform request still gets `401` from `platformAuthMiddleware` in its own
+words, and capability checks still return `403 PLATFORM_CAPABILITY_DENIED`.
+
+## Verified on a real server, both modes
+
+With the *correct owner password*:
+
+```
+pinned  POST /api/platform/login  -> 404      GET /api/health -> 200
+claim   POST /api/platform/login  -> 200
+```
+
+## Contract
+
+488 endpoints, unchanged. All 23 `/api/platform/*` routes gained one leading
+guard; nothing outside that prefix moved. New baseline
+`api-contract-2026-08-24.txt`.
+
+The snapshot parser needed fixing first: `readMounts()` matched exactly two
+arguments, so the three-argument mount stopped matching and the first run
+reported **25 endpoints REMOVED**. Mount-level middleware is now parsed and
+attributed to every route under the prefix.
+
+## Step 25 is no longer gated on this
+
+The remaining blockers are unchanged and both need you: production deployment
+state is unverified, and the local Firebase service-account key still fails
+`invalid_grant`.

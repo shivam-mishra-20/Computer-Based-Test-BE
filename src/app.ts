@@ -57,6 +57,7 @@ import meContextRoutes from './routes/api/meContextRoutes';
 import { requireModule } from './middlewares/requireModule';
 import orgPublicRoutes from './routes/api/orgPublicRoutes';
 import platformRoutes from './routes/api/platformRoutes';
+import { requirePlatformDeployment } from './middlewares/requirePlatformDeployment';
 import path from 'path';
 // Use require to avoid transient module resolution issues in some TS setups
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -313,7 +314,16 @@ for (const [mountPath, moduleKey] of MODULE_GATED_ROUTES) {
   app.use(mountPath, requireModule(moduleKey));
 }
 
-app.use('/api/platform', platformRoutes);
+/**
+ * The platform control plane, served ONLY by api-platform.
+ *
+ * `requirePlatformDeployment` makes the whole surface invisible unless
+ * TENANT_MODE=claim. api-legacy is a public, institute-facing host and has no
+ * business exposing organization, plan, subscription or staff administration —
+ * see the middleware for why the refusal is an indistinguishable 404 rather
+ * than a 403.
+ */
+app.use('/api/platform', requirePlatformDeployment, platformRoutes);
 app.use('/api/me', meContextRoutes);
 app.use('/api/org', orgPublicRoutes);
 app.use('/api/auth', authRoutes);

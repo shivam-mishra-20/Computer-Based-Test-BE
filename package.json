@@ -29,7 +29,7 @@
     "safety:verify": "ts-node scripts/safety/verify-restore.ts",
     "safety:guard": "ts-node scripts/safety/guard.test.ts",
     "safety:api-snapshot": "ts-node scripts/safety/api-contract-snapshot.ts",
-    "safety:api-check": "ts-node --transpile-only scripts/safety/api-contract-snapshot.ts --check docs/baselines/api-contract-2026-08-21.txt",
+    "safety:api-check": "ts-node --transpile-only scripts/safety/api-contract-snapshot.ts --check docs/baselines/api-contract-2026-08-24.txt",
     "safety:client-surface": "ts-node scripts/safety/legacy-client-surface.ts",
     "safety:tenancy": "ts-node --transpile-only scripts/safety/tenancy.test.ts",
     "safety:tenant-coverage": "ts-node --transpile-only scripts/safety/verify-tenant-coverage.ts",
