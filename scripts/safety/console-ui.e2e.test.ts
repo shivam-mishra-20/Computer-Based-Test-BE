@@ -269,7 +269,17 @@ async function main() {
     check('configuration tab shows Dropper', t.includes('Dropper'));
     check('  shows Hall A and Lab 1', t.includes('Hall A') && t.includes('Lab 1'));
     check('  shows the 4 ABC subjects', has(t, 'Physics') && has(t, 'Biology'), t.slice(0, 600));
-    check('  shows the +4 / -1 marking policy', t.includes('"correct": 4'), t.slice(-600));
+    // The marking scheme now leads as prose — "+4 marks for a correct answer" —
+    // and the raw policy document sits in a collapsed Advanced panel beneath.
+    // innerText excludes a closed <details>, so the panel is opened first. The
+    // assertion is unchanged in substance: the exact stored document is still
+    // on the page, one disclosure away.
+    check('  shows the marking policy in words', /\+4/.test(t) && /marks/i.test(t), t.slice(-600));
+    await page.evaluate(() => {
+      document.querySelectorAll('details.adv').forEach((d) => d.setAttribute('open', ''));
+    });
+    t = await text();
+    check('  and the raw policy document under Advanced', t.includes('"correct": 4'), t.slice(-600));
     await shot('06-org-configuration');
 
     await clickTab('Entitlement');
@@ -298,22 +308,40 @@ async function main() {
     // ── Suspend through the UI ────────────────────────────────────────────
     console.log('\nlifecycle through the UI');
     await clickTab('Overview');
-    await page.evaluate(() => {
-      const b = [...document.querySelectorAll('button')].find(
-        (x) => x.textContent?.trim() === 'Set suspended',
-      ) as HTMLButtonElement;
-      b.click();
-    });
+    // Suspending a live customer now goes through a confirmation. The dialog's
+    // primary button names the ACTION ("Suspend") rather than repeating the
+    // trigger's label, which is both better copy and what makes it findable
+    // here — two buttons reading "Set suspended" would be ambiguous.
+    const clickByText = async (label: string) => {
+      await page.evaluate((l: string) => {
+        const b = [...document.querySelectorAll('button')].find(
+          (x) => x.textContent?.trim() === l,
+        ) as HTMLButtonElement;
+        b.click();
+      }, label);
+    };
+
+    await clickByText('Set suspended');
+    await page.waitForFunction(
+      () => [...document.querySelectorAll('[role="dialog"] button')].some(
+        (b) => b.textContent?.trim() === 'Suspend',
+      ),
+      { timeout: 15000 },
+    );
+    check('suspending asks for confirmation first', true);
+    await clickByText('Suspend');
     await page.waitForFunction(() => /Currently suspended/.test(document.body.innerText), { timeout: 25000 });
     check('suspending through the UI takes effect', (await text()).includes('Currently suspended'));
     await shot('11-org-suspended');
 
-    await page.evaluate(() => {
-      const b = [...document.querySelectorAll('button')].find(
-        (x) => x.textContent?.trim() === 'Set active',
-      ) as HTMLButtonElement;
-      b.click();
-    });
+    await clickByText('Set active');
+    await page.waitForFunction(
+      () => [...document.querySelectorAll('[role="dialog"] button')].some(
+        (b) => b.textContent?.trim() === 'Activate',
+      ),
+      { timeout: 15000 },
+    );
+    await clickByText('Activate');
     await page.waitForFunction(() => /Currently active/.test(document.body.innerText), { timeout: 25000 });
     check('reactivating through the UI takes effect', (await text()).includes('Currently active'));
 
