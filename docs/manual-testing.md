@@ -462,3 +462,79 @@ Two things, and both are still open:
    `invalid_grant` for Storage, Firestore *and* Auth. That is *this machine's*
    key. It is not evidence either way about production's, which is exactly why
    it needs checking by someone who can open the console.
+
+---
+
+## The mobile app's API address
+
+`client-platform-app` used to hardcode `http://127.0.0.1:5055/api` as its
+fallback, and no `.env` existed, so every build took it. That is wrong in two
+ways at once and both surfaced as the same "Could not reach the server":
+
+- **`127.0.0.1` on a phone is the phone.** Not the laptop running the API — the
+  device's own loopback, where nothing is listening. It worked on web only
+  because there the browser and the API share a machine, which is why it
+  survived so long.
+- **`5055` is the safety fixture**, started by hand for these tests. The
+  application backend listens on **5000**.
+
+`lib/config.ts` now resolves the address in this order, first hit wins:
+
+| # | Source | When |
+|---|--------|------|
+| 1 | `EXPO_PUBLIC_API_BASE_URL` | Always, if set. The only thing a release build accepts. |
+| 2 | The packager host, port swapped to 5000 | Development. Expo reports the machine that served the bundle; that machine is reachable from the device by definition. |
+| 3 | `127.0.0.1:5000` | Web development, and simulators sharing the host's loopback. |
+| 4 | *nothing* | A release build with no address is a **build fault** and says so, rather than pointing a shipped app at a laptop. |
+
+So for ordinary device development you set nothing at all. Set it explicitly
+for a release build, for the web export (a static export is served by no
+packager, so no host is reported), or to point at the fixture:
+
+```powershell
+# Drive the app against the safety fixture rather than the app backend
+"EXPO_PUBLIC_API_BASE_URL=http://127.0.0.1:5055/api" | Out-File -Encoding utf8 .env
+```
+
+`.env.example` in that repo carries the same table. `.env` is gitignored.
+
+### Checking it
+
+```powershell
+cd C:\Users\Shivam\client-platform-app
+npm run verify:config    # 32 checks over the resolution table
+npm run verify:guest     # 56 checks on the guest boundary
+npm run verify           # all four suites
+```
+
+The app's Profile tab shows the resolved address under **Connection → API**,
+which is the fastest way to see what a running build actually decided.
+
+## Guest mode
+
+`Explore the app` on the welcome screen enters a read-only guest experience
+under `app/explore/`. It is isolated **structurally**, not by convention:
+
+- Guest screens cannot import `apiFetch`, `useTenant` or `lib/auth`; the only
+  network helper reachable from that tree is `publicFetch`, which refuses any
+  path outside `/api/public/` and never attaches an `Authorization` header.
+- `npm run verify:guest` asserts both halves — that the guard refuses
+  traversal, lookalike prefixes and absolute URLs, and that no file under
+  `app/explore/` imports anything credentialed.
+- One documented exception exists: `TenantProvider` is mounted above every
+  route, so its pre-authentication `GET /api/org/branding` runs during guest
+  mode. It is listed in `GUEST_SHELL_ALLOWLIST` in `lib/guest.ts` with its
+  justification — verified to answer `{"organization": null}` with no
+  credential.
+
+The fixture has public content to browse only if it has been seeded:
+
+```powershell
+$U = node scripts/safety/scratch-uri.js p6_client_platform_web_scratch
+$env:P6_MONGO_URI = $U
+node -r ./scripts/safety/dns-preload.js -r ts-node/register/transpile-only `
+     scripts/safety/seed-public-content.ts
+```
+
+That script refuses any database whose name matches production or does not look
+like a scratch fixture.

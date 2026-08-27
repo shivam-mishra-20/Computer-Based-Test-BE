@@ -1,0 +1,136 @@
+{
+  "guestCalls": [
+    {
+      "method": "GET",
+      "path": "/api/org/branding",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/home",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/subjects",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/tests?limit=6&skip=0",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/tests/6a8fd3116e47889f85de1f69",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/tests/000000000000000000000001",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/org/branding",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/org/branding",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/home",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/subjects",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/tests?limit=6&skip=0",
+      "auth": false
+    }
+  ],
+  "all": [
+    {
+      "method": "GET",
+      "path": "/api/org/branding",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/home",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/subjects",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/tests?limit=6&skip=0",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/tests/6a8fd3116e47889f85de1f69",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/tests/000000000000000000000001",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/org/branding",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/org/branding",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/home",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/subjects",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/tests?limit=6&skip=0",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/home",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/subjects",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/public/tests?limit=6&skip=0",
+      "auth": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/org/branding",
+      "auth": false
+    }
+  ]
+}
