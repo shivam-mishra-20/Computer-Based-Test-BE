@@ -33,7 +33,7 @@
     "area": "appstate",
     "claim": "a background/foreground cycle does not break the screen",
     "ok": true,
-    "detail": "3120ms"
+    "detail": "3128ms"
   },
   {
     "area": "offline",

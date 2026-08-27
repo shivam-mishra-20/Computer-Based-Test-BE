@@ -1,5 +1,6 @@
 import type { Request } from 'express';
 import type { IQuestion } from '../models/Question';
+import { applyPublicOrgScope } from './publicResourceVisibility';
 
 /**
  * Public assessment safety rules.
@@ -143,6 +144,12 @@ export const isAssessmentStaff = (req: Request): boolean => {
  * value, so `?status=draft` from a learner is ignored rather than honoured.
  */
 export const applyPublishedFloor = <T extends Record<string, any>>(query: T, req: Request): T => {
+  // Organization scope first, and for staff too — see the note on
+  // `applyPublicVisibilityFloor`. Public tests live in their own collection
+  // precisely so no institute query can reach them, but the collection is
+  // shared BETWEEN institutes, so the reverse guard is still needed.
+  applyPublicOrgScope(query, req);
+
   if (isAssessmentStaff(req)) return query;
   (query as any).status = 'published';
   return query;

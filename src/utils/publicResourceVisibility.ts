@@ -1,7 +1,8 @@
 import type { Request } from 'express';
+import { currentOrgId } from '../core/tenancy/context';
 
 /**
- * Server-side visibility enforcement for PUBLIC resource endpoints.
+ * Server-side visibility AND tenancy enforcement for PUBLIC resource endpoints.
  *
  * Extracted from resourceRoutes so that every public-facing endpoint — the
  * resource list, the public subject/chapter browser, and public search — shares
@@ -9,11 +10,13 @@ import type { Request } from 'express';
  * how a public endpoint eventually leaks unpublished or institute-only content:
  * one copy gets a fix, the others don't.
  *
- * The rules, unchanged from the original:
+ * The rules:
  *   - Guests AND signed-in students (institute or public learner) get the same
  *     public view: `status: 'published'` AND `isPublic: true`.
  *   - Only staff (admin/teacher/developer) may see anything else.
  *   - Client query params can NARROW within the permitted set, never widen it.
+ *   - When an ORGANIZATION has been resolved for the request, the result is
+ *     scoped to it. See `applyPublicOrgScope`.
  *
  * This is applied to the LOOKUP, not as a post-filter, so a private resource is
  * a 404 for a guest rather than a document that was fetched and then hidden.
@@ -33,10 +36,78 @@ export const applyPublicVisibilityFloor = <T extends Record<string, any>>(
   query: T,
   req: Request,
 ): T => {
+  // The organization scope is applied BEFORE the staff early-return, and
+  // therefore to staff too. A signed-in Org 002 teacher browsing the public
+  // library has no more business seeing Org 001's resources than a guest does;
+  // what staff status buys is drafts and archived items WITHIN their own
+  // organization, which is what the lines below grant.
+  applyPublicOrgScope(query, req);
+
   if (isStaffRequest(req)) return query;
   (query as any).status = 'published';
   (query as any).isPublic = true;
   return query;
+};
+
+/**
+ * Scope a public query to the organization resolved for this request.
+ *
+ * ── What "resolved" means here ──────────────────────────────────────────────
+ * `tenantContextMiddleware` resolves an organization from a signed token's
+ * `orgId` claim, or — before any credential exists — from an explicit
+ * `X-Org-Id` header or the Host the request arrived on. The header accepts an
+ * id OR a slug, so a guest app that remembers "abc-coaching" can name its
+ * institute without knowing its database id. That hint grants nothing: it
+ * selects which tenant's data may be seen, never who the caller is.
+ *
+ * ── The rule ────────────────────────────────────────────────────────────────
+ * No organization resolved → nothing is added, and the caller sees the
+ * platform-wide catalogue. That is the shared front door: someone who opened
+ * the app for the first time, named no institute, and is deciding whether the
+ * product is for them.
+ *
+ * An organization resolved → that organization's content, PLUS content owned
+ * by nobody. The second half matters: platform-level material seeded by the
+ * operator has no `orgId`, and a strict `{ orgId }` match would make the
+ * catalogue of a newly onboarded institute completely empty on its first day.
+ *
+ * ── Aggregations need no separate helper ────────────────────────────────────
+ * Every public aggregation builds its `$match` stage by spreading the object
+ * this function mutated — `{ $match: match }`, `{ $match: { ...base, subject } }`
+ * — so the `$and` rides along into the first stage, which is where a tenant
+ * filter has to be. A second aggregation-shaped helper would be a second thing
+ * to keep in step.
+ *
+ * ── Why this is not left to the tenancy plugin ──────────────────────────────
+ * The global plugin does scope reads — but only under `TENANT_ENFORCEMENT=
+ * enforce`, and it scopes to `{ orgId }` exactly, which would exclude the
+ * platform-level content this rule deliberately includes. Public visibility is
+ * a different question from tenant enforcement and gets its own answer.
+ */
+export const applyPublicOrgScope = <T extends Record<string, any>>(query: T, req: Request): T => {
+  const orgId = orgIdForRequest(req);
+  if (!orgId) return query;
+
+  const clause = {
+    $or: [{ orgId }, { orgId: null }, { orgId: { $exists: false } }],
+  };
+  (query as any).$and = [...((query as any).$and ?? []), clause];
+  return query;
+};
+
+/**
+ * The organization this request belongs to, if any.
+ *
+ * Reads the tenant context the middleware established. Falls back to the
+ * request's own resolved value where a route runs outside that context — the
+ * middleware attaches it, and reading both means a public route behaves the
+ * same whether or not the tenancy layer is active.
+ */
+export const orgIdForRequest = (req: Request): string | null => {
+  const fromContext = currentOrgId();
+  if (fromContext) return String(fromContext);
+  const attached = (req as any).tenant?.orgId ?? (req as any).orgId;
+  return attached ? String(attached) : null;
 };
 
 /**

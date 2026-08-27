@@ -16,10 +16,18 @@
  * ways: with no identification at all, with `X-Org-Id` naming Org 001, and
  * with `X-Org-Id` naming Org 002. The responses are compared.
  *
- * If the three answers are identical, the surface is platform-global and every
- * institute's public content is visible to every visitor. That may be correct
- * — it is what "public" means for a shared catalogue — but it must be a
- * DECISION, and it must be true of nothing that is not intended to be public.
+ * P12 found the three answers identical: the surface was platform-global and
+ * every institute's public content was visible to every visitor. P13 makes it
+ * organization-aware, and this file now asserts the shape of that rule rather
+ * than reporting whichever way it happens to behave:
+ *
+ *   · naming no organization  →  the platform catalogue
+ *   · naming Org A            →  Org A's content, plus content owned by nobody
+ *   · naming Org A            →  never Org B's content
+ *
+ * The last line is the one that matters, and it is checked with documents
+ * written to belong to a specific organization rather than with whatever the
+ * fixture happened to contain.
  *
  * ── What it also checks ─────────────────────────────────────────────────────
  * Every field of every returned document, against an allowlist. A public
@@ -226,73 +234,106 @@ async function main(): Promise<void> {
   // OWNED — an unowned document being visible to everyone would produce the
   // same result and mean much less. So one is created belonging to Org A and
   // asked for by Org B.
-  console.log('\n  ownership scoping');
+  console.log('\n  organization scoping');
 
-  // -- Why this write bypasses Mongoose --------------------------------------
-  // The global tenancy plugin resolves the organization from the REQUEST
-  // context. A script has none, so a document created through the model gets
-  // no `orgId` even when one is supplied explicitly — the first version of
-  // this probe did exactly that and unknowingly tested an unowned document.
-  //
-  // The raw driver bypasses the plugin, which is the only way to place a
-  // document that genuinely belongs to Org A. That the bypass is required is
-  // recorded as a finding rather than worked around silently.
+  // -- Why these are written through the raw driver ---------------------------
+  // The tenancy plugin resolves the organization from a REQUEST context, and a
+  // script has none — a document created through the model gets no `orgId`
+  // even when one is supplied. P12's first probe did exactly that and
+  // unknowingly tested an unowned document. The raw driver is the only way to
+  // place a document that genuinely belongs to a named organization.
   const rawResources = mongoose.connection.collection('studyresources');
-  const ownedId = new mongoose.Types.ObjectId();
-  const ownedTitle = `AUDIT owned-by-A ${Date.now()}`;
-  await rawResources.insertOne({
-    _id: ownedId,
-    orgId: orgA._id,
-    title: ownedTitle,
+  const stamp = Date.now();
+  const OWNED_A = `AUDIT owned-by-A ${stamp}`;
+  const OWNED_B = `AUDIT owned-by-B ${stamp}`;
+  const PLATFORM = `AUDIT platform-level ${stamp}`;
+
+  const publicDoc = {
     subject: 'Physics',
     classLevel: '11',
     type: 'pdf',
     category: 'notes',
-    resourceUrl: 'https://example.invalid/owned.pdf',
+    resourceUrl: 'https://example.invalid/audit.pdf',
     uploadedBy: new mongoose.Types.ObjectId(),
     status: 'published',
     isPublic: true,
     createdAt: new Date(),
     updatedAt: new Date(),
-  } as any);
+  };
+
+  const idA = new mongoose.Types.ObjectId();
+  const idB = new mongoose.Types.ObjectId();
+  const idPlatform = new mongoose.Types.ObjectId();
+
+  await rawResources.insertMany([
+    { ...publicDoc, _id: idA, orgId: String(orgA._id), title: OWNED_A },
+    { ...publicDoc, _id: idB, orgId: String(orgB._id), title: OWNED_B },
+    // No orgId at all — operator-seeded material that belongs to the platform.
+    { ...publicDoc, _id: idPlatform, title: PLATFORM },
+  ] as any);
 
   try {
-    const stored = await rawResources.findOne({ _id: ownedId }, { projection: { orgId: 1 } });
-    const storedOrg = String((stored as any)?.orgId ?? 'none');
+    const stored = await rawResources
+      .find({ _id: { $in: [idA, idB, idPlatform] } }, { projection: { title: 1, orgId: 1 } })
+      .toArray();
     check(
-      'the probe document really belongs to Org A',
-      storedOrg === String(orgA._id),
-      `stored orgId = ${storedOrg}`,
+      'the probe documents really carry the ownership under test',
+      stored.filter((d: any) => d.orgId).length === 2 && stored.filter((d: any) => !d.orgId).length === 1,
+      stored.map((d: any) => `${String(d.title).slice(-4)}=${d.orgId ?? 'none'}`).join(' '),
     );
-    note(`probe document orgId = ${storedOrg} (Org A is ${String(orgA._id)})`);
 
-    const anonSees = JSON.stringify((await get('/api/public/home')).body).includes(ownedTitle);
-    const aSees = JSON.stringify((await get('/api/public/home', String(orgA._id))).body).includes(ownedTitle);
-    const bSees = JSON.stringify((await get('/api/public/home', String(orgB._id))).body).includes(ownedTitle);
+    const sees = async (orgId?: string) => {
+      const body = JSON.stringify((await get('/api/public/home', orgId)).body);
+      return { a: body.includes(OWNED_A), b: body.includes(OWNED_B), platform: body.includes(PLATFORM) };
+    };
 
-    note(`a resource OWNED BY Org A is visible to: ${[
-      anonSees ? 'an anonymous visitor' : null,
-      aSees ? 'Org A' : null,
-      bSees ? 'Org B' : null,
-    ].filter(Boolean).join(', ') || 'nobody'}`);
+    const anon = await sees();
+    const asA = await sees(String(orgA._id));
+    const asB = await sees(String(orgB._id));
 
-    if (bSees) {
-      note(
-        'PLATFORM-GLOBAL CONFIRMED: a document owned by one organization is ' +
-          'returned to a visitor identifying as another. The public surface ' +
-          'has no tenant dimension.',
-      );
-    } else {
-      note('TENANT-SCOPED: the public surface filters by organization.');
+    note(`no organization named  ->  A:${anon.a} B:${anon.b} platform:${anon.platform}`);
+    note(`naming Org A           ->  A:${asA.a} B:${asA.b} platform:${asA.platform}`);
+    note(`naming Org B           ->  A:${asB.a} B:${asB.b} platform:${asB.platform}`);
+
+    // The platform front door: name nobody, see the whole catalogue.
+    check('a visitor naming no organization sees the platform catalogue',
+      anon.a && anon.b && anon.platform);
+
+    // The rule this phase exists to implement.
+    check('a visitor naming Org A sees Org A content', asA.a);
+    check('a visitor naming Org A NEVER sees Org B content', !asA.b);
+    check('a visitor naming Org B sees Org B content', asB.b);
+    check('a visitor naming Org B NEVER sees Org A content', !asB.a);
+
+    // A newly onboarded institute must not open to an empty catalogue.
+    check('platform-level content stays visible to Org A', asA.platform);
+    check('platform-level content stays visible to Org B', asB.platform);
+
+    // The slug is the identifier a client can actually remember.
+    if ((orgA as any).slug) {
+      const bySlug = await sees(String((orgA as any).slug));
+      check('the same scoping applies when the organization is named by slug',
+        bySlug.a && !bySlug.b, `slug=${(orgA as any).slug}`);
     }
 
-    // Whatever the scoping, the owner must never be disclosed.
+    // Scoping must not become a disclosure.
     check(
-      'the owning organization is never disclosed in the payload',
-      !JSON.stringify((await get('/api/public/home')).body).includes(String(orgA._id)),
+      'the owning organization is still never disclosed in the payload',
+      !JSON.stringify((await get('/api/public/home', String(orgA._id))).body).includes(String(orgA._id)),
     );
+
+    // ── The same rule on every other public endpoint ─────────────────────
+    for (const [path, pick] of [
+      ['/api/public/search?q=AUDIT', (b: any) => JSON.stringify(b)],
+      ['/api/public/subject-content?subject=Physics', (b: any) => JSON.stringify(b)],
+    ] as [string, (b: any) => string][]) {
+      const forA = pick((await get(path, String(orgA._id))).body);
+      const forB = pick((await get(path, String(orgB._id))).body);
+      check(`${path} scopes to Org A`, forA.includes(OWNED_A) && !forA.includes(OWNED_B));
+      check(`${path} scopes to Org B`, forB.includes(OWNED_B) && !forB.includes(OWNED_A));
+    }
   } finally {
-    await rawResources.deleteOne({ _id: ownedId });
+    await rawResources.deleteMany({ _id: { $in: [idA, idB, idPlatform] } });
   }
 
   // ── A private document must not surface ──────────────────────────────────

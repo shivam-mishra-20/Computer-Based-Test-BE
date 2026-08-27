@@ -1,0 +1,62 @@
+[
+  {
+    "area": "guest",
+    "claim": "the guest catalogue rendered real content from the API",
+    "ok": false,
+    "detail": ""
+  },
+  {
+    "area": "navigation",
+    "claim": "a guest can reach sign-in from the showcase",
+    "ok": false,
+    "detail": ""
+  },
+  {
+    "area": "auth",
+    "claim": "the sign-in control accepted a tap",
+    "ok": false,
+    "detail": ""
+  },
+  {
+    "area": "auth",
+    "claim": "a real credential authenticated against the live API",
+    "ok": false,
+    "detail": ""
+  },
+  {
+    "area": "branding",
+    "claim": "the institute's own name is rendered",
+    "ok": false,
+    "detail": ""
+  },
+  {
+    "area": "navigation",
+    "claim": "every visible tab opens",
+    "ok": false,
+    "detail": ""
+  },
+  {
+    "area": "appstate",
+    "claim": "HOME then relaunch restores the signed-in app",
+    "ok": false,
+    "detail": ""
+  },
+  {
+    "area": "session",
+    "claim": "the session survives a force-stop and cold start",
+    "ok": true,
+    "detail": "App Icon Learning Platform SDK version: 56.0.0 Close This is the developer menu."
+  },
+  {
+    "area": "offline",
+    "claim": "the app stays usable with the radio off",
+    "ok": true,
+    "detail": "App Icon Learning Platform SDK version: 56.0.0 Close This is the developer menu. It gives you access to useful"
+  },
+  {
+    "area": "offline",
+    "claim": "and shows no raw technical string",
+    "ok": true,
+    "detail": ""
+  }
+]
