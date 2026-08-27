@@ -1,0 +1,62 @@
+[
+  {
+    "area": "auth",
+    "claim": "a real credential reaches the authenticated app",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "area": "session",
+    "claim": "the token is persisted",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "area": "session",
+    "claim": "the user record is persisted",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "area": "session",
+    "claim": "the tenant context is cached for offline use",
+    "ok": true,
+    "detail": "token=true user=true contextCache=true"
+  },
+  {
+    "area": "session",
+    "claim": "a cold start with a stored token lands in the app",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "area": "appstate",
+    "claim": "a background/foreground cycle does not break the screen",
+    "ok": true,
+    "detail": "3120ms"
+  },
+  {
+    "area": "offline",
+    "claim": "the app still opens with no network",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "area": "offline",
+    "claim": "and says the context is cached rather than pretending it is live",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "area": "offline",
+    "claim": "no raw technical string is shown",
+    "ok": true,
+    "detail": "AB Your institute ABC Coaching   Good afternoon, ABC Ready when you are Showing saved information — we could not reach"
+  },
+  {
+    "area": "notifications",
+    "claim": "the alerts tab loads from /api/notifications",
+    "ok": true,
+    "detail": ""
+  }
+]

@@ -1,0 +1,68 @@
+[
+  {
+    "area": "auth",
+    "claim": "Org 001 student signed in",
+    "ok": true,
+    "detail": ""
+  },
+  {
+    "area": "exams",
+    "claim": "the live exam shows a startable action",
+    "ok": true,
+    "detail": "Resume attempt (aria-disabled=null)"
+  },
+  {
+    "area": "exams",
+    "claim": "the exam reads as live, not ended",
+    "ok": true,
+    "detail": " Exams Assigned to you AG Physics Unit Test live Physics 11 in progress 3 questions · 30 min Resume attempt "
+  },
+  {
+    "area": "attempt",
+    "claim": "the player opens on a real attempt",
+    "ok": true,
+    "detail": "/attempt/6a8fe841dd37d081146464f9"
+  },
+  {
+    "area": "timer",
+    "claim": "a countdown is shown",
+    "ok": true,
+    "detail": "14:46"
+  },
+  {
+    "area": "timer",
+    "claim": "and it advances once per second",
+    "ok": true,
+    "detail": "14:46 -> 14:43"
+  },
+  {
+    "area": "timer",
+    "claim": "the deadline is server-issued",
+    "ok": true,
+    "detail": "2026-08-27T08:03:21.222Z"
+  },
+  {
+    "area": "answers",
+    "claim": "question options render",
+    "ok": true,
+    "detail": "4 options"
+  },
+  {
+    "area": "answers",
+    "claim": "the answer is stored server-side",
+    "ok": true,
+    "detail": "1 -> 1, status in-progress"
+  },
+  {
+    "area": "recovery",
+    "claim": "reloading mid-attempt resumes the same attempt",
+    "ok": true,
+    "detail": "4 options"
+  },
+  {
+    "area": "recovery",
+    "claim": "the attempt is still in progress after a reload",
+    "ok": true,
+    "detail": "in-progress"
+  }
+]

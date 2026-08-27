@@ -15,6 +15,17 @@
  * collection other than the two public-facing ones, and every write is an
  * upsert keyed on a stable title so re-running it changes nothing.
  *
+ * ── The content belongs to an organization ──────────────────────────────────
+ * Public content is still OWNED — an institute published it. The first version
+ * of this script imported models before `registerTenancy()`, so `orgId` was not
+ * in the schema and every seeded document was written unowned. Since the public
+ * surface turns out to be platform-global (see `public-contract-audit.ts`) that
+ * made no visible difference, which is precisely why it went unnoticed.
+ *
+ * Everything is attributed to the FIRST organization in the fixture, so the
+ * platform-global behaviour is demonstrable in the app: a visitor exploring the
+ * other institute still sees this content.
+ *
  * ── What it seeds, and why so little ────────────────────────────────────────
  * Four study resources and three practice tests. Enough for the explore screen
  * to show a subject row, a featured list and a browsable test list; few enough
@@ -29,6 +40,12 @@
 
 import 'dotenv/config';
 import mongoose from 'mongoose';
+// MUST precede every model import — `mongoose.plugin()` only applies to schemas
+// compiled after it runs, and a model compiled without it has no `orgId` path
+// at all, so strict mode drops the value silently. See core/tenancy/bootstrap.
+import { registerTenancy } from '../../src/core/tenancy/bootstrap';
+
+registerTenancy();
 
 const uri = process.env.P6_MONGO_URI || process.env.SCRATCH_MONGO_URI;
 
@@ -72,6 +89,7 @@ async function main(): Promise<void> {
   const { default: StudyResource } = await import('../../src/models/StudyResource');
   const { default: PublicTest } = await import('../../src/models/PublicTest');
   const { default: User } = await import('../../src/models/User');
+  const { default: Org } = await import('../../src/models/Org');
 
   // `createdBy` is required on PublicTest. Any existing fixture user satisfies
   // the reference; the field is never returned to a guest.
@@ -80,6 +98,17 @@ async function main(): Promise<void> {
     console.error('No user exists in this fixture. Run seed-p6-fixture.ts first.');
     process.exit(2);
   }
+
+  // The publishing institute. Set explicitly because a script has no request
+  // context for the plugin to resolve one from; the `save` hook respects an
+  // explicit value, and `setOnInsert` does the same for an upsert.
+  const owner = await Org.findOne({}).sort({ createdAt: 1 }).select('_id name').lean();
+  if (!owner) {
+    console.error('No organization exists in this fixture. Run seed-p6-fixture.ts first.');
+    process.exit(2);
+  }
+  const orgId = String((owner as any)._id);
+  console.log(`[seed] attributing public content to ${(owner as any).name} (${orgId})`);
 
   const resources = [
     {
@@ -126,6 +155,7 @@ async function main(): Promise<void> {
       {
         $set: {
           ...resource,
+          orgId,
           // The two flags that put it on the public surface. Stated explicitly
           // rather than left to schema defaults, because these ARE the point.
           status: 'published',
@@ -173,6 +203,7 @@ async function main(): Promise<void> {
       {
         $set: {
           ...test,
+          orgId,
           kind: 'TEST',
           status: 'published',
           // No questions. The public surface never returns them, and seeding
