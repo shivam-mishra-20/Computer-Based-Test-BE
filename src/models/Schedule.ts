@@ -11,6 +11,25 @@ export interface ISchedule extends Document {
   endTimeSlot: string;   // "15:30" format
   // For custom schedules (specific date)
   date?: Date;
+  /**
+   * Validity window for a REGULAR (weekly recurring) schedule.
+   *
+   * Without this, a weekly slot has no beginning and no end: a row created
+   * today is indistinguishable from one that has run all year, so any report
+   * that expands the timetable onto past dates projects today's roster
+   * backwards over months it never applied to. That is silently wrong, and
+   * historical workload and efficiency reporting cannot be trusted without it.
+   *
+   * Both ends are optional and both are INCLUSIVE:
+   *   effectiveFrom absent → consumers fall back to `createdAt`, because a
+   *     schedule cannot have applied before it existed. Set it explicitly to
+   *     backdate a slot that really did run earlier.
+   *   effectiveTo absent → open-ended, still running.
+   *
+   * Ignored for `custom` schedules, which already carry their own single date.
+   */
+  effectiveFrom?: Date;
+  effectiveTo?: Date;
   // Class details
   subject: string;
   classLevel: string;
@@ -38,6 +57,8 @@ const scheduleSchema = new Schema<ISchedule>({
   startTimeSlot: { type: String, required: true },
   endTimeSlot: { type: String, required: true },
   date: { type: Date, index: true },
+  effectiveFrom: { type: Date },
+  effectiveTo: { type: Date },
   subject: { type: String, required: true },
   classLevel: { type: String, required: true, index: true },
   batch: { type: String, default: '', index: true },
@@ -49,6 +70,20 @@ const scheduleSchema = new Schema<ISchedule>({
   createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   isActive: { type: Boolean, default: true }
 }, { timestamps: true });
+
+/** An end before the start would silently match no dates at all. */
+scheduleSchema.pre('validate', function (next) {
+  const doc = this as any;
+  if (doc.effectiveFrom && doc.effectiveTo && doc.effectiveTo < doc.effectiveFrom) {
+    return next(new Error('effectiveTo cannot be earlier than effectiveFrom'));
+  }
+  next();
+});
+
+// A retired weekly slot is `isActive: false` with an `effectiveTo`; historical
+// reports read it back through this index while every live view keeps filtering
+// on `isActive` alone and never sees it.
+scheduleSchema.index({ scheduleType: 1, effectiveFrom: 1, effectiveTo: 1 });
 
 // Compound indexes for efficient queries
 scheduleSchema.index({ classLevel: 1, batch: 1, dayOfWeek: 1 });

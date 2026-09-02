@@ -43,6 +43,7 @@ import commentRoutes from './routes/api/commentRoutes';
 import practiceTestRoutes from './routes/api/practiceTestRoutes';
 import leaveRoutes from './routes/api/leaveRoutes';
 import attendanceRuleRoutes from './routes/api/attendanceRuleRoutes';
+import dailyHoursRoutes from './routes/api/dailyHoursRoutes';
 import syllabusRoutes from './routes/api/syllabusRoutes';
 import automationRoutes from './routes/api/automation';
 import resourceRoutes from './routes/api/resourceRoutes';
@@ -281,6 +282,8 @@ app.use('/api/practice-tests', practiceTestRoutes);
 app.use('/api/leaves', leaveRoutes);
 // Attendance timing & deduction rules (admin-configurable)
 app.use('/api/attendance-rules', attendanceRuleRoutes);
+// Daily working hours report (attendance + schedule + EOD, read-only)
+app.use('/api/daily-hours', dailyHoursRoutes);
 // Syllabus management routes
 app.use('/api/syllabus', syllabusRoutes);
 // Study resources (videos/PDFs) routes

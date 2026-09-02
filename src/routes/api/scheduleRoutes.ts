@@ -1888,9 +1888,44 @@ router.delete('/:scheduleId', authMiddleware, invalidateCacheOn(['schedule']), a
     if (!schedule) {
       return res.status(404).json({ error: 'Schedule not found' });
     }
-    
-    await Schedule.findByIdAndDelete(req.params.scheduleId);
-    
+
+    // ── Retire, don't erase ───────────────────────────────────────────────
+    // A weekly slot that has been running for months is not undone by being
+    // removed today. Hard-deleting it erased every past occurrence from every
+    // historical report — a class that was genuinely taught in July silently
+    // stopped having been scheduled. So the default is retirement: the row is
+    // deactivated and given an end date, which keeps it out of every live view
+    // (they all filter `isActive`) while leaving history intact.
+    //
+    // `effectiveTo` defaults to TODAY rather than yesterday: on the day of
+    // removal we cannot know whether the class had already run. Keeping it
+    // risks one explainable "uncovered class" flag that the timeline makes
+    // obvious; dropping it would silently delete a lesson the teacher taught
+    // this morning. Callers who know better can pass an explicit date.
+    //
+    // `?hard=true` is the escape hatch for a row created in error, which never
+    // ran and should not appear in any report.
+    const hard = String(req.query.hard || '') === 'true';
+    if (hard) {
+      await Schedule.findByIdAndDelete(req.params.scheduleId);
+    } else {
+      const requested = String(req.query.effectiveTo || '').trim();
+      let endDate = new Date();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(requested)) {
+        const [y, m, d] = requested.split('-').map(Number);
+        endDate = new Date(y, m - 1, d);
+      }
+      endDate.setHours(23, 59, 59, 999);
+
+      schedule.isActive = false;
+      // Custom sessions carry their own single date; an end date on them would
+      // be noise, and a session removed before its date should simply not count.
+      if (schedule.scheduleType === 'regular') {
+        schedule.effectiveTo = endDate;
+      }
+      await schedule.save();
+    }
+
     // Notify about cancellation
     notifyScheduleAudienceByBatches(
       `Class Cancelled: ${schedule.subject}`,
