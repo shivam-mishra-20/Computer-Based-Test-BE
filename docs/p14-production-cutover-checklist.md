@@ -50,7 +50,72 @@ src/models/Org.ts                ABSENT
 scripts/safety/                  ABSENT
 ```
 
-`phase/p13-client-platform-final` is **40 commits ahead of `main`**.
+`phase/p13-client-platform-final` is **40 commits ahead of `main`**, and the
+release branch `phase/p14-production-cutover` is **41 ahead**.
+
+### The merge is not a fast-forward
+
+Re-verified 2026-09-04 during the release audit:
+
+| Fact | Value |
+|---|---|
+| `phase/p14-production-cutover` ahead of `main` | **41 commits** |
+| `main` ahead of `phase/p14-production-cutover` | **1 commit** — `907ceea` |
+
+`907ceea "Daily Working Hours report"` exists only on `main`. The release branch
+already carries most of that feature (via `f4fae6a "Working hours added"`), so
+`907ceea` is a refinement of work that is on both sides. Four of its seven files
+are byte-identical across the branches; **three differ and need attention during
+the merge**:
+
+| File | Difference (main → release branch) | Risk |
+|---|---|---|
+| `src/app.ts` | +95, pure additions (tenancy wiring) | Low — different regions |
+| `src/services/dailyHoursService.ts` | −11 / +2 — **the release branch has the OLDER version** | Take `main`'s |
+| `src/routes/api/scheduleRoutes.ts` | +119 / −151 | **Hotspot** — see below |
+
+### `scheduleRoutes.ts` — the one file to be careful with
+
+Three versions of this file are in play at once:
+
+1. `main` HEAD
+2. `main`'s **uncommitted working tree** — the schedule-parser work
+   (−184 / +63), plus two new untracked files
+   (`src/services/scheduleImageParsers.ts`, 357 lines;
+   `src/scripts/verify_schedule_parsers.ts`, 132 lines)
+3. the release branch (+119 / −151 vs `main`)
+
+The uncommitted hunks and the release branch's hunks are in **disjoint
+regions** — closest approach is ~23 lines at the imports and ~53 lines lower
+down — so a three-way merge should resolve without conflict. That is a
+prediction, not a guarantee.
+
+**Git will refuse to merge at all while the tree is dirty.** The uncommitted
+schedule work and the two untracked files must be committed (or stashed) on
+`main` before any merge is attempted. Nothing about the merge is safe to start
+until they are.
+
+### The API contract baseline is one endpoint out of date
+
+`npm run safety:api-check` **fails** on the release branch:
+
+```
+[api-contract] CHANGED vs docs/baselines/api-contract-2026-08-24.txt
+  + GET    /api/daily-hours   [requireRole(teacher|admin) authMiddleware]
+```
+
+One line, **added**, properly guarded, from `907ceea`/`f4fae6a`. Nothing is
+removed or altered, so it cannot break the legacy app — an endpoint that did
+not exist cannot be depended on. But the check stays red until the baseline is
+re-snapshotted, and a red check nobody expects to be green stops being read:
+
+```bash
+npx ts-node --transpile-only scripts/safety/api-contract-snapshot.ts \
+  --out docs/baselines/api-contract-2026-09-04.txt
+```
+
+Do this **after** the merge, so the baseline records the merged surface, and
+update `package.json`'s `safety:api-check` to point at the new file.
 
 ### The production database
 
@@ -136,7 +201,10 @@ authorise it**, in the order given.
 
 | # | Blocker | What unblocks it |
 |---|---|---|
-| **1** | **`main` has none of the tenancy code.** Production deploys `main`; P13 is 40 commits ahead. Steps 2, 3, 8, 9, 10, 11, 12 all presuppose deployed code that does not exist in the deployable branch. | Merge the phase branches into `main` and cut a release. **This is a GitHub operation I am not permitted to perform** — it is yours. |
+| **1** | **`main` has none of the tenancy code.** Production deploys `main`; the release branch is 41 commits ahead. Steps 2, 3, 8, 9, 10, 11, 12 all presuppose deployed code that does not exist in the deployable branch. | Merge the phase branches into `main` and cut a release. **This is a GitHub operation I am not permitted to perform** — it is yours. |
+| **1a** | **`main`'s working tree is dirty.** The schedule-parser work is uncommitted and two files are untracked. Git refuses to merge over them. | Commit or stash them on `main` first. |
+| **1b** | **`main` has one commit the release branch lacks** (`907ceea`), and three files differ. | Merge `main` into the release branch first, resolving `scheduleRoutes.ts` and taking `main`'s `dailyHoursService.ts`. |
+| **1c** | `safety:api-check` is red — the baseline predates `GET /api/daily-hours`. | Re-snapshot after the merge. Additive only; not a functional risk. |
 | 13b | `attendancerules.role_1` cannot be dropped — its replacement `orgId_1_role_1` does not exist in production. The model declares it; it has simply never been built. | Build `{orgId: 1, role: 1}` unique on `attendancerules`, then re-run the drop. The script already refuses this one collection on its own. |
 | 8 | api-platform has no hostname — the deployment does not exist. | Create it (Step 8), then record the hostname. |
 | 15 | `EXPO_PUBLIC_API_BASE_URL` for the production app build is empty **on purpose**, because there is no correct value until Step 8. | Step 8. |
@@ -620,7 +688,14 @@ and 14 operate on the database and on Firebase and are independent of it, but
 running the backfill against a database whose API has no tenancy code leaves the
 system in a half-migrated state for however long the merge takes.
 
-**Recommended order:** merge and release first, then 4 → 5 → 2 → 3 → 6 → 7 →
-8 → 9 → 10 → 13 → 11 → 12 → 14 → 15.
+**Recommended order:** get the branches into one line first —
+
+1. commit or stash the uncommitted schedule work on `main`
+2. merge `main` into `phase/p14-production-cutover` (resolve `scheduleRoutes.ts`;
+   take `main`'s `dailyHoursService.ts`)
+3. re-run the no-production suites, re-snapshot the API contract
+4. merge the release branch into `main` and tag
+
+— then 4 → 5 → 2 → 3 → 6 → 7 → 8 → 9 → 10 → 13 → 11 → 12 → 14 → 15.
 
 Merging and releasing is a GitHub operation. It is yours to perform.

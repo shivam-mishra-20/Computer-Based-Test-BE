@@ -1,5 +1,24 @@
 # P10 — Production cutover runbook
 
+> ## ⚠ SUPERSEDED by `p14-production-cutover-checklist.md`
+>
+> This runbook was written on 2026-08-19, before P11–P13 and before production
+> was ever measured. Two of its assumptions turned out to be false:
+>
+> * It assumes the tenancy code is **deployed** and the cutover is a
+>   configuration change. It is not — production runs `main`, which contains
+>   none of P1–P13. Every `/api/platform/*` and `/api/me/context` route returns
+>   404 on the live deployment.
+> * It assumes the production database has **no** tenancy indexes. It already
+>   has `orgId_1`, `branchId_1` and four unique compounds, created by Mongoose
+>   `autoIndex` from a developer machine.
+>
+> Its step ordering is also wrong in one place: Org 001 must exist **before**
+> api-legacy boots, because pinned mode needs its `ORG_ID`.
+>
+> Use P14. This document is kept for its per-step reasoning and its rollback
+> table, both of which remain sound.
+
 Prepared 2026-08-19. **Nothing in this document has been executed.** No
 production data, index, deployment, environment variable or Storage ACL was
 touched while writing it.
