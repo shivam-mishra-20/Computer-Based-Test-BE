@@ -1,0 +1,542 @@
+{
+  "capturedAt": "2026-09-04T05:29:42.397Z",
+  "database": "abhigyangurukul",
+  "exclusionsMatchBackfill": true,
+  "totals": {
+    "collections": 66,
+    "documents": 238753,
+    "alreadyAttributed": 0,
+    "wouldWrite": 238753,
+    "publicLearners": 1
+  },
+  "collections": [
+    {
+      "name": "aigenerations",
+      "total": 15,
+      "withOrgId": 0,
+      "missingOrgId": 15,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "announcements",
+      "total": 0,
+      "withOrgId": 0,
+      "missingOrgId": 0,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "appsettings",
+      "total": 3,
+      "withOrgId": 0,
+      "missingOrgId": 3,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "attempts",
+      "total": 48,
+      "withOrgId": 0,
+      "missingOrgId": 48,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "attendancerules",
+      "total": 1,
+      "withOrgId": 0,
+      "missingOrgId": 1,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "attendances",
+      "total": 8957,
+      "withOrgId": 0,
+      "missingOrgId": 8957,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "auditlogs",
+      "total": 184446,
+      "withOrgId": 0,
+      "missingOrgId": 184446,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "automationstatuses",
+      "total": 1,
+      "withOrgId": 0,
+      "missingOrgId": 1,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "batches",
+      "total": 10,
+      "withOrgId": 0,
+      "missingOrgId": 10,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "blueprints",
+      "total": 0,
+      "withOrgId": 0,
+      "missingOrgId": 0,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "blueprinttemplates",
+      "total": 0,
+      "withOrgId": 0,
+      "missingOrgId": 0,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "bookmarks",
+      "total": 0,
+      "withOrgId": 0,
+      "missingOrgId": 0,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "class_10",
+      "total": 616,
+      "withOrgId": 0,
+      "missingOrgId": 616,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "class_11",
+      "total": 3483,
+      "withOrgId": 0,
+      "missingOrgId": 3483,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "class_12",
+      "total": 1856,
+      "withOrgId": 0,
+      "missingOrgId": 1856,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "class_6",
+      "total": 60,
+      "withOrgId": 0,
+      "missingOrgId": 60,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "class_7",
+      "total": 77,
+      "withOrgId": 0,
+      "missingOrgId": 77,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "class_8",
+      "total": 298,
+      "withOrgId": 0,
+      "missingOrgId": 298,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "class_9",
+      "total": 883,
+      "withOrgId": 0,
+      "missingOrgId": 883,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "classrequests",
+      "total": 0,
+      "withOrgId": 0,
+      "missingOrgId": 0,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "courseprogresses",
+      "total": 60,
+      "withOrgId": 0,
+      "missingOrgId": 60,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "courses",
+      "total": 21,
+      "withOrgId": 0,
+      "missingOrgId": 21,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "doubtfiles",
+      "total": 0,
+      "withOrgId": 0,
+      "missingOrgId": 0,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "doubts",
+      "total": 159,
+      "withOrgId": 0,
+      "missingOrgId": 159,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "eods",
+      "total": 504,
+      "withOrgId": 0,
+      "missingOrgId": 504,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "examevaluations",
+      "total": 11,
+      "withOrgId": 0,
+      "missingOrgId": 11,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "exams",
+      "total": 9,
+      "withOrgId": 0,
+      "missingOrgId": 9,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "filemetadatas",
+      "total": 117,
+      "withOrgId": 0,
+      "missingOrgId": 117,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "guidances",
+      "total": 0,
+      "withOrgId": 0,
+      "missingOrgId": 0,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "holidays",
+      "total": 11,
+      "withOrgId": 0,
+      "missingOrgId": 11,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "homeworks",
+      "total": 124,
+      "withOrgId": 0,
+      "missingOrgId": 124,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "importbatches",
+      "total": 645,
+      "withOrgId": 0,
+      "missingOrgId": 645,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "importedquestions",
+      "total": 2731,
+      "withOrgId": 0,
+      "missingOrgId": 2731,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "imports",
+      "total": 278,
+      "withOrgId": 0,
+      "missingOrgId": 278,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "learnerprogresses",
+      "total": 1,
+      "withOrgId": 0,
+      "missingOrgId": 1,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "learnersaves",
+      "total": 1,
+      "withOrgId": 0,
+      "missingOrgId": 1,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "leaves",
+      "total": 63,
+      "withOrgId": 0,
+      "missingOrgId": 63,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "lectures",
+      "total": 0,
+      "withOrgId": 0,
+      "missingOrgId": 0,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "materialcomments",
+      "total": 18,
+      "withOrgId": 0,
+      "missingOrgId": 18,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "materials",
+      "total": 175,
+      "withOrgId": 0,
+      "missingOrgId": 175,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "notifications",
+      "total": 29258,
+      "withOrgId": 0,
+      "missingOrgId": 29258,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "offlineresults",
+      "total": 7,
+      "withOrgId": 0,
+      "missingOrgId": 7,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "orgs",
+      "total": 0,
+      "withOrgId": 0,
+      "missingOrgId": 0,
+      "publicLearners": 0,
+      "global": true
+    },
+    {
+      "name": "paper",
+      "total": 1,
+      "withOrgId": 0,
+      "missingOrgId": 1,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "plans",
+      "total": 0,
+      "withOrgId": 0,
+      "missingOrgId": 0,
+      "publicLearners": 0,
+      "global": true
+    },
+    {
+      "name": "platformusers",
+      "total": 0,
+      "withOrgId": 0,
+      "missingOrgId": 0,
+      "publicLearners": 0,
+      "global": true
+    },
+    {
+      "name": "playlistimports",
+      "total": 15,
+      "withOrgId": 0,
+      "missingOrgId": 15,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "practicetests",
+      "total": 19,
+      "withOrgId": 0,
+      "missingOrgId": 19,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "processingstats",
+      "total": 62,
+      "withOrgId": 0,
+      "missingOrgId": 62,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "publicattempts",
+      "total": 3,
+      "withOrgId": 0,
+      "missingOrgId": 3,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "publictests",
+      "total": 1,
+      "withOrgId": 0,
+      "missingOrgId": 1,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "publictestseries",
+      "total": 0,
+      "withOrgId": 0,
+      "missingOrgId": 0,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "questions",
+      "total": 0,
+      "withOrgId": 0,
+      "missingOrgId": 0,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "ragchunks",
+      "total": 1,
+      "withOrgId": 0,
+      "missingOrgId": 1,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "reviewauditlogs",
+      "total": 47,
+      "withOrgId": 0,
+      "missingOrgId": 47,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "roomallocations",
+      "total": 2,
+      "withOrgId": 0,
+      "missingOrgId": 2,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "schedules",
+      "total": 2665,
+      "withOrgId": 0,
+      "missingOrgId": 2665,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "scholarshipattempts",
+      "total": 42,
+      "withOrgId": 0,
+      "missingOrgId": 42,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "scholarshiptests",
+      "total": 6,
+      "withOrgId": 0,
+      "missingOrgId": 6,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "studentprogresses",
+      "total": 547,
+      "withOrgId": 0,
+      "missingOrgId": 547,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "studyresources",
+      "total": 54,
+      "withOrgId": 0,
+      "missingOrgId": 54,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "subscriptions",
+      "total": 0,
+      "withOrgId": 0,
+      "missingOrgId": 0,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "syllabuses",
+      "total": 16,
+      "withOrgId": 0,
+      "missingOrgId": 16,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "teachingknowledgegraphs",
+      "total": 14,
+      "withOrgId": 0,
+      "missingOrgId": 14,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "testresults",
+      "total": 152,
+      "withOrgId": 0,
+      "missingOrgId": 152,
+      "publicLearners": 0,
+      "global": false
+    },
+    {
+      "name": "users",
+      "total": 159,
+      "withOrgId": 0,
+      "missingOrgId": 159,
+      "publicLearners": 1,
+      "global": false
+    }
+  ]
+}
