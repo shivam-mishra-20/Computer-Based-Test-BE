@@ -17,7 +17,7 @@ Measured, not assumed. Re-run any of these before starting — they are all
 read-only and safe against a live cluster.
 
 ```bash
-export MONGO_URI="…"                                  # from cbt-exam-be/.env
+export MONGO_URI="…"                                  # from central-be/.env
 npx ts-node --transpile-only scripts/safety/db-inventory.ts
 npx ts-node --transpile-only scripts/safety/orgid-coverage.ts
 npx ts-node --transpile-only scripts/safety/firebase-access-check.ts

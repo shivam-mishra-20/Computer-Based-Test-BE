@@ -15,7 +15,7 @@ the only difference is `export VAR=value` instead of `$env:VAR = value`.
 
 ## 0. One-time setup
 
-Run from `c:/Users/Shivam/cbt-exam-be`.
+Run from `c:/Users/Shivam/central-be`.
 
 ```powershell
 # Tenant fixture: two organizations, four users each, deliberately different

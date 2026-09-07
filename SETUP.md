@@ -3,7 +3,7 @@
 ## 🚀 Installation
 
 ```bash
-cd cbt-exam-be
+cd central-be
 
 # Install new dependencies
 npm install ioredis@^5.4.1 @socket.io/redis-adapter@^8.3.0 express-rate-limit@^7.5.0 rate-limit-redis@^4.2.0

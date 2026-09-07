@@ -41,3 +41,7 @@ backups/
 .p6-uri
 
 .p6-uri-restore
+
+# Any other scratch URI file. The two above are the ones that exist today;
+# the glob is what stops the third one from being committed.
+.p6-uri-*

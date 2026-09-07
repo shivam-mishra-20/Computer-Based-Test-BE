@@ -44,7 +44,14 @@ async function main(): Promise<void> {
   console.log('\nFIREBASE ACCESS — READ ONLY\n');
 
   // ── 1. What credentials exist here ───────────────────────────────────────
-  const keyPath = join(process.cwd(), '..', 'cbt-exam-be', 'firebase-admin.json');
+  // The credential lives beside package.json in a normal checkout. The
+  // previous version reached into a hard-coded sibling directory, which was a
+  // worktree convenience that would have broken the moment the repository was
+  // renamed — exactly the class of reference this rename was meant to find.
+  //
+  // A worktree has no untracked credential of its own, so the base64 form the
+  // application already supports is the portable answer there.
+  const keyPath = join(process.cwd(), 'firebase-admin.json');
   const hasKeyFile = existsSync(keyPath);
   let projectId = '';
   let clientEmail = '';
@@ -64,7 +71,10 @@ async function main(): Promise<void> {
   record('bucket configured', Boolean(bucket), bucket || 'FIREBASE_STORAGE_BUCKET is unset');
 
   if (!hasKeyFile) {
-    console.log('\n  No credentials on this machine — every Firebase step is BLOCKED here.');
+    console.log(
+      '\n  No firebase-admin.json beside package.json. Either run this from the' +
+        '\n  main checkout, or set FIREBASE_ADMIN_CREDENTIALS_BASE64.',
+    );
     return;
   }
 
