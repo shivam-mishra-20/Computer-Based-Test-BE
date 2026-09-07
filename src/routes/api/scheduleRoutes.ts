@@ -1,6 +1,15 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import sharp from 'sharp';
+import {
+  normalizeForMatch,
+  matchBatchLabel,
+  matchTeacherName,
+  splitCellText,
+  parseTimeRangeLabel,
+  parseRowLabel,
+  looksLikeScheduleCell,
+} from '../../services/scheduleImageParsers';
 import Schedule from '../../models/Schedule';
 import Batch from '../../models/Batch';
 import User from '../../models/User';
@@ -1959,180 +1968,6 @@ const scheduleImageUpload = multer({
   },
 });
 
-function normalizeForMatch(s: string): string {
-  return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-}
-
-/** Exact → prefix → token-overlap match against a small candidate list (tens of items). */
-function matchBatchLabel(raw: string | undefined, candidates: string[]): { matched: string | null } {
-  const needle = normalizeForMatch(raw || '');
-  if (!needle) return { matched: null };
-
-  for (const c of candidates) {
-    if (normalizeForMatch(c) === needle) return { matched: c };
-  }
-  for (const c of candidates) {
-    const cn = normalizeForMatch(c);
-    if (cn.startsWith(needle) || needle.startsWith(cn)) return { matched: c };
-  }
-  const needleTokens = new Set(needle.split(' ').filter(Boolean));
-  let best: { name: string; score: number } | null = null;
-  for (const c of candidates) {
-    const overlap = normalizeForMatch(c).split(' ').filter((t) => needleTokens.has(t)).length;
-    if (overlap > 0 && (!best || overlap > best.score)) best = { name: c, score: overlap };
-  }
-  return { matched: best ? best.name : null };
-}
-
-/** Never silently pick between two equally-good matches (e.g. two "Priya"s). */
-function matchTeacherName(
-  raw: string | undefined,
-  teachers: { id: string; name: string }[]
-): { id: string | null; name: string; ambiguous: boolean } {
-  const rawTrimmed = String(raw || '').trim();
-  const needle = normalizeForMatch(rawTrimmed);
-  if (!needle) return { id: null, name: rawTrimmed, ambiguous: false };
-
-  const exact = teachers.filter((t) => normalizeForMatch(t.name) === needle);
-  if (exact.length === 1) return { id: exact[0].id, name: exact[0].name, ambiguous: false };
-  if (exact.length > 1) return { id: null, name: rawTrimmed, ambiguous: true };
-
-  const needleTokens = needle.split(' ').filter(Boolean);
-  const partial = teachers.filter((t) => {
-    const tTokens = normalizeForMatch(t.name).split(' ').filter(Boolean);
-    return needleTokens.some((nt) => tTokens.includes(nt));
-  });
-  if (partial.length === 1) return { id: partial[0].id, name: partial[0].name, ambiguous: false };
-  if (partial.length > 1) return { id: null, name: rawTrimmed, ambiguous: true };
-
-  return { id: null, name: rawTrimmed, ambiguous: false };
-}
-
-// Cell text follows "Teacher Name [note] Room-Number", e.g. "Harsh sir 3" or
-// "Archit sir extra class 6". A trailing 1-2 digit number (1-11) is the room —
-// never part of the teacher's name — and a small set of recognizable note
-// keywords (extra class, makeup, etc.) get pulled out separately. This is a
-// deterministic safety net: it runs regardless of whether the model itself
-// split the cell cleanly, so a model that dumps the whole cell into
-// "teacherName" still resolves correctly.
-const CELL_NOTE_KEYWORDS: RegExp[] = [
-  /extra\s*-?\s*class/i,
-  /make\s*-?\s*up/i,
-  /doubt\s*-?\s*class/i,
-  /revision\s*-?\s*class/i,
-  /special\s*-?\s*class/i,
-  /demo\s*-?\s*class/i,
-];
-
-function titleCase(s: string): string {
-  return s.replace(/\w\S*/g, (w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
-}
-
-function splitCellText(rawCellText: string): { teacherName: string; roomNumber: number | null; note: string } {
-  let text = String(rawCellText || '')
-    .replace(/[\r\n]+/g, ' ')
-    .replace(/\\/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  let note = '';
-  for (const kw of CELL_NOTE_KEYWORDS) {
-    const m = text.match(kw);
-    if (m) {
-      note = titleCase(m[0].replace(/\s*-\s*/g, ' ').replace(/\s+/g, ' ').trim());
-      text = text.replace(kw, ' ').replace(/\s+/g, ' ').trim();
-      break;
-    }
-  }
-
-  let roomNumber: number | null = null;
-  let teacherName = text;
-  const roomMatch = text.match(/^(.*?)[\s,\-–—]*?(\d{1,2})$/);
-  if (roomMatch) {
-    const n = Number(roomMatch[2]);
-    if (n >= 1 && n <= 11) {
-      roomNumber = n;
-      teacherName = roomMatch[1].trim();
-    }
-  }
-
-  teacherName = teacherName.replace(/[\s,\-–—]+$/, '').trim();
-  return { teacherName, roomNumber, note };
-}
-
-/**
- * Deterministically parse a verbatim column header like "4:30-5:30PM" into
- * 24h start/end. The model is NEVER trusted to compute or normalize this
- * itself (per anti-hallucination requirement) — it only transcribes the
- * printed text, and this is the one place that turns it into a time. Meridiem
- * is read from the trailing AM/PM only; the start hour's AM/PM is inferred by
- * picking whichever interpretation yields a short, positive duration (handles
- * ranges that cross noon, e.g. "11:30-12:30PM" = 11:30 AM to 12:30 PM).
- * Returns null if the header can't be confidently parsed — callers must flag
- * for review rather than guess.
- */
-function parseTimeRangeLabel(label: string): { startTimeSlot: string; endTimeSlot: string } | null {
-  const m = String(label || '').match(/(\d{1,2})[:.](\d{2})\s*[-–—]\s*(\d{1,2})[:.](\d{2})\s*(AM|PM)/i);
-  if (!m) return null;
-  const startHour = Number(m[1]);
-  const startMin = Number(m[2]);
-  const endHour = Number(m[3]);
-  const endMin = Number(m[4]);
-  const meridiem = m[5].toUpperCase();
-  if (startHour < 1 || startHour > 12 || endHour < 1 || endHour > 12) return null;
-  if (startMin > 59 || endMin > 59) return null;
-
-  const to24 = (h: number, isPM: boolean) => (h === 12 ? (isPM ? 12 : 0) : isPM ? h + 12 : h);
-  const endIsPM = meridiem === 'PM';
-  const end24 = to24(endHour, endIsPM);
-  const endTotalMin = end24 * 60 + endMin;
-
-  const candidates = [false, true]
-    .map((isPM) => {
-      const h24 = to24(startHour, isPM);
-      const totalMin = h24 * 60 + startMin;
-      return { h24, duration: endTotalMin - totalMin };
-    })
-    .filter((c) => c.duration > 0 && c.duration <= 180);
-  if (!candidates.length) return null;
-  candidates.sort((a, b) => a.duration - b.duration);
-
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return {
-    startTimeSlot: `${pad(candidates[0].h24)}:${pad(startMin)}`,
-    endTimeSlot: `${pad(end24)}:${pad(endMin)}`,
-  };
-}
-
-/**
- * Deterministically split a verbatim row label ("8th adv", "11th JEE B1",
- * "7th") into classLevel + batch. The model only transcribes the label; it
- * never decides this split itself, removing an entire class of drift where
- * the same row could be split differently across cells.
- */
-function parseRowLabel(label: string): { classLevel: string; batch: string } | null {
-  const m = String(label || '').trim().match(/^(\d{1,2})\s*(?:st|nd|rd|th)?\.?\s*(.*)$/i);
-  if (!m) return null;
-  return { classLevel: m[1], batch: m[2].trim() };
-}
-
-// A populated timetable cell is a teacher allocation (+ optional room/note),
-// NOT a general announcement or reminder — those must never become schedule
-// entries. Strong signals: a trailing room number, or a common honorific.
-// Short cells (<=3 words, no sentence punctuation) are still allowed through
-// since most genuine allocations are just a bare name; longer sentence-like
-// text is treated as a note and excluded.
-const HONORIFIC_RE = /\b(sir|ma'?am|madam|miss|mr|mrs|ms)\b/i;
-function looksLikeScheduleCell(rawText: string): boolean {
-  const text = String(rawText || '').trim();
-  if (!text) return false;
-  if (HONORIFIC_RE.test(text)) return true;
-  if (/\d{1,2}\s*$/.test(text)) return true;
-  const wordCount = text.split(/\s+/).filter(Boolean).length;
-  if (wordCount <= 3 && !/[.!?](\s+\w)/.test(text)) return true;
-  return false;
-}
-
 /** Trust the extracted date only if it parses and lands near the admin's hint date. */
 function resolveScheduleDate(extractedIso: unknown, hintIso: string): { date: string; needsReview: boolean } {
   const hint = /^\d{4}-\d{2}-\d{2}$/.test(hintIso) ? hintIso : new Date().toISOString().split('T')[0];
@@ -2156,12 +1991,33 @@ async function normalizeImageForVision(buffer: Buffer): Promise<{ buffer: Buffer
   try {
     const meta = await sharp(buffer).metadata();
     const format = meta.format;
+
+    // ── .rotate() FIRST, and it is not optional ──────────────────────────
+    // sharp does NOT auto-apply EXIF orientation; resize() alone ignores it
+    // entirely. A phone photo saved with Orientation 6 or 8 (every iPhone and
+    // most Android cameras held in portrait) therefore reached the model
+    // rotated 90 degrees, where a timetable grid is unreadable. That is a
+    // large part of "the same image works when I retry" — retrying from a
+    // screenshot, or from a differently-oriented shot, worked. Called with no
+    // argument, rotate() means "apply the EXIF orientation and strip it".
+    //
+    // Small screenshots are upscaled rather than left alone: a 900px-wide
+    // dense grid downsamples to unreadable glyphs inside the model's own
+    // patching, and withoutEnlargement meant we never gave it more pixels to
+    // work with. 2500 is the same ceiling as before, so large photos are
+    // unchanged.
+    const MIN_WIDTH = 1400;
+    const MAX_WIDTH = 2500;
+    const width = meta.width || 0;
+    const targetWidth = width > 0 && width < MIN_WIDTH ? Math.min(MIN_WIDTH, width * 2) : MAX_WIDTH;
+    const pipeline = () => sharp(buffer).rotate().resize({ width: targetWidth, withoutEnlargement: false });
+
     if (format === 'jpeg' || format === 'png' || format === 'webp') {
-      const resized = await sharp(buffer).resize({ width: 2500, withoutEnlargement: true }).toBuffer();
+      const resized = await pipeline().toBuffer();
       return { buffer: resized, mimeType: format === 'jpeg' ? 'image/jpeg' : `image/${format}` };
     }
     // heic/bmp/gif/tiff/unknown → re-encode to PNG (mirrors aiService.ts's OCR normalize step).
-    const png = await sharp(buffer).resize({ width: 2500, withoutEnlargement: true }).png().toBuffer();
+    const png = await pipeline().png().toBuffer();
     return { buffer: png, mimeType: 'image/png' };
   } catch (convErr) {
     console.warn('[schedule/extract-image] image normalize failed, sending original bytes:', convErr instanceof Error ? convErr.message : convErr);
@@ -2436,13 +2292,14 @@ router.post(
       type BuiltEntry = ReturnType<typeof buildEntry>;
       function buildEntry(idx: number, opts: {
         rowLabel: string; columnLabel: string; rawText: string;
-        classLevel: string; classLevelRaw: string;
-        columnParsed: { startTimeSlot: string; endTimeSlot: string } | null;
+        classLevel: string; classLevelRaw: string; rowNeedsReview: boolean;
+        columnParsed: { startTimeSlot: string; endTimeSlot: string; assumedMeridiem: boolean } | null;
       }) {
         const uncertainFields = new Set<string>();
 
         const classLevel = normalizeClassValue(opts.classLevel) || opts.classLevel;
         if (!classLevel) uncertainFields.add('classLevel');
+        if (opts.rowNeedsReview) uncertainFields.add('classLevel');
 
         const batchCandidates = classLevel ? batchConfig.batchRules[classLevel] || [] : [];
         const rowParsed = parseRowLabel(opts.rowLabel);
@@ -2462,6 +2319,11 @@ router.post(
         const startTimeSlot = opts.columnParsed?.startTimeSlot || '';
         const endTimeSlot = opts.columnParsed?.endTimeSlot || '';
         if (!opts.columnParsed) {
+          uncertainFields.add('startTimeSlot');
+          uncertainFields.add('endTimeSlot');
+        } else if (opts.columnParsed.assumedMeridiem) {
+          // The header printed no AM/PM, so the 12-hour reading was inferred.
+          // A usable time, but never presented as if it had been transcribed.
           uncertainFields.add('startTimeSlot');
           uncertainFields.add('endTimeSlot');
         }
@@ -2531,11 +2393,11 @@ router.post(
             return;
           }
 
-          const rowParsed = rowParseCache.get(matchedRow);
-          if (!rowParsed) {
-            rejected.push({ row: rowRaw, column: columnRaw, rawText, reason: 'row label has no recognizable class number' });
-            return;
-          }
+          // parseRowLabel always returns a row now. A label with no readable
+          // class number ("Foundation", "NEET Dropper") yields an empty
+          // classLevel flagged for review, instead of deleting every cell in
+          // that row without telling anyone.
+          const rowParsed = rowParseCache.get(matchedRow) as ReturnType<typeof parseRowLabel>;
 
           seenCellKeys.add(cellKey);
           const entry = buildEntry(entries.length, {
@@ -2544,12 +2406,29 @@ router.post(
             rawText,
             classLevel: rowParsed.classLevel,
             classLevelRaw: matchedRow,
+            rowNeedsReview: rowParsed.needsReview,
             columnParsed: columnParseCache.get(matchedColumn) || null,
           });
 
           // Cross-section duplicate guard: two different declared coordinates
           // that still resolve to the exact same real schedule slot.
-          const resolvedKey = `${entry.classLevel}|${entry.batch}|${entry.startTimeSlot}|${entry.endTimeSlot}|${entry.teacherId || entry.teacherName}|${entry.roomNumber}`;
+          //
+          // ── Only FULLY RESOLVED entries may be deduplicated ────────────────
+          // The key is built from resolved fields, so an entry missing its
+          // times degenerates to `class|batch|||teacher|null` — identical for
+          // every time-less cell in the same row. Measured on a four-column
+          // row whose headers carried no AM/PM: four real classes collapsed to
+          // two, and a row of one teacher collapsed to a single entry. That is
+          // the "only one class extracted" report, and it was LOUDEST exactly
+          // when the header format was unusual, i.e. when the admin could least
+          // afford to lose rows. An entry that could not be resolved is
+          // therefore keyed by its grid coordinate, which is unique by
+          // construction, so it always survives to the review screen where the
+          // admin can complete it.
+          const fullyResolved = Boolean(entry.startTimeSlot && entry.endTimeSlot && entry.teacherId);
+          const resolvedKey = fullyResolved
+            ? `${entry.classLevel}|${entry.batch}|${entry.startTimeSlot}|${entry.endTimeSlot}|${entry.teacherId}|${entry.roomNumber}`
+            : `coord:${cellKey}`;
           if (seenResolvedKeys.has(resolvedKey)) {
             rejected.push({ row: rowRaw, column: columnRaw, rawText, reason: 'duplicate resolved schedule slot' });
             return;
