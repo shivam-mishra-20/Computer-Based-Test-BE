@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
-import jwt from 'jsonwebtoken';
 import User, { Board, LearnerOnboardingStep } from '../models/User';
+import { signSessionToken } from '../core/auth/tokens';
 
 /**
  * Public Learner (PUBLIC_LEARNER) account lifecycle.
@@ -62,10 +62,8 @@ const VALID_BOARDS: Board[] = ['CBSE', 'ICSE', 'GSEB', 'IB', 'IGCSE', 'Other'];
 const VALID_CLASS_LEVELS = ['6', '7', '8', '9', '10', '11', '12'];
 const MAX_SUBJECTS = 12;
 
-const signToken = (user: { _id: unknown; role?: string }) =>
-  jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET as string, {
-    expiresIn: '3650d',
-  });
+const signToken = (user: { _id: unknown; role?: string; orgId?: string | null }) =>
+  signSessionToken({ id: String(user._id), role: user.role, orgId: user.orgId ?? null });
 
 /**
  * Public-safe learner payload. Deliberately omits institute fields (batch,

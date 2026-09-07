@@ -1,9 +1,20 @@
 import AttendanceWorker from '../workers/AttendanceWorker';
+import { currentOrgId, runWithTenant } from '../core/tenancy';
 
 interface Job {
   id: string;
   data: any;
   timestamp: number;
+  /**
+   * The organization this job belongs to, captured when it was ENQUEUED.
+   *
+   * A job is processed later, on a different tick, from a queue drain loop that
+   * has no request behind it. Whatever context happens to be open at that
+   * moment belongs to some other request entirely — inheriting it would
+   * attribute Tenant A's attendance sync to whoever happened to trigger the
+   * drain. The owning tenant therefore travels WITH the job.
+   */
+  orgId: string | null;
 }
 
 class QueueService {
@@ -24,7 +35,9 @@ class QueueService {
     const job: Job = {
       id: Math.random().toString(36).substring(7),
       data,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      // Captured HERE, at enqueue time, while the caller's context is still open.
+      orgId: currentOrgId(),
     };
     this.queue.push(job);
     console.log(`Job added to queue: ${job.id}`);
@@ -48,8 +61,20 @@ class QueueService {
       try {
         console.log(`Processing job: ${job.id}`);
         // Simulate async processing
-        await new Promise(resolve => setTimeout(resolve, 100)); 
-        await AttendanceWorker.process(job.data);
+        await new Promise(resolve => setTimeout(resolve, 100));
+        // A FRESH context from the job's own orgId — never the ambient one.
+        // When orgId is null the job predates tenancy (or was enqueued before
+        // Org 001 existed); running it uncontextualized preserves exactly
+        // today's behaviour, and under enforce it will throw, which is the
+        // correct signal that the backfill has to finish first.
+        if (job.orgId) {
+          await runWithTenant(
+            { orgId: job.orgId, source: 'job' },
+            () => AttendanceWorker.process(job.data),
+          );
+        } else {
+          await AttendanceWorker.process(job.data);
+        }
         console.log(`Job completed: ${job.id}`);
       } catch (error) {
         console.error(`Job failed: ${job.id}`, error);

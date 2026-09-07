@@ -4,10 +4,49 @@ import { config } from 'dotenv';
 config();
 
 /**
+ * ⚠️ QUARANTINED — P0 production safety, 2026-08-17
+ *
+ * This script bulk-applies `file.makePublic()` to Firebase Storage objects,
+ * making them readable by anyone with the URL and no credentials.
+ *
+ * That is the exact condition the multi-tenant migration exists to remove: once
+ * a second organization's files share this bucket, a public object is a
+ * cross-tenant data leak, and re-running this script would silently undo the
+ * P1 file-isolation work with no error and no audit trail.
+ *
+ * It is NOT deleted, because it documents how the current public URLs came to
+ * exist and may be needed to reason about historical data during migration.
+ * It is guarded instead: running it now requires a deliberate, explicit act.
+ *
+ * See docs/production-safety.md § Known hazards.
+ */
+function assertHazardAcknowledged(): void {
+  if (process.env.I_UNDERSTAND_THIS_MAKES_FILES_PUBLIC !== 'yes') {
+    console.error(
+      [
+        '',
+        '  ⚠️  REFUSED — this script makes stored files world-readable.',
+        '',
+        '  Running it re-opens the cross-tenant file exposure that the platform',
+        '  migration is closing. It is retained for historical reference only.',
+        '',
+        '  If you genuinely intend this, set:',
+        '    I_UNDERSTAND_THIS_MAKES_FILES_PUBLIC=yes',
+        '',
+        '  See docs/production-safety.md § Known hazards.',
+        '',
+      ].join('\n'),
+    );
+    process.exit(1);
+  }
+}
+
+/**
  * Script to make all existing files in Firebase Storage public
  * This ensures that public URLs work without signed URLs
  */
 async function makeStoragePublic() {
+  assertHazardAcknowledged();
   try {
     console.log('🔄 Starting Firebase Storage public access setup...');
 

@@ -399,19 +399,20 @@ export async function buildDailyHoursReport(options: DailyHoursOptions): Promise
   const Attendance = require('../models/Attendance').default;
   const Schedule = require('../models/Schedule').default;
   const EOD = require('../models/EOD').default;
+  // ── Query scope ───────────────────────────────────────────────────────────
+  // Every query below spreads `...scope`. It is a TENANT BOUNDARY, not a
+  // filter: without it this report reads every organization's teachers,
+  // attendance, schedules and EODs into one table.
+  //
+  // Before the platform work landed, this file carried a documented
+  // placeholder — `const scope: Record<string, never> = {}` — because the
+  // single-institute branch had no `src/core/tenancy` to call. That branch's
+  // own comment named this substitution as the change to make once the layer
+  // existed. It does now.
+  const { tenantScope } = require('../core/tenancy');
 
   const { from, to, userId } = options;
-  // ── Query scope ───────────────────────────────────────────────────────────
-  // This branch is a single-institute deployment: it has no `src/core/tenancy`
-  // layer, and every other query in it is likewise unscoped. The
-  // multi-organization branches substitute `tenantScope()` here.
-  //
-  // Deliberately a constant rather than a guarded `require`: esbuild bundles
-  // relative requires statically, so referencing a module this branch does not
-  // contain fails `npm run build` outright rather than degrading at runtime.
-  // Keeping the name and every spread site identical makes adopting the real
-  // scope a one-line change per query when the tenancy layer lands here.
-  const scope: Record<string, never> = {};
+  const scope = tenantScope();
 
   const userQuery: any = { role: 'teacher', ...scope };
   if (userId) {

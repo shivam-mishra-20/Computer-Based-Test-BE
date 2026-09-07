@@ -11,11 +11,20 @@
  *
  * All actual behavior lives in pptWorkerCore.ts, shared with the embedded mode.
  */
+// Registered before ANY other import, because every one of them pulls in
+// models and mongoose.plugin() only applies to schemas compiled after the
+// call. This is a second entrypoint, so it needs its own registration — the
+// one in server.ts never runs in this process.
+import { registerTenancy, verifyTenantPluginApplied } from '../core/tenancy';
+registerTenancy();
+
 import { connectDB } from '../config/db';
 import { closeRedis } from '../config/redis';
 import { startPptPipelineWorker, stopPptPipelineWorker } from './pptWorkerCore';
 
 async function main() {
+  verifyTenantPluginApplied();
+
   await connectDB();
   console.log('✅ [pptPipelineWorker] MongoDB connected');
 

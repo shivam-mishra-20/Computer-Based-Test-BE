@@ -12,9 +12,24 @@ import { LOGO_DATA_URL } from './brandAssets';
 import { latexToUnicode } from './ppt/pptxBuilder';
 import type { PaperJSON } from './types';
 
-const INSTITUTE_NAME = 'Abhigyan Gurukul';
-const INSTITUTE_ADDRESS =
-  'Akshar Pavilion, Road 4, Vasna – Bhayli Main Rd, opp. to Rosedale Heights, Yogi Nagar Twp, Gokul Nagar, Vadodara, Gujarat 391410';
+/**
+ * The institute printed on a generated paper is now the CALLER'S institute.
+ *
+ * These were module constants, which was right when there was one customer and
+ * is the most visible possible failure with several: a paper is printed,
+ * photocopied and handed out, so another institute's name and street address on
+ * it leaves the building.
+ *
+ * `getDocumentBranding()` falls back to exactly these values, so Abhigyan's
+ * papers are byte-identical to today.
+ */
+import {
+  getDocumentBranding,
+  LEGACY_DOCUMENT_BRANDING,
+  type DocumentBranding,
+} from '../../core/config/documentBranding';
+
+const DEFAULT_BRANDING: DocumentBranding = { ...LEGACY_DOCUMENT_BRANDING, usingDefaults: true };
 
 const esc = (x: unknown) =>
   String(x ?? '')
@@ -114,14 +129,14 @@ function computeTotalMarks(paper: PaperJSON): number | undefined {
 }
 
 // ── Body sections ─────────────────────────────────────────────────────────────
-function headerHtml(paper: PaperJSON): string {
+function headerHtml(paper: PaperJSON, branding: DocumentBranding): string {
   const total = computeTotalMarks(paper);
   // Avoid "Class: Class 7" — the value often already carries the word "Class".
   const classValue = (paper.className || '').replace(/^class\s+/i, '').trim() || '—';
   return `<div class="doc-header">
     <div class="brand-row">
-      <img class="logo" src="${LOGO_DATA_URL}" alt="logo"/>
-      <div class="brand-name">${esc(INSTITUTE_NAME)}</div>
+      ${branding.logoDataUrl ? `<img class="logo" src="${branding.logoDataUrl}" alt="logo"/>` : '<div class="logo"></div>'}
+      <div class="brand-name">${esc(branding.instituteName)}</div>
       <div class="logo-spacer"></div>
     </div>
     <div class="hr thick"></div>
@@ -258,16 +273,17 @@ const STYLES = `
 
 export function buildBrandedPaperHtml(
   paper: PaperJSON,
-  opts: { includeAnswerKey?: boolean; inBodyFooter?: string } = {},
+  opts: { includeAnswerKey?: boolean; inBodyFooter?: string; branding?: DocumentBranding } = {},
 ): string {
+  const branding = opts.branding ?? DEFAULT_BRANDING;
   return `<!doctype html><html><head><meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>${esc(paper.examTitle || 'Question Paper')}</title>
   <style>${katexCss()}${STYLES}</style></head>
   <body>
-    <div class="watermark"><img src="${LOGO_DATA_URL}" alt=""/></div>
+    ${branding.logoDataUrl ? `<div class="watermark"><img src="${branding.logoDataUrl}" alt=""/></div>` : ''}
     <div class="content">
-      ${headerHtml(paper)}
+      ${headerHtml(paper, branding)}
       ${questionsHtml(paper)}
       ${opts.includeAnswerKey ? answerKeyHtml(paper) : ''}
       ${opts.inBodyFooter || ''}
@@ -276,26 +292,37 @@ export function buildBrandedPaperHtml(
 }
 
 /** Native running footer (rendered in the bottom page margin on every page). */
-function footerTemplate(): string {
+function footerTemplate(branding: DocumentBranding = DEFAULT_BRANDING): string {
   return `<div style="width:100%; font-family:Arial, sans-serif; font-size:7px; color:#6b7280; padding:0 12mm;">
     <div style="border-top:1px solid #cbb6a0; padding-top:3px; display:flex; justify-content:space-between; align-items:center;">
-      <span style="max-width:80%; line-height:1.2;">${esc(INSTITUTE_ADDRESS)}</span>
+      <span style="max-width:80%; line-height:1.2;">${esc(branding.instituteAddress)}</span>
       <span>Page <span class="pageNumber"></span> / <span class="totalPages"></span></span>
     </div>
   </div>`;
 }
 
-export function buildPaperPreviewHtml(paper: PaperJSON): string {
+/**
+ * Async because the branding comes from the organization.
+ *
+ * Every caller already sits in an async controller, so awaiting costs nothing —
+ * and a synchronous version would have to guess the institute, which is the
+ * bug being fixed.
+ */
+export async function buildPaperPreviewHtml(paper: PaperJSON): Promise<string> {
+  const branding = await getDocumentBranding();
   // Preview mirrors the PDF; append an in-body footer since the WebView can't
   // render Chromium's native running footer.
-  const footer = `<div style="margin-top:14px;border-top:1px solid #cbb6a0;padding-top:6px;font-size:10px;color:#6b7280;font-family:Arial,sans-serif;">${esc(
-    INSTITUTE_ADDRESS,
-  )}</div>`;
-  return buildBrandedPaperHtml(paper, { includeAnswerKey: true, inBodyFooter: footer });
+  const footer = branding.instituteAddress
+    ? `<div style="margin-top:14px;border-top:1px solid #cbb6a0;padding-top:6px;font-size:10px;color:#6b7280;font-family:Arial,sans-serif;">${esc(
+        branding.instituteAddress,
+      )}</div>`
+    : '';
+  return buildBrandedPaperHtml(paper, { includeAnswerKey: true, inBodyFooter: footer, branding });
 }
 
 export async function renderPaperPdf(paper: PaperJSON): Promise<Buffer> {
-  const html = buildBrandedPaperHtml(paper, { includeAnswerKey: true });
+  const branding = await getDocumentBranding();
+  const html = buildBrandedPaperHtml(paper, { includeAnswerKey: true, branding });
   return htmlToPdfBufferAdvanced(html, {
     margin: { top: '10mm', right: '12mm', bottom: '16mm', left: '12mm' },
     footerTemplate: footerTemplate(),

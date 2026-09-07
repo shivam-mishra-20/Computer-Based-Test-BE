@@ -255,6 +255,21 @@ export async function deleteFirebaseAuthUser(uid: string): Promise<boolean> {
  * @param contentType MIME type of the file
  * @returns Public URL of the uploaded file
  */
+/**
+ * @deprecated Do not use. Retained only so an external caller does not break.
+ *
+ * This made every object it wrote WORLD-READABLE — `file.save({public:true})`
+ * followed by `makePublic()` — and left the path entirely to the caller, which
+ * is how `materials/{classLevel}/{subject}/` came to be shared between
+ * institutes.
+ *
+ * Use `core/storage/storageService`:
+ *   putTenantFile()         private, organizations/{orgId}/…, signed on read
+ *   putPublicTenantAsset()  public but org-namespaced, for assets embedded
+ *                           where a signed URL cannot be threaded yet
+ *
+ * `scripts/safety/storage-audit.ts` fails the build if this regains a caller.
+ */
 export async function uploadToFirebase(
   buffer: Buffer,
   fileName: string,

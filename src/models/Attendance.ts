@@ -30,7 +30,8 @@ const attendanceSchema = new Schema<IAttendance>({
   markedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   notes: { type: String },
   source: { type: String, enum: ['webhook', 'manual', 'sync', 'external'], default: 'manual' },
-  idempotencyKey: { type: String, unique: true, sparse: true },
+  // NOT `unique` — see the compound { orgId, idempotencyKey } index below.
+  idempotencyKey: { type: String, sparse: true, index: true },
   metadata: { type: Schema.Types.Mixed },
   clockIn: { type: String },
   clockOut: { type: String },
@@ -39,6 +40,18 @@ const attendanceSchema = new Schema<IAttendance>({
 }, { timestamps: true });
 
 // Compound index for efficient queries
+//
+// ── Tenant-scoped uniqueness ────────────────────────────────────────────────
+// The legacy index below is globally unique, which on a shared database means
+// this constraint spans every institute on the platform. The compound index is
+// the replacement; the legacy one is removed by
+// `scripts/safety/drop-legacy-global-indexes.ts` as a separate, supervised
+// migration — create replacement, verify, only then remove.
+// `idempotencyKey` is `etime-<punchCode>-<date>`, and punch codes come from
+// each institute's own eTimeOffice hardware — two organizations both having
+// employee "101" is ordinary. Globally unique meant the second one's
+// attendance for that day was silently swallowed as a duplicate.
+attendanceSchema.index({ orgId: 1, idempotencyKey: 1 }, { unique: true, sparse: true });
 attendanceSchema.index({ studentId: 1, date: -1 });
 attendanceSchema.index({ date: 1, classLevel: 1, batch: 1 });
 // idempotencyKey index is already created via unique: true in schema definition

@@ -1,6 +1,7 @@
 import Attendance from '../models/Attendance';
 import AuditLog from '../models/AuditLog';
 import SocketService from '../services/SocketService';
+import { currentOrgId } from '../core/tenancy';
 
 export class AttendanceWorker {
   public static async process(data: any): Promise<void> {
@@ -44,7 +45,14 @@ export class AttendanceWorker {
       // 3. Emit Real-Time Event
       SocketService.emitToUser(studentId, 'attendance_update', attendance);
       if (metadata?.classId) {
-        SocketService.emitToClass(metadata.classId, 'class_attendance_update', attendance);
+        // The worker's own tenant context, opened by QueueService from the
+        // job's orgId. Without it the emit would fall back to no namespace.
+        SocketService.emitToClass(
+          metadata.classId,
+          'class_attendance_update',
+          attendance,
+          currentOrgId(),
+        );
       }
 
       // 4. Audit Log (Success)

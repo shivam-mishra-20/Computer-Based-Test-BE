@@ -7,6 +7,7 @@ import ExamEvaluation from '../models/ExamEvaluation';
 import { computeMaxScoreForExam, sanitizeQuestion, shuffleArray } from '../utils/exam';
 import { getDeadline, getStartWindowState, getSubmitUnlockAt, isPastDeadline } from '../utils/examTiming';
 import { gradeSubjectiveAnswerGroq } from './aiService';
+import { tenantScope } from '../core/tenancy';
 import { getClassQuestionModel } from '../models/ClassQuestion';
 
 function makeError(message: string, code: string, extra?: Record<string, any>) {
@@ -156,7 +157,9 @@ export async function startAttempt(examId: string, userId: string) {
   let questions: IQuestion[];
   if (exam.classLevel) {
     const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
-    questions = await ClassQuestionModel.find({ _id: { $in: qids } });
+    // Scoped: the per-class collections are shared across organizations, and an
+    // exam must never resolve a question belonging to another institute.
+    questions = await ClassQuestionModel.find({ _id: { $in: qids }, ...tenantScope() });
   } else {
     questions = await Question.find({ _id: { $in: qids } });
   }
@@ -234,7 +237,13 @@ export async function getAttemptView(attemptId: string, userId: string) {
     const collection = mongoose.default.connection.collection(normalized);
     
     const qids = practiceTest.questionIds.map((id: any) => new mongoose.Types.ObjectId(id));
-    const questionDocs = await collection.find({ _id: { $in: qids } }).toArray();
+    // Explicitly scoped. This is the RAW driver, so no Mongoose middleware runs
+    // and `TENANT_ENFORCEMENT` cannot help it at any setting. The ids come from
+    // a PracticeTest the tenant owns, which makes it safe by key — the same
+    // defence-in-depth the $lookup audit requires of its SAFE-BY-KEY joins.
+    const questionDocs = await collection
+      .find({ _id: { $in: qids }, ...tenantScope() })
+      .toArray();
     
     // Build sections (practice tests have a single "main" section)
     const sections = [{
@@ -307,7 +316,9 @@ export async function getAttemptView(attemptId: string, userId: string) {
   let questions: IQuestion[];
   if (exam.classLevel) {
     const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
-    questions = await ClassQuestionModel.find({ _id: { $in: qids } });
+    // Scoped: the per-class collections are shared across organizations, and an
+    // exam must never resolve a question belonging to another institute.
+    questions = await ClassQuestionModel.find({ _id: { $in: qids }, ...tenantScope() });
   } else {
     questions = await Question.find({ _id: { $in: qids } });
   }
@@ -440,7 +451,9 @@ export async function getAttemptViewForTeacher(attemptId: string) {
   let questions: IQuestion[];
   if (exam.classLevel) {
     const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
-    questions = await ClassQuestionModel.find({ _id: { $in: qids } });
+    // Scoped: the per-class collections are shared across organizations, and an
+    // exam must never resolve a question belonging to another institute.
+    questions = await ClassQuestionModel.find({ _id: { $in: qids }, ...tenantScope() });
   } else {
     questions = await Question.find({ _id: { $in: qids } });
   }
@@ -756,7 +769,13 @@ export async function submitAttempt(attemptId: string, userId: string, auto = fa
     const collection = mongoose.default.connection.collection(normalized);
     
     const qids = practiceTest.questionIds.map((id: any) => new mongoose.Types.ObjectId(id));
-    const questionDocs = await collection.find({ _id: { $in: qids } }).toArray();
+    // Explicitly scoped. This is the RAW driver, so no Mongoose middleware runs
+    // and `TENANT_ENFORCEMENT` cannot help it at any setting. The ids come from
+    // a PracticeTest the tenant owns, which makes it safe by key — the same
+    // defence-in-depth the $lookup audit requires of its SAFE-BY-KEY joins.
+    const questionDocs = await collection
+      .find({ _id: { $in: qids }, ...tenantScope() })
+      .toArray();
     qmap = new Map(questionDocs.map((q: any) => [q._id.toString(), q]));
   } else {
     // Regular exam
@@ -1023,7 +1042,9 @@ export async function nextAdaptiveQuestion(attemptId: string, userId: string) {
   let questions: IQuestion[];
   if (exam.classLevel) {
     const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
-    questions = await ClassQuestionModel.find({ _id: { $in: qids } });
+    // Scoped: the per-class collections are shared across organizations, and an
+    // exam must never resolve a question belonging to another institute.
+    questions = await ClassQuestionModel.find({ _id: { $in: qids }, ...tenantScope() });
   } else {
     questions = await Question.find({ _id: { $in: qids } });
   }

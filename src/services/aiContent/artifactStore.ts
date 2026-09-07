@@ -1,7 +1,8 @@
 /**
  * Persists rendered artifacts (.pptx/.pdf) to Firebase Storage and returns a
  * public URL, reusing the shared `bucket` from config/firebase. Same upload
- * pattern as fileController (createWriteStream + makePublic).
+ * pattern as fileController (createWriteStream). Objects are PRIVATE; the
+ * stored value is the path and is signed on read.
  */
 import { bucket } from '../../config/firebase';
 
@@ -28,9 +29,11 @@ export async function uploadArtifact(
     blobStream.end(buffer);
   });
 
-  await blob.makePublic();
-  const url = `https://storage.googleapis.com/${bucket.name}/${storagePath}`;
-  return { url, storagePath };
+  // No makePublic(). An AI-generated question paper is a tenant document — it
+  // was world-readable to anyone with the URL, which for a paper that has not
+  // been sat yet is the worst possible default. The caller stores the PATH and
+  // signs it per request through `resolveFileUrl`.
+  return { url: storagePath, storagePath };
 }
 
 /** Best-effort delete; never throws (history delete should still succeed). */

@@ -8,6 +8,7 @@
  */
 import { Queue } from 'bullmq';
 import IORedis from 'ioredis';
+import { currentOrgId } from '../core/tenancy';
 
 // BullMQ rejects ':' in queue names (it uses that character internally for
 // Redis key namespacing) — a colon here throws at construction time, which
@@ -62,6 +63,19 @@ export interface PptPipelineJobData {
   };
   /** PptOptions — `prompt` is folded in here by the caller before enqueueing. */
   options: Record<string, any>;
+  /**
+   * Organization that owns this generation, stamped at enqueue time.
+   *
+   * A BullMQ job survives a process restart and may be picked up minutes later
+   * by a worker that never saw the originating request. There is no ambient
+   * context to inherit at that point — and if there were, it would belong to
+   * an unrelated tenant. The owner therefore travels inside the payload.
+   *
+   * Optional because jobs enqueued before this field existed are still in the
+   * queue; the worker treats an absent value as "pre-tenancy" and runs
+   * uncontextualized, exactly as it did before.
+   */
+  orgId?: string | null;
 }
 
 export const pptPipelineQueue = new Queue<PptPipelineJobData>(PPT_PIPELINE_QUEUE_NAME, {
@@ -75,7 +89,13 @@ export const pptPipelineQueue = new Queue<PptPipelineJobData>(PPT_PIPELINE_QUEUE
 });
 
 export async function enqueuePptPipelineJob(data: PptPipelineJobData): Promise<string> {
-  const job = await pptPipelineQueue.add('generate', data);
+  // Stamped here, while the enqueuing request's context is still open. By the
+  // time the worker runs, that context is long gone.
+  const payload: PptPipelineJobData = {
+    ...data,
+    orgId: data.orgId ?? currentOrgId(),
+  };
+  const job = await pptPipelineQueue.add('generate', payload);
   if (!job.id) throw new Error('Failed to enqueue PPT pipeline job (no job id returned)');
   return job.id;
 }

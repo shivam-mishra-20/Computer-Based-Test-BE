@@ -14,6 +14,7 @@ import Blueprint from '../../models/Blueprint';
 import Paper from '../../models/Paper';
 import { upload as memUpload } from '../../middlewares/upload';
 import { uploadLimiter } from '../../middlewares/rateLimiter';
+import { putPublicTenantAsset } from '../../core/storage/storageService';
 import { attachmentFileFilter } from '../../utils/uploadFileTypes';
 
 const router = express.Router();
@@ -523,15 +524,17 @@ router.post('/import-paper/question/:questionId/diagram', authMiddleware, upload
     const { uploadToFirebase } = await import('../../services/firebaseService');
     const file = (req as any).file;
     const safeBase = ((file.originalname as string) || 'image').replace(/[^a-zA-Z0-9-_\.]/g, '_');
-    const fileName = `diagrams/${Date.now()}_${safeBase}`;
+    // Org-namespaced: `diagrams/{ts}_{name}` carried no organization and was
+    // unique only if no two uploads shared a millisecond.
     
-    console.log(`Uploading diagram to Firebase: ${fileName}`);
-    const publicUrl = await uploadToFirebase(
-      file.buffer,
-      fileName,
-      file.mimetype || 'image/jpeg'
-    );
-    console.log(`Diagram uploaded successfully: ${publicUrl}`);
+    const stored = await putPublicTenantAsset({
+      buffer: file.buffer,
+      fileName: safeBase,
+      contentType: file.mimetype || 'image/jpeg',
+      module: 'diagrams',
+    });
+    const publicUrl = stored.url;
+    console.log(`Diagram uploaded successfully: ${stored.storagePath}`);
 
     const updated = await ImportedQuestion.findByIdAndUpdate(questionId, { diagramUrl: publicUrl }, { new: true });
     if (!updated) return errorResponse(res, 'Question not found', 404);

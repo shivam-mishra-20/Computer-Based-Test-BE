@@ -53,6 +53,12 @@ import playlistRoutes from './routes/api/playlistRoutes';
 import scholarshipRoutes from './routes/api/scholarshipRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import { globalLimiter } from './middlewares/rateLimiter';
+import { tenantContextMiddleware } from './middlewares/tenantContext';
+import meContextRoutes from './routes/api/meContextRoutes';
+import { requireModule } from './middlewares/requireModule';
+import orgPublicRoutes from './routes/api/orgPublicRoutes';
+import platformRoutes from './routes/api/platformRoutes';
+import { requirePlatformDeployment } from './middlewares/requirePlatformDeployment';
 import path from 'path';
 // Use require to avoid transient module resolution issues in some TS setups
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -194,6 +200,15 @@ app.use(morgan(MORGAN_FORMAT, {
 	skip: (req) => req.path === '/api/health' || req.path.startsWith('/.well-known/'),
 }));
 
+// Open a tenant context for every request, before any route runs, so handlers
+// and the services they call are scoped without needing to know it. Mounted
+// after body parsing (it reads headers only) and before the routes.
+//
+// Under TENANT_ENFORCEMENT=warn — the default and the only setting used during
+// migration — this changes no query result. It establishes the context and
+// observes; read filtering begins only under `enforce`.
+app.use(tenantContextMiddleware);
+
 // Serve static uploads (images) from /uploads
 app.use('/uploads', express.static(path.resolve(process.cwd(), 'uploads')));
 
@@ -232,6 +247,86 @@ app.get('/register', (_req, res) => {
 });
 
 // API routes
+// Client bootstrap: org + branding + modules + limits in ONE call. Additive —
+// the legacy app never calls it.
+// Master admin surface. Gated by token AUDIENCE, not by role — a tenant token
+// is rejected at the door regardless of how privileged it is inside its own
+// organization.
+// ── Entitlement enforcement ─────────────────────────────────────────────────
+// Until now `requireModule` existed and was wired to NOTHING. Both clients
+// hid what an organization had not bought, and hiding is not enforcing: a
+// client can be modified and `curl` ignores navigation entirely. An institute
+// on a plan without AI could call /api/ai directly and be served.
+//
+// Mounted here, at the router level, rather than sprinkled across 487 route
+// definitions — one table that can be read in a sitting and diffed in a review.
+//
+// `requireModule` fails OPEN when there is no tenant context and when
+// entitlement resolution fails. That is why adding this cannot lock out
+// Abhigyan: a pinned deployment with no subscription resolves to every module,
+// and a Redis outage degrades to "allowed" rather than to a dead platform.
+//
+// Dependencies are expanded at resolution, so an organization holding `cbt`
+// necessarily holds `exams` and `classes`; these keys do not need to restate
+// their own prerequisites.
+//
+// DELIBERATELY ABSENT, and each for a reason:
+//   /api/exams        serves exams, the question bank AND blueprints. One key
+//                     cannot express three, and `questionBank` does not require
+//                     `exams`, so gating the group on either would deny a
+//                     legitimate combination. Needs per-route gating.
+//   /api             importRoutes is mounted at the API root; a gate there
+//                     would apply to everything.
+//   /api/teacher      mixed: rosters, analytics and exam tooling.
+//   /api/users        core. Gating identity is how a packaging mistake bricks
+//                     a tenant.
+//   /api/notifications, /api/uploads, /api/auth, /api/me, /api/org — core.
+const MODULE_GATED_ROUTES: [string, string][] = [
+  ['/api/attempts', 'cbt'],
+  ['/api/practice-tests', 'cbt'],
+  ['/api/exam-review', 'evaluation'],
+  ['/api/results', 'results'],
+  ['/api/offline-results', 'offlineTests'],
+  ['/api/leaderboard', 'rankings'],
+  ['/api/analytics', 'analytics'],
+  ['/api/admin-analytics', 'analytics'],
+  ['/api/reports', 'analytics'],
+  ['/api/ai', 'ai'],
+  ['/api/courses', 'courses'],
+  ['/api/lectures', 'courses'],
+  ['/api/playlist', 'courses'],
+  ['/api/materials', 'materials'],
+  ['/api/resources', 'materials'],
+  ['/api/attendance', 'attendance'],
+  ['/api/attendance-rules', 'attendance'],
+  ['/api/schedule', 'scheduling'],
+  ['/api/room-allocations', 'scheduling'],
+  ['/api/holidays', 'scheduling'],
+  ['/api/homework', 'homework'],
+  ['/api/doubts', 'doubts'],
+  // Firestore is a SINGLE-TENANT store — one global `Users` collection with no
+  // organization dimension. This gate is what stops a second tenant writing
+  // into the collection Abhigyan reads, and it is the mitigation the isolation
+  // audit's ACCEPTED-GAP entries depend on.
+  ['/api/admin/firebase', 'integrations'],
+];
+
+for (const [mountPath, moduleKey] of MODULE_GATED_ROUTES) {
+  app.use(mountPath, requireModule(moduleKey));
+}
+
+/**
+ * The platform control plane, served ONLY by api-platform.
+ *
+ * `requirePlatformDeployment` makes the whole surface invisible unless
+ * TENANT_MODE=claim. api-legacy is a public, institute-facing host and has no
+ * business exposing organization, plan, subscription or staff administration —
+ * see the middleware for why the refusal is an indistinguishable 404 rather
+ * than a 403.
+ */
+app.use('/api/platform', requirePlatformDeployment, platformRoutes);
+app.use('/api/me', meContextRoutes);
+app.use('/api/org', orgPublicRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/auth', passwordResetRoutes); // Password reset under /api/auth
 app.use('/api/learner', learnerRoutes); // Public Learner profile, home, saves, progress

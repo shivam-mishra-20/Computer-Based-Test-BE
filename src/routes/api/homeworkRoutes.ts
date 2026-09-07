@@ -8,6 +8,12 @@ import { uploadLimiter } from '../../middlewares/rateLimiter';
 import { sendStudentNotifications } from '../../services/notificationService';
 import { getFirestoreUserProfile, uploadToFirebase } from '../../services/firebaseService';
 import { attachmentFileFilter, resolveContentType } from '../../utils/uploadFileTypes';
+import { putTenantFile } from '../../core/storage/storageService';
+import {
+  signAttachment,
+  signHomeworkFiles,
+  signHomeworkList,
+} from '../../core/storage/serialize';
 import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
 
 const router = Router();
@@ -185,10 +191,20 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
         myProgress: progressMap.get(h._id.toString()) || { status: 'not_started' }
       }));
       
-      return res.json({ homework: homeworkWithProgress, total, page: Number(page), limit: Number(limit) });
+      return res.json({
+        homework: await signHomeworkList(homeworkWithProgress as unknown[]),
+        total,
+        page: Number(page),
+        limit: Number(limit),
+      });
     }
     
-    res.json({ homework, total, page: Number(page), limit: Number(limit) });
+    res.json({
+      homework: await signHomeworkList(homework as unknown[]),
+      total,
+      page: Number(page),
+      limit: Number(limit),
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -242,7 +258,10 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
         targetId: homework._id
       }).lean();
       
-      return res.json({ ...homework, myProgress: progress || { status: 'not_started' } });
+      return res.json({
+        ...(await signHomeworkFiles(homework as unknown as Record<string, unknown>)),
+        myProgress: progress || { status: 'not_started' },
+      });
     }
     
     // For teachers, include submission stats
@@ -268,7 +287,7 @@ router.get('/:id', authMiddleware, async (req: Request, res: Response) => {
       });
     }
     
-    res.json(homework);
+    res.json(await signHomeworkFiles(homework as unknown as Record<string, unknown>));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -346,7 +365,7 @@ router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
       }
     }
     
-    res.json(homework);
+    res.json(await signHomeworkFiles(homework as unknown as Record<string, unknown>));
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -475,13 +494,20 @@ router.post('/:id/upload', authMiddleware, uploadLimiter, upload.single('file'),
 
     console.log('[Homework] Uploading file:', file.originalname, file.mimetype, '->', contentType, file.size);
 
-    // Upload to Firebase Storage
-    const storagePath = `homework/${homework._id}/${Date.now()}_${file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
-    const fileUrl = await uploadToFirebase(file.buffer, storagePath, contentType);
+    // Tenant-safe and PRIVATE. Homework attachments were world-readable under
+    // `homework/{id}/…`; the id made them uncollidable but not unreadable.
+    // The stored value is a path, signed on the way out by `signAttachments`.
+    const stored = await putTenantFile({
+      buffer: file.buffer,
+      fileName: file.originalname,
+      contentType,
+      module: 'homework',
+      entityId: String(homework._id),
+    });
 
     // Add attachment to homework
     const attachment = {
-      fileUrl,
+      fileUrl: stored.storagePath,
       fileName: file.originalname,
       mimeType: contentType,
       fileSize: file.size
@@ -492,7 +518,7 @@ router.post('/:id/upload', authMiddleware, uploadLimiter, upload.single('file'),
     
     console.log('[Homework] Attachment added:', attachment.fileName);
     
-    res.json({ success: true, attachment });
+    res.json({ success: true, attachment: await signAttachment(attachment) });
   } catch (error: any) {
     console.error('[Homework] Upload error:', error);
     res.status(500).json({ error: error.message });

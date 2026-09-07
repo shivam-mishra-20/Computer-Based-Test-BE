@@ -9,6 +9,8 @@ import { uploadAiContent } from '../../middlewares/uploadAiContent';
 import { aiLimiter } from '../../middlewares/rateLimiter';
 import { buildClassVariants } from '../../utils/audienceTargeting';
 import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
+import { tenantLookup } from '../../core/tenancy';
+import { tenantScope } from '../../core/tenancy';
 import {
   generate as aiContentGenerate,
   listHistory as aiContentListHistory,
@@ -88,10 +90,16 @@ router.get('/batches', authMiddleware, async (req: AuthRequest, res: Response) =
     const examBatches = await Exam.distinct('batch', { createdBy: req.user._id });
 
     // Also include batches that actually exist on students, so pickers work
-    // even before the teacher has created any batch-scoped exam
+    // even before the teacher has created any batch-scoped exam.
+    //
+    // Scoped by organization explicitly: the tenancy plugin filters reads only
+    // under `enforce`, and a `distinct` over every student in a shared database
+    // returns other institutes' batch names straight into this teacher's
+    // picker. No-op where there is no context.
     const studentBatches = await User.distinct('batch', {
       role: 'student',
       status: 'approved',
+      ...tenantScope(),
       ...INSTITUTE_ACCOUNT_CLAUSE,
     });
 
@@ -110,6 +118,7 @@ router.get('/batches', authMiddleware, async (req: AuthRequest, res: Response) =
           role: 'student',
           batch,
           status: 'approved',
+          ...tenantScope(),
           ...INSTITUTE_ACCOUNT_CLAUSE,
         });
         
@@ -263,14 +272,15 @@ router.get('/performance', authMiddleware, async (req: AuthRequest, res: Respons
     // Aggregate performance data
     const performance = await Attempt.aggregate([
       { $match: matchFilter },
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'user',
-          foreignField: '_id',
-          as: 'student'
-        }
-      },
+      // The plugin scopes Attempt but cannot reach inside a $lookup; this
+      // constrains the joined users to the same tenant under enforce, and is
+      // byte-identical to the previous stage under warn.
+      tenantLookup({
+        from: 'users',
+        localField: 'user',
+        foreignField: '_id',
+        as: 'student',
+      }),
       { $unwind: '$student' },
       {
         $match: batch ? { 'student.batch': batch } : {}
@@ -311,14 +321,12 @@ router.get('/performance', authMiddleware, async (req: AuthRequest, res: Respons
     // Get batch-level stats
     const batchStats = await Attempt.aggregate([
       { $match: matchFilter },
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'user',
-          foreignField: '_id',
-          as: 'student'
-        }
-      },
+      tenantLookup({
+        from: 'users',
+        localField: 'user',
+        foreignField: '_id',
+        as: 'student',
+      }),
       { $unwind: '$student' },
       {
         $group: {

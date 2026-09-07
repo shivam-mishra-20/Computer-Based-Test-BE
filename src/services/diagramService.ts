@@ -1,5 +1,6 @@
 import sharp from 'sharp';
 import { uploadToFirebase } from './firebaseService';
+import { putPublicTenantAsset } from '../core/storage/storageService';
 import { ai, parseObject } from '../ai';
 
 export interface ExtractedDiagram {
@@ -145,8 +146,16 @@ export async function uploadDiagramsToFirebase(diagrams: ExtractedDiagram[]): Pr
     }
 
     try {
-      const fileName = `diagrams/diagram_${Date.now()}_${i}.jpg`;
-      const url = await uploadToFirebase(diagram.imageBuffer, fileName, 'image/jpeg');
+      // Org-namespaced. Was `diagrams/diagram_{ts}_{i}.jpg` — no organization,
+      // and unique only within one extraction run.
+      const url = (
+        await putPublicTenantAsset({
+          buffer: diagram.imageBuffer,
+          fileName: `diagram_${i}.jpg`,
+          contentType: 'image/jpeg',
+          module: 'diagrams',
+        })
+      ).url;
       
       updatedDiagrams.push({
         ...diagram,

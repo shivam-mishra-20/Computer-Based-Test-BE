@@ -1,0 +1,756 @@
+# Production Safety Record
+
+**Living document.** Every implementation phase must update it before being
+declared complete. It is the single place that answers *"if this goes wrong,
+what do we go back to, and how do we know it worked?"*
+
+| | |
+|---|---|
+| **Current phase** | P1 complete — deployment preparation |
+| **Status** | Deployment prep done. TOTAL-OUTAGE BUG found and fixed. Railway commit not provable from here — manual check required. NOT deployed, NOT enforced. |
+| **Established** | 2026-08-17 |
+| **Next phase** | Manual Railway commit check, then deploy api-legacy pinned/warn (step 3 of the 12-step order). |
+
+---
+
+## 1. Baseline commit
+
+All four repositories were clean, on `main`, in sync with `origin/main`, and
+carried **no tags at all** before this phase. Every one is now tagged at the
+same point in time.
+
+| Repository | Commit | Tag |
+|---|---|---|
+| `cbt-exam-be` | `8fc5d8125e7c` | `baseline/pre-saas-2026-08-17` |
+| `cbt-exam` | `25dc18f25ddd` | `baseline/pre-saas-2026-08-17` |
+| `abhigyan-gurukul-app` | `ddc7e8579d7a` | `baseline/pre-saas-2026-08-17` |
+| `abhigyan-gurukul-main` | `f0d9770c1740` | `baseline/pre-saas-2026-08-17` |
+
+An additional tag `legacy/v1.0` on `cbt-exam-be` @ `8fc5d8125e7c` marks the pin
+point for the `api-legacy` deployment.
+
+> ⚠️ **These tags are local only.** They are not yet pushed to `origin`, so they
+> do not survive a lost machine. Pushing them is the first outward-facing action
+> of P1 and needs explicit approval.
+
+**Work branches:** `phase/p0-safety`, then `phase/p1-tenant-foundation`
+(branched from it). **`main` is untouched.** Nothing has been pushed to any
+remote — all tags and branches are local, pending manual sync.
+
+---
+
+## 2. Production deployment
+
+| | |
+|---|---|
+| Backend host | Railway |
+| Database | MongoDB Atlas — cluster `abhigyangurukul.guvhko7.mongodb.net`, db `abhigyangurukul` |
+| Cache / pubsub | Redis (single instance, `REDIS_URL`) |
+| File storage | Firebase Storage, single project |
+| Mobile | `abhigyan-gurukul-app` v1.0.3, Android versionCode 19, `com.shiv.mishra.abhigyangurukulapp`, EAS project `5fd2e55e-…` |
+| Web | `cbt-exam` on Vercel |
+| Env vars | 87 in `cbt-exam-be/.env` — names recorded in §8, **values never recorded here** |
+
+### Railway production commit — strong circumstantial evidence, NOT proof
+
+| | |
+|---|---|
+| Production URL | `https://computer-based-test-be-production.up.railway.app` (the mobile app's configured host) |
+| Expected `legacy/v1.0` SHA | `8fc5d8125e7ca2db7041570a46e182617be45c95` |
+| Commit authored | 2026-08-12 **17:15:13 IST** |
+| Production process started | 2026-08-12 **17:16:55 IST** (uptime 4d 22h 52m at 10:39 UTC on 2026-08-17) |
+| Gap | **102 seconds** — consistent with a push-triggered auto-deploy |
+| `8fc5d81` position | tip of local `main`; no commits after it |
+
+**Cannot be proven from this environment.** The Railway CLI is not installed, and
+GitHub is off-limits. Decisively: **the API exposes no version or commit
+endpoint** — `/` and `/api/health` return status and uptime only. Uptime tells us
+when the *process* started, which a restart also resets; it does not identify a
+commit.
+
+> **Manual verification required before pinning `api-legacy`:**
+> Railway dashboard → the backend service → Deployments → confirm the active
+> deployment's commit is `8fc5d81`. If it is anything else, `legacy/v1.0` must be
+> re-tagged at that commit, because the entire legacy-safety mechanism assumes
+> the pin matches what production actually runs.
+>
+> Worth adding regardless: a `GET /api/version` returning the build SHA (from
+> `RAILWAY_GIT_COMMIT_SHA`) would make this answerable in one request forever
+> after. Not added here — it changes the API contract, which is frozen.
+
+---
+
+## 3. Database backup
+
+Taken with `scripts/safety/db-backup.ts`. The MongoDB Database Tools
+(`mongodump`/`mongorestore`) are **not installed** on this machine and Docker is
+unavailable, so the tooling drives the MongoDB driver bundled with mongoose
+instead. Output is newline-delimited **canonical EJSON**, which round-trips
+ObjectId, Date, Decimal128 and Binary losslessly — plain JSON would silently
+degrade every one of those to a string.
+
+| | |
+|---|---|
+| Location | `backups/2026-08-17-p0/` (git-ignored) |
+| Collections | 62 |
+| Documents | **226,963** |
+| On disk | 87 MB EJSON |
+| Elapsed | 28.4 s |
+| Manifest | `manifest.json` — per-collection count + SHA-256 fingerprint + index definitions |
+
+**Production totals at baseline:** dataSize 67 MB · storageSize 19 MB ·
+indexSize 28 MB. Full per-collection inventory:
+`docs/baselines/db-inventory-2026-08-17.json`.
+
+Notable distribution — useful for sizing P1's backfill:
+
+| Collection | Documents | Note |
+|---|---|---|
+| `auditlogs` | 181,199 | 80% of all documents; 30-day TTL |
+| `notifications` | 22,940 | |
+| `attendances` | 7,643 | |
+| `class_6…class_12` | 7,246 total | 7 dynamic collections — the `ClassQuestion` issue, quantified |
+| `questions` | 0 | the "global" Question collection is empty; everything lives in `class_*` |
+| `schedules` | 2,116 | |
+| `importedquestions` | 2,731 | |
+| `users` | 158 | |
+| `exams` / `attempts` | 8 / 48 | online exam engine still lightly used |
+| `testresults` | 139 | offline tests |
+
+> **This database is small.** 227k documents and 67 MB means the P1 backfill is a
+> minutes-long operation, not an overnight one. That materially lowers migration
+> risk versus what the audit assumed.
+
+---
+
+## 4. Restore verification ✅
+
+**A backup is not a backup until it has been restored.** This gate is satisfied.
+
+| Step | Result |
+|---|---|
+| Restore target | `abhigyangurukul_restore_2026_08_17` (scratch db, same Atlas cluster) |
+| Restore | 62/62 collections, 226,963 documents, 88.7 s |
+| Indexes | recreated from the manifest |
+| **Verification** | **PASSED — every collection matches by document count AND by SHA-256 content fingerprint** |
+
+Counting rows proves nothing about content: a restore that turned every
+ObjectId into a string would have exactly the right count and be unusable. The
+fingerprint is computed over canonical EJSON in `_id` order on both sides, so it
+catches type degradation, silent truncation and content drift.
+
+**Reproduce:**
+
+```bash
+npm run safety:backup                       # → backups/<timestamp>/
+npm run safety:restore -- --from backups/<dir> --scratch-suffix restore_YYYY_MM_DD
+npm run safety:verify  -- --from backups/<dir> --scratch-suffix restore_YYYY_MM_DD
+```
+
+The scratch database is **retained** as the P1 migration rehearsal environment.
+Every backfill runs there twice — once clean, once interrupted and resumed —
+before it goes anywhere near production.
+
+### Write guard
+
+`assertNotProduction()` protects every write path in this tooling. Three
+conditions must all hold: the target parses, it is not the production host+db,
+and its database name carries an explicit scratch marker (`_scratch`,
+`_restore`, `_rehearsal`, `_verify`). It **fails closed** — an unparseable URI is
+treated as production, not as "probably fine".
+
+`npm run safety:guard` runs 10 cases in under a second with no database or
+network, including the mid-word trap (`restoration` must not be accepted as
+scratch). All pass.
+
+---
+
+## 5. API contract baseline
+
+`docs/baselines/api-contract-2026-08-17.txt` — **463 endpoints** with their full
+authorization chains, generated by `scripts/safety/api-contract-snapshot.ts`.
+
+```bash
+npm run safety:api-check     # fails if the contract drifted from the baseline
+```
+
+The legacy Abhigyan app consumes these endpoints and **cannot be updated in
+lockstep** — installs in the field update slowly and some never will. Diffing
+this file answers "did we just break a client we cannot fix" in one command. It
+captures guards as well as paths, so a `requireRole` that quietly disappears in
+a refactor is caught too.
+
+**Parser accuracy matters here and cost two corrections.** The first pass
+reported 65 unguarded endpoints, including `POST /api/admin/settings` and
+`POST /api/teacher/ai/generate`. Both were false alarms:
+
+- five route files apply auth via `router.use(authMiddleware, requireRole(…))`
+  at file level (`adminRoutes`, `attendanceRuleRoutes`, `examReviewRoutes`,
+  `playlistRoutes`, `publicTestAdminRoutes`);
+- `teacherRoutes` spreads `const aiGuards = [authMiddleware,
+  requireRole('teacher','admin'), aiLimiter]` into its AI routes.
+
+The parser now resolves both. **A baseline that misreports authorization is
+worse than no baseline**, because the first real regression gets dismissed as
+another false alarm.
+
+After correction: **16 genuinely unguarded endpoints**, listed in §7.
+
+---
+
+## 5b. Client consumption surface — the blast radius
+
+`docs/baselines/legacy-client-surface-2026-08-17.txt`, generated by
+`npm run safety:client-surface`.
+
+The API declares 385 distinct routes (463 endpoints collapse to 385 once
+`:params` are normalised). The question that governs migration risk is
+narrower: **which of them does a client we cannot update consume?**
+
+| | Routes |
+|---|---|
+| Declared | 385 |
+| **Consumed by the legacy mobile app** | **158** ← load-bearing, cannot be force-updated |
+| Consumed by any client | 290 |
+| Apparently unconsumed | 133 |
+
+This converts "463 endpoints, all equally risky" into a ranked blast radius.
+Changing one of the 158 risks breaking installs already on students' phones.
+Changing one of the 133 is comparatively free.
+
+> "Apparently unconsumed" is a **static** result, not proof. The report lists
+> dynamically-constructed paths it cannot resolve; check those before treating
+> a route as dead.
+
+### Tooling accuracy — three bugs found and fixed while building this
+
+The first three runs of this tool were wrong, each in the dangerous direction
+(under-reporting what clients depend on):
+
+1. **Prefix mismatch.** The three clients do not agree on where `/api` lives.
+   Mobile's `API_BASE` omits it and call sites write `/api/auth/login`; the web
+   and marketing clients' `API_BASE` ends in `/api` and call sites write
+   `/auth/login`. Grepping for `/api/` found the mobile app and almost nothing
+   else.
+2. **Pre-filter bug.** A cheap `if (!source.includes('/api/')) continue;` then
+   skipped nearly every web and marketing file for the same reason —
+   under-reporting the web surface as **35 routes when the true figure is 133**.
+3. **Query-builder mis-normalisation.** `` `/api/doubts/teacher${qs}` `` was read
+   as the route `/api/doubts/teacher/:param`, inventing a route that does not
+   exist while reporting the real one as unconsumed. Interpolations are now
+   treated as parameters only when they follow a `/`.
+
+Recorded because the same failure mode has now appeared in two separate tools
+this phase (see §5). **A safety instrument that under-reports is worse than no
+instrument**, and every result from these tools should be spot-checked against
+an independent count before being trusted.
+
+### Pre-existing defect found
+
+`GET /api/schedule/upcoming` is called by `lib/enhancedApi.ts:333` in the legacy
+app, but `scheduleRoutes.ts` declares no such route — it would 404. The calling
+function `getUpcomingSchedule()` is **exported and never invoked**, so this is
+dead code rather than a live failure. No action needed; recorded so it is not
+mistaken for a migration regression later.
+
+**Implication for the replay harness:** the baseline must capture what the API
+does *today*, including its 404s. "Do not break production" means "do not change
+behaviour" — including behaviour that is already wrong.
+
+---
+
+## 5c. Tenancy runtime (P1) — shipped in warn mode
+
+`src/core/tenancy/` + `src/middlewares/tenantContext.ts` + `src/models/Org.ts`.
+
+**Ships with zero behaviour change.** The context is established and unscoped
+access is observed; no read is filtered until `TENANT_ENFORCEMENT=enforce`.
+
+### Configuration
+
+| Variable | Values | Default | Effect |
+|---|---|---|---|
+| `TENANT_MODE` | `pinned` \| `claim` | `pinned` | `pinned` = api-legacy (org fixed by `ORG_ID`); `claim` = api-platform (org from token) |
+| `ORG_ID` | Org 001's `_id` | unset | Required in `pinned` mode |
+| `TENANT_ENFORCEMENT` | `off` \| `warn` \| `enforce` | `warn` | The migration kill switch |
+
+### The read/write asymmetry
+
+This is the single property that makes the change deployable to a live system:
+
+- **Writes are stamped** under `warn` and `enforce`. Additive — sets a field on
+  documents being created anyway, and nothing reads it yet. Shrinks the backfill
+  to pre-existing rows and closes the race where a row created mid-backfill is
+  missed.
+- **Reads are filtered only under `enforce`.** Subtractive. During the warn
+  period `orgId` is not backfilled, so adding `{ orgId }` to a read would match
+  nothing and **every screen in production would go blank**.
+
+`scripts/safety/tenancy.test.ts` asserts this directly so it cannot regress.
+
+### Production-behaviour bug caught before wiring
+
+`tenantMode()` defaults to `pinned` (safest tenancy setting), and pinned is the
+api-legacy deployment, which must not run cron. But **today's production sets no
+`TENANT_MODE` at all** — so deriving "disable cron" from the *defaulted* value
+would have silently stopped the four daily attendance syncs and the EOD reminder
+on the live system.
+
+Cron is now disabled only by an **explicit** `TENANT_MODE=pinned`. Covered by a
+regression test that asserts an unset `TENANT_MODE` still runs cron.
+
+### Silent-failure protection
+
+`mongoose.plugin()` applies only to schemas compiled *after* the call. A model
+imported before `registerTenancy()` gets no `orgId` and no hooks — and boots,
+tests and serves normally while being permanently unscoped. That is the quietest
+possible way to lose isolation.
+
+- `registerTenancy()` runs at the very top of `src/server.ts`, above the
+  `require('./app')` that compiles every model.
+- `verifyTenantPluginApplied()` asserts coverage once models are loaded:
+  **logs** under `warn`, **refuses to boot** under `enforce`.
+- `npm run safety:tenant-coverage` gates this in CI.
+
+**Verified:** 55 models compiled · 54 tenant-scoped · 1 exempt (`Org`) · 0
+missing. All scoped models carry an `orgId` index.
+
+### Escape hatch
+
+```ts
+await withoutTenantScope('auth:resolve-org-by-email', () => User.findOne({ email }));
+```
+
+`reason` is mandatory, so `grep -rn "withoutTenantScope(" src/` produces a
+complete, reviewable list of every sanctioned bypass.
+
+### Org 001 seed
+
+`npm run safety:seed-org` — idempotent, refuses to guess a target.
+
+```bash
+npx ts-node --transpile-only scripts/safety/seed-org-001.ts --scratch-suffix restore_2026_08_17
+npx ts-node --transpile-only scripts/safety/seed-org-001.ts --production   # when approved
+```
+
+Rehearsed twice on the scratch restore: created once, no-op on re-run.
+**Not yet run against production.**
+
+### Known limits — recorded, not hidden
+
+| Limit | Consequence |
+|---|---|
+| `$lookup` sub-pipelines | The plugin scopes the pipeline's own collection but cannot reach into a joined one. Every `$lookup` needs its own `orgId` match. Permanent code-review item. |
+| Public routes under `claim` | With no token there is no context. Under `enforce` a public route touching the database will throw until it is wrapped in `withoutTenantScope`. Must be resolved before enforce is switched on. |
+| `estimatedDocumentCount` | Collection-level; cannot be filtered by tenant. Avoid on scoped models. |
+| ~~Workers / cron~~ | **Resolved.** Both crons run via `forEachOrg`; both queues stamp `orgId` at enqueue and open a fresh context in the processor. |
+
+---
+
+
+## 5d. Lookups, public routes, and the backfill (P1 continued)
+
+### `$lookup` inventory — measured, not assumed
+
+`npm run safety:lookup-audit` — a standing CI gate, not a one-off report.
+
+7 raw occurrences; 3 are comments. **4 real call sites**, all joining `users`:
+`teacherRoutes.ts:267,315` and `AttendanceController.ts:81,154`.
+
+All four were **SAFE-BY-KEY** — the join key is an `_id` taken from an
+already-scoped source document. Sound, but sound by *referential integrity*
+rather than by an enforced filter. All four now use `tenantLookup()`, which is
+enforcement-aware: identical stage under warn, orgId-constrained sub-pipeline
+under enforce.
+
+### Public-route allowlist — 19 bypasses
+
+`src/core/tenancy/publicRoutes.ts`. Applies **only** in claim mode with no org
+resolved; pinned mode always has a context.
+
+| Classification | Count |
+|---|---|
+| pre-auth | 8 |
+| public-global | 8 |
+| diagnostic | 3 |
+
+A test asserts the exact list size so it cannot grow quietly, and that
+tenant-data routes, wrong methods and prefix-confusion paths are not matched.
+
+**Deliberately NOT allowlisted:** `POST /api/webhooks/attendance` — see §7.
+
+### Backfill tooling
+
+`npm run safety:backfill` / `safety:backfill-verify`. Dry-run by default,
+batched (1000), resumable, idempotent, reversible via `--undo`.
+
+**Rehearsed 4 times on the scratch restore:**
+
+| Rehearsal | Result |
+|---|---|
+| 1. Dry run | 225,571 of 225,572 need orgId; `orgs` correctly skipped |
+| 1. Execute | 225,571 updated, 266s |
+| 2. Re-run | **Idempotent** — 0 needed, 0.0s |
+| 2. Undo | 225,571 reverted; orgId + branchId gone, counts unchanged, Org intact |
+| 3. SIGKILL at 12s | Genuine partial: 6/62 collections, 172,861 still missing |
+| 3. Resume | Skipped the 6, completed the rest, 0 missing |
+| 4. Clean cycle | 225,571 attributed, 0 missing, counter matches |
+
+**Verification: 22 checks passed** — no non-TTL collection lost documents, every
+tenant collection fully attributed, `orgs` never stamped, relationships resolve
+and stay within one org, and all 11 required entity classes confirmed.
+
+> **Counter bug found and fixed during rehearsal.** After the SIGKILL the tool
+> reported 181,117 writes when 225,571 documents were actually attributed — the
+> kill landed mid-`auditlogs`, so those writes landed but their progress entry
+> never saved, and the resume correctly wrote only the remainder. The data was
+> right; the number was not. It now counts from the database at the end, because
+> in a migration tool a misleading number is dangerous in both directions.
+
+### PUBLIC_LEARNER note
+
+Public learners architecturally belong to Org 000, not Org 001. The backfill
+assigns them to Org 001 anyway and reports the count separately, because Org 000
+does not exist yet and assigning them now is **reversible** by a later targeted
+migration, whereas leaving them unattributed would make them invisible and
+unrepairable under enforce.
+
+---
+
+## 5e. Attendance webhook — investigated and resolved
+
+`POST /api/webhooks/attendance` previously accepted **unauthenticated writes**:
+it read an `x-signature` header but the verification block was commented out, so
+any caller could queue an attendance record for any `studentId`.
+
+### The integration contract was established, not assumed
+
+| Evidence | Finding |
+|---|---|
+| eTimeOffice client | **Pull-only** — `EtimeService.syncAttendance()` calls `GET {ETIME_API_URL}/DownloadPunchData` on a cron. Zero callback/webhook/subscribe references. |
+| `WEBHOOK_SECRET` | Never configured — 0 occurrences in `.env` |
+| Production attendance, 2026-01-02 → 2026-08-16 | 7,643 records, `distinct('source')` = **`['external']`** only, all written by `EtimeService.ts:192` |
+| Records with `source: 'webhook'` | **Zero, ever** — this path would produce them |
+| Audit entries mentioning a webhook | Zero |
+| Client repositories calling it | None — it appears in the *unconsumed* list |
+
+**Conclusion: there is no live integration to preserve.** The endpoint is dead
+scaffolding — the original "Mock implementation" comment was accurate — so
+closing it breaks nothing. No compatibility strategy is required because there
+is nothing consuming it.
+
+### Resolution
+
+**Disabled by default.** The code is retained rather than deleted, and enabling
+it now requires the full target architecture:
+
+```
+external webhook
+  → ENABLE_ATTENDANCE_WEBHOOK=true            (else 404, not 403)
+  → HMAC-SHA256 signature, timing-safe        (else 401)
+  → org from ATTENDANCE_WEBHOOK_ORG_ID        (never from the payload)
+  → runWithTenant(orgId)
+  → student membership verified in that org   (else dropped)
+  → enqueue with the org travelling on the job
+```
+
+Two properties matter most:
+
+- **Tenant identity is never inferred from `studentId`.** An attacker chooses
+  that field, so deriving the organization from it would let a caller write into
+  whichever tenant they name — precisely the hole being closed.
+- **Misconfiguration refuses, it does not fall back.** `ENABLE_…=true` with a
+  missing secret or org returns 503. A fallback there would recreate the
+  original vulnerability the first time someone set one variable and not the
+  others.
+
+Signature is verified over the **raw received bytes**, not a re-serialisation of
+the parsed body — otherwise a caller could craft a payload that stringifies
+differently from what they signed.
+
+`npm run safety:webhook` — 9 checks, no database, covering: disabled-by-default,
+all three misconfiguration shapes, missing signature, wrong signature, a
+signature valid for a *different* payload, a signature from the wrong secret,
+and payload validation applying only *after* authentication.
+
+---
+
+## 5f. Two-deployment configuration
+
+`deploy/api-legacy.env.example` and `deploy/api-platform.env.example` — examples,
+no secrets, safe to commit.
+
+| | api-legacy | api-platform |
+|---|---|---|
+| Source | tag `legacy/v1.0` | `main` |
+| `TENANT_MODE` | `pinned` | `claim` |
+| `ORG_ID` | Org 001 | unset (deliberately — no fallback org) |
+| `TENANT_ENFORCEMENT` | `warn` | `warn` until backfill completes |
+| `ENABLE_CRON` | `false` | `true` |
+| `PPT_WORKER_EMBEDDED` | `false` | `true` |
+| Serves | `abhigyan-gurukul-app`, existing web | new clients + console |
+| Database | \<— **the same one** —\> | |
+
+`JWT_SECRET` must be identical across both, or tokens minted by one are rejected
+by the other.
+
+**Not yet deployed.** These are configuration files; standing up the services
+requires the two gates in §12.
+
+---
+
+## 5h. Total-outage bug found before deployment ⚠️
+
+**The most serious defect introduced by this migration work, caught before it
+shipped.**
+
+`tenantMode()` defaults to `pinned` — the safest *tenancy* behaviour. But today's
+production sets **no `TENANT_*` variables at all**, so every request took the
+pinned branch, found no `ORG_ID`, and hit:
+
+```ts
+return res.status(503).json({ code: 'TENANT_NOT_CONFIGURED' });
+```
+
+Deploying the tenancy work to production as-is would have returned **503 on
+every single request** — a total outage, caused by a default chosen to be safe.
+
+This invalidates part of an earlier claim in this document. "Warn mode changes no
+behaviour" was true of *query results* and false of the *middleware gate*. The
+two are different things and were verified separately only after this was found.
+
+**Fix:** a 503 is correct only when someone *explicitly* set `TENANT_MODE=pinned`
+and omitted `ORG_ID` — a real misconfiguration. An unconfigured deployment is not
+misconfigured, it is pre-migration, and now falls through with no context,
+exactly as before the middleware existed.
+
+**Third occurrence of the same class of bug**, after the cron default and the
+warn-mode read filter. The pattern is now explicit in `config.ts`:
+
+> A safe default for **tenancy** is not automatically a safe default for
+> **behaviour**. Decide them separately, and verify against the environment
+> production actually has.
+
+`npm run safety:deployment` boots the **real Express app** under five
+environments — production's current one, deliberate misconfiguration, api-legacy,
+api-platform, and the off switch. No unit test of the tenancy layer would have
+caught this; only booting the app with production's env did.
+
+---
+
+## 5g. Lazy-thenable bug found and fixed
+
+Found while writing the two-org test, on a call that looked entirely correct:
+
+```ts
+await runWithTenant(ctx, () => User.countDocuments({ role: 'student' }));
+//                          ^ throws TenantContextMissing
+```
+
+A Mongoose Query is **lazy** — it executes when `.then()` is called, not when it
+is built. So `fn` returned an unstarted Query, the context closed, and the
+caller's `await` then executed it with **no context at all**. Under enforce that
+throws; under `warn` it would have silently recorded an unscoped read.
+
+The working version differed only by an invisible `async`:
+
+```ts
+await runWithTenant(ctx, async () => await User.countDocuments({ ... }));
+```
+
+Correctness cannot depend on a keyword that easy to omit, across 805 call sites.
+`runWithTenant` and `withoutTenantScope` now call `.then()` on a returned
+thenable *inside* the scope, so the obvious form is the correct one. Covered by
+three regression checks.
+
+---
+
+## 6. Rollback procedure
+
+| Failure | Rollback | Time | Data loss |
+|---|---|---|---|
+| Bad backend deploy | Redeploy previous Railway image | ~2 min | None |
+| Enforce mode breaks something (P1+) | `TENANT_ENFORCEMENT=false` → warn mode | ~2 min | None |
+| Backfill goes wrong mid-run (P1) | Script is idempotent + resumable; or unset `orgId` over the affected range | Minutes | None — additive field |
+| Legacy app breaks after repoint | Repoint API host back to the original | Minutes | None |
+| Web regression | Vercel instant rollback | Seconds | None |
+| Code regression, any repo | `git checkout baseline/pre-saas-2026-08-17` | Seconds | None |
+| **Database corrupted** | Restore `backups/2026-08-17-p0` via `safety:restore` into a fresh db, repoint | ~2 min restore + cutover | **Everything written since the backup** |
+| **Legacy store listing removed** | **None** | — | Users cannot reinstall |
+
+The last row is the only genuinely irreversible action in the whole migration.
+**Do not unpublish `abhigyan-gurukul-app` under any circumstances** until the
+four-part legacy retirement test passes.
+
+---
+
+## 7. Known hazards
+
+Pre-existing conditions found during P0. **None were introduced by this work and
+none are fixed by it** — P0 does not change behaviour. They are recorded so they
+cannot be forgotten, and two have been defused.
+
+### Quarantined scripts ⚠️
+
+`scripts/make-storage-public.ts` and `scripts/migrate-urls-to-public.ts` are how
+the current world-readable file state came to exist. The first bulk-applies
+`file.makePublic()`; the second rewrites stored URLs from signed to permanent
+public form.
+
+Re-running either **after** P1's file isolation lands would undo it across every
+tenant at once, with no error raised and no audit trail — a cross-tenant
+exposure caused by a script that looks like a routine maintenance task.
+
+They are **not deleted** — they document how historical URLs were produced, and
+P1's backward-compatibility path has to keep resolving those URLs. Both now
+refuse to run unless `I_UNDERSTAND_THIS_MAKES_FILES_PUBLIC=yes` is set. Verified:
+both exit 1 with an explanation.
+
+### Unguarded endpoints
+
+16 of 463 have no authorization middleware. Most are legitimate — health checks,
+the guest scholarship flow, the attendance webhook (which should be verifying a
+signature instead), and login/register. Two deserve review before P1:
+
+| Endpoint | Concern |
+|---|---|
+| `GET /api/automation/logs` | Streams logs with no authentication and no router-level guard. Verified genuinely unguarded, not a parser artifact. |
+| `POST /api/auth/welcome-tutorial/complete` | Writes user state with no auth. |
+
+### Found during P1 — pre-existing, NOT caused by the migration
+
+| # | Finding | Status |
+|---|---|---|
+| 1 | **`POST /api/webhooks/attendance` was unauthenticated and WROTE.** | **RESOLVED — see §5e.** Investigation proved it was dead scaffolding (eTimeOffice is pull-only; zero `source:'webhook'` records in 7 months; no client calls it). Now disabled by default, with signature verification and explicit org resolution required to enable. Nothing broken, because nothing consumed it. |
+| 2 | **Teacher performance analytics silently returns nothing.** `teacherRoutes.ts` joins `localField: 'user'`, but `Attempt` has no such field — it is `userId`. Verified: 0 of 48 attempts carry `user`. With `$unwind` and no `preserveNullAndEmptyArrays`, both aggregations always yield an empty result. | **Open — reported, not fixed.** Fixing changes an endpoint from returning `[]` to returning data, which is a behaviour change mid-migration. |
+| 3 | `verify-learner-isolation.ts` assertion had an object-key collision (`...INSTITUTE_ACCOUNT_CLAUSE` overwrote `accountType: { $exists: false }`), comparing 136 against 135. Proven pre-existing by reproducing with `TENANT_ENFORCEMENT=off`. | **Fixed** — uses `$and`; suite is 21/21. |
+| 4 | 9 of 48 attempts reference exams that no longer exist (orphans from deletes predating the cascade). | Informational — the verifier tolerates pre-existing orphans by design. |
+
+### Two corrections to earlier reporting
+
+`GET /api/automation/logs` is **NOT** unguarded — it verifies a JWT from a query
+parameter inside the handler, because EventSource cannot set headers. I reported
+it as a real security finding in the P0 report; that was wrong. The contract
+snapshot mislabels it because the parser only reads middleware.
+`POST /api/auth/welcome-tutorial/complete` authenticates inline the same way.
+
+### Carried from the audit
+
+10-year JWTs (`expiresIn: '3650d'`, 3 sign sites) · `expiresIn: 'never'` in
+`fileController` · `file.makePublic()` in the upload path · socket rooms
+joinable without membership check · vendor credential hardcoded at
+`EtimeService.ts:25` · CORS trusting all `*.vercel.app` / `*.railway.app` ·
+Redis keys unprefixed with unbounded `delPattern` · cron running process-wide
+with no org loop.
+
+---
+
+## 8. Environment configuration
+
+87 variables in `cbt-exam-be/.env`. **Names only — values are never recorded in
+this document, which is committed to git.**
+
+`PORT` `MONGO_URI` `JWT_SECRET` `ADMIN_EMAIL` `ADMIN_PASSWORD` `CORS_ORIGIN`
+`GOOGLE_APPLICATION_CREDENTIALS(_BASE64)` `GOOGLE_CLOUD_PROJECT`
+`GOOGLE_CLOUD_LOCATION` `FIREBASE_*` (8) `YOUTUBE_DATA_API` `ETIMEOFFICE_*` (4)
+`REDIS_URL` `GEMINI_API_KEY` `GROQ_API_KEY` `OLLAMA_*` (9) `PADDLE_OCR_URL`
+`OCR_*` (6) `IMPORT_*` (4) `NVIDIA_*` (24) `AI_PROVIDER` `AI_QUEUE_NAME`
+`AI_ENHANCER_*` (3) `ENABLE_PPT_FEATURES` `PPT_WORKER_*` (2) `VISION_MAX_PAGES`
+`CONFIDENCE_*` (2) `BATCH_WORKER_CONCURRENCY` `PAGE_WORKER_CONCURRENCY`
+`MAX_PAGES_PER_BATCH` `PDF_RENDER_DPI` `VL_*` (2) `MAX_DIAGRAMS_PER_PAGE`
+
+> `GEMINI_API_KEY` and `GROQ_API_KEY` are still present although the AI layer
+> migrated to NVIDIA. Dead credentials are worth revoking rather than leaving.
+
+### To be added in P1
+
+| Variable | Purpose |
+|---|---|
+| `TENANT_MODE` | `pinned` \| `claim` — selects deployment behaviour |
+| `ORG_ID` | Org 001 id, `pinned` mode only |
+| `TENANT_ENFORCEMENT` | `warn` \| `enforce` — the migration kill switch |
+| `MONGO_DNS_SERVERS` | already read by `config/db.ts`; also used by safety tooling |
+
+---
+
+## 9. Legacy deployment (`api-legacy`) — planned, not yet built
+
+| | |
+|---|---|
+| Source | `platform-core` @ tag `legacy/v1.0` |
+| Config | `TENANT_MODE=pinned`, `ORG_ID=ORG_001` |
+| Serves | `abhigyan-gurukul-app` v1.0.3+, Abhigyan web during transition |
+| Tokens | legacy long-lived shape accepted and issued |
+| Cron | **disabled** — scheduler runs only on the platform deployment |
+| Platform routes | not exposed |
+| Deploys | manual, tag-triggered, security patches only |
+
+Holds a tenant context permanently pinned to Org 001. This is **not** a
+default-org fallback: the context is always present, it is simply fixed by
+configuration rather than derived from a token — so the fail-closed rule in §15
+of the architecture is preserved exactly.
+
+## 10. Platform deployment (`api-platform`) — planned, not yet built
+
+| | |
+|---|---|
+| Source | `platform-core` @ `main` |
+| Config | `TENANT_MODE=claim` |
+| Serves | `client-platform-web`, `client-platform-app`, `platform-console` |
+| Tokens | 15-min access + rotating refresh, three audiences |
+| Cron | enabled — enumerates orgs, one context each |
+| Deploys | automatic on merge, gated by the isolation suite |
+
+**Both deployments share one database.** Forking it would mean every exam
+Abhigyan runs on legacy is data the platform does not have, and reconciling live
+academic records has no correct answer for conflicts.
+
+---
+
+## 11. Compatibility requirements
+
+Non-negotiable for the whole migration:
+
+1. All 463 endpoints keep their paths, request shapes and response shapes.
+   Tenancy travels in the token claim, never in the URL.
+2. `api-legacy` must be deployed in `pinned` mode **before** enforce mode is
+   enabled on `api-platform`. Reversed, the legacy app's writes fail against a
+   schema that now requires a field its build does not set.
+3. The legacy app's login body does not change. Org 001 is resolved server-side
+   from configuration.
+4. Existing file URLs must keep resolving. New uploads use tenant-scoped paths;
+   old objects resolve through `FileMetadata`.
+5. No breaking change ships without a matching entry here and a rollback.
+
+**Definition of breaking** — existing app cannot log in · exam cannot start ·
+exam cannot submit · results change · question bank fails · attendance fails ·
+files become inaccessible · notifications fail · web functionality disappears ·
+data becomes inaccessible · APIs return incompatible responses · users must take
+unexpected action. **If any occurs: stop, diagnose, roll back.**
+
+---
+
+## 12. Open items blocking P1
+
+| # | Item | Needed for |
+|---|---|---|
+| 1 | Confirm Railway/Vercel are serving the tagged commits | P1 step 3 — the `legacy/v1.0` pin must match reality |
+| 2 | Approve pushing tags to `origin` | Durability of the baseline |
+| 3 | Platform name + domain convention | Deployment hostnames |
+| 4 | `abhigyan-gurukul-main` Firestore paths — retire, freeze or leave? | Its writes bypass every tenant guard |
+| 5 | Abhigyan's immovable calendar dates | Scheduling the backfill and cutover |
+| 6 | Decide on `GET /api/automation/logs` | Fix in P1 or accept |
+
+---
+
+## Phase log
+
+| Phase | Date | Outcome |
+|---|---|---|
+| **P0 — Safety** | 2026-08-17 | ✅ 4 repos tagged · 87 MB / 226,963 doc backup taken · **restore verified by count and fingerprint** · 463-endpoint API contract captured · 2 hazard scripts quarantined · `backups/` git-ignored · guard test 10/10 · no production behaviour changed |
+| **P1 step 2** | 2026-08-17 | ✅ Client consumption surface mapped: 158 of 385 routes are load-bearing on the legacy mobile app. 3 tool bugs found and fixed. 1 pre-existing dead-code defect recorded. No production behaviour changed. |
+| **P1 tenancy** | 2026-08-17 | ✅ ALS context + global plugin shipped in warn mode · 55 models verified (54 scoped, 1 exempt, 0 missing) · Org 001 seed rehearsed on scratch, idempotent · API contract UNCHANGED · cron-disable regression caught and fixed before wiring · no production behaviour changed |
+| **P1 worker/cron** | 2026-08-17 | ✅ forEachOrg with per-org failure isolation · both crons wrapped at the scheduling boundary · QueueService + BullMQ stamp orgId at enqueue and open a fresh context in the processor · standalone worker entrypoint registers tenancy · fallback proven: cron still runs when no Org documents exist · 24 tenancy checks green · API contract UNCHANGED |
+| **P1 deployment prep** | 2026-08-17 | Webhook investigated and resolved (dead scaffolding, now disabled + hardened, 9 tests) · api-legacy/api-platform env configs written · lazy-thenable context bug found and fixed · 44 tenancy + 9 webhook + 9 two-org + 22 backfill-verify checks · legacy suites 13/13, 23/23, 178/178, 21/21 · contract UNCHANGED · nothing deployed, nothing enforced |
+| **Deployment prep** | 2026-08-17 | Railway commit correlated to 102s of the baseline commit but NOT proven (no version endpoint) · **total-outage bug caught: defaulted pinned mode 503d every request** · deployment-modes suite added (boots the real app under 5 envs) · 44 tenancy + 9 webhook + 8 deployment + contract UNCHANGED · nothing deployed, nothing enforced |
+| **P6 — client-platform-web** | 2026-08-18 | ✅ `cbt-exam` made tenant-aware without a rewrite · **one build proven to serve two organizations, build id identical before and after** (109 browser checks) · 4 backend prerequisites added, all inert on today's production (orgId session claim, pre-auth host resolution, `/api/org/branding`, `tenantScope()`) · **6 real cross-tenant leaks found on screen and fixed** — batches, teacher names, user counts, user list, batch update/delete by id, hardcoded rooms · `batchConfigService` cross-tenant DELETE path closed · contract +1 endpoint, nothing removed · safety:all 176 green · console-ui 39/39 · legacy-regression 28/28 workflows (1 pre-existing `AppSetting` finding, verified identical on the pre-P6 tree) · nothing deployed, nothing enforced, no production data migrated |

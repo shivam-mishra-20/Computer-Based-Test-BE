@@ -7,6 +7,8 @@ import { uploadLimiter } from '../../middlewares/rateLimiter';
 import { uploadToFirebase } from '../../services/firebaseService';
 import { materialFileFilter, resolveContentType } from '../../utils/uploadFileTypes';
 import { sendStudentNotifications } from '../../services/notificationService';
+import { currentOrgId } from '../../core/tenancy';
+import { putTenantFile, resolveFileUrl } from '../../core/storage/storageService';
 import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
 
 const router = Router();
@@ -556,7 +558,11 @@ router.post('/:materialId/download', authMiddleware, async (req: Request, res: R
       { new: true },
     );
     
-    res.json({ success: true, downloadUrl: material.fileUrl });
+    // Signed fresh on every download rather than stored. A legacy row holds a
+    // public URL and is returned unchanged — that object really is public, and
+    // pretending otherwise would be worse than saying so.
+    const downloadUrl = await resolveFileUrl(material.fileUrl, { orgId: currentOrgId() });
+    res.json({ success: true, downloadUrl });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -620,10 +626,20 @@ router.post('/upload', authMiddleware, uploadLimiter, upload.single('file'), asy
     const sanitizedName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
     const classFolder = targeting.classLevel.replace(/\s+/g, '_');
     const subjectFolder = safeString(subject).replace(/[^a-zA-Z0-9_-]/g, '_');
-    const fileName = `materials/${classFolder}/${subjectFolder}/${timestamp}_${sanitizedName}`;
-
-    // Upload to Firebase Storage
-    const fileUrl = await uploadToFirebase(file.buffer, fileName, contentType);
+    // ── Tenant-safe, private ────────────────────────────────────────────
+    // This was `materials/{classLevel}/{subject}/…`, and both of those are
+    // TENANT values: every institute teaching class 11 Physics wrote into the
+    // same folder, and every object was world-readable. The stored value is now
+    // a PATH, signed on the way out by the download endpoint.
+    const fileUrl = (
+      await putTenantFile({
+        buffer: file.buffer,
+        fileName: sanitizedName,
+        contentType,
+        module: 'materials',
+        entityId: `${classFolder}_${subjectFolder}`,
+      })
+    ).storagePath;
 
     // Create material record
     const material = new Material({
@@ -827,9 +843,21 @@ router.put('/:materialId/upload', authMiddleware, uploadLimiter, upload.single('
     const sanitizedName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
     const classFolder = normalizeClassLabel(req.body.classLevel || material.classLevel || 'General').replace(/\s+/g, '_');
     const subjectFolder = safeString(req.body.subject || material.subject || 'General').replace(/[^a-zA-Z0-9_-]/g, '_');
-    const fileName = `materials/${classFolder}/${subjectFolder}/${timestamp}_${sanitizedName}`;
     const contentType = resolveContentType(file.mimetype, file.originalname);
-    const fileUrl = await uploadToFirebase(file.buffer, fileName, contentType);
+    // ── Tenant-safe, private ────────────────────────────────────────────
+    // This was `materials/{classLevel}/{subject}/…`, and both of those are
+    // TENANT values: every institute teaching class 11 Physics wrote into the
+    // same folder, and every object was world-readable. The stored value is now
+    // a PATH, signed on the way out by the download endpoint.
+    const fileUrl = (
+      await putTenantFile({
+        buffer: file.buffer,
+        fileName: sanitizedName,
+        contentType,
+        module: 'materials',
+        entityId: `${classFolder}_${subjectFolder}`,
+      })
+    ).storagePath;
 
     // Add to versions
     const newVersion = material.version + 1;

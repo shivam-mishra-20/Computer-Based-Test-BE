@@ -1,10 +1,11 @@
 import { Request, Response } from 'express';
 import User from '../models/User';
-import jwt from 'jsonwebtoken';
 import { AuthPayload } from '../middlewares/authMiddleware';
 import { uploadToFirebase } from '../services/firebaseService';
 import { normalizeClassValue, toClassLabel } from '../config/studentBatchConfig';
 import { getStudentBatchConfigFromDatabase, matchBatchName } from '../services/batchConfigService';
+import { putPublicTenantAsset } from '../core/storage/storageService';
+import { signSessionToken } from '../core/auth/tokens';
 
 const normalizeRegistrationSource = (value: unknown): 'website' | 'app' | 'unknown' => {
   const source = typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -197,7 +198,7 @@ export const register = async (req: Request, res: Response) => {
   });
     await user.save();
 
-  const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET as string, { expiresIn: '3650d' });
+  const token = signSessionToken({ id: String(user._id), role: user.role, orgId: (user as any).orgId });
   res.status(201).json({ token, user: { id: user._id, name: user.name, email: user.email, role: user.role } });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
@@ -240,11 +241,14 @@ export const login = async (req: Request, res: Response) => {
     // gates above. Nothing about the institute status handling changes.
 
     // User is approved, generate token (10 years - effectively permanent until manual logout)
-    const token = jwt.sign(
-      { id: user._id, role: user.role },
-      process.env.JWT_SECRET as string,
-      { expiresIn: '3650d' }
-    );
+    // Carries `orgId` so a claim-mode deployment knows which organization this
+    // session belongs to. Same shape and same expiry as before otherwise — see
+    // core/auth/tokens.ts for why this is not a `tenant`-audience token.
+    const token = signSessionToken({
+      id: String(user._id),
+      role: user.role,
+      orgId: (user as any).orgId,
+    });
     console.log(`Login debug: mongodb-local auth succeeded for ${lcEmail}`);
     return res.json({
       token,
@@ -488,11 +492,18 @@ export const uploadProfileImage = async (req: Request, res: Response) => {
 
     // Generate unique filename
     const ext = file.originalname.split('.').pop() || 'jpg';
-    const fileName = `profile-images/${current.id}_${Date.now()}.${ext}`;
 
     // Upload to Firebase Storage
-    console.log('[UploadProfileImage] Uploading to Firebase Storage:', fileName);
-    const imageUrl = await uploadToFirebase(file.buffer, fileName, file.mimetype);
+    console.log('[UploadProfileImage] Uploading to Firebase Storage');
+    const imageUrl = (
+      await putPublicTenantAsset({
+        buffer: file.buffer,
+        fileName: `profile.${ext}`,
+        contentType: file.mimetype,
+        module: 'profile',
+        entityId: String(current.id),
+      })
+    ).url;
     console.log('[UploadProfileImage] Upload successful, URL:', imageUrl);
 
     // Update user's profile image URL
@@ -549,8 +560,17 @@ export const publicUploadProfileImage = async (req: Request, res: Response) => {
     }
 
     const ext = (file.originalname?.split('.').pop() || 'jpg').toLowerCase();
-    const fileName = `registration-profiles/${Date.now()}_${Math.random().toString(36).slice(2, 8)}.${ext}`;
-    const imageUrl = await uploadToFirebase(file.buffer, fileName, file.mimetype);
+    // Public registration: there is no signed-in user yet, and there may be no
+    // tenant context either. `putPublicTenantAsset` falls back to a flat path
+    // when it cannot attribute the file, which is the pre-migration behaviour.
+    const imageUrl = (
+      await putPublicTenantAsset({
+        buffer: file.buffer,
+        fileName: `profile.${ext}`,
+        contentType: file.mimetype,
+        module: 'profile',
+      })
+    ).url;
 
     res.status(201).json({ profileImage: imageUrl });
   } catch (err) {

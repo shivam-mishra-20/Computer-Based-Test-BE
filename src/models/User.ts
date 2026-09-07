@@ -58,6 +58,14 @@ export interface IUser extends Document {
   email: string;
   password: string;
   role: UserRole;
+  /**
+   * Assigned Role documents. Empty for every existing Abhigyan account, which
+   * is exactly why resolveUserPermissions() falls back to the legacy `role`
+   * string — see core/rbac/resolve.ts.
+   */
+  roleIds?: unknown[];
+  /** Bumped to revoke every outstanding token for this user. */
+  tokenVersion?: number;
   accountType?: AccountType;
   learnerProfile?: ILearnerProfile;
   status: UserStatus;
@@ -101,6 +109,10 @@ const userSchema = new Schema<IUser>({
   email: { type: String, unique: true, required: true, lowercase: true, trim: true },
   password: { type: String, required: true },
   role: { type: String, enum: ['admin', 'teacher', 'student'], default: 'student', index: true },
+  // Additive: absent on all 158 existing accounts, which keeps them on the
+  // legacy-role permission mapping and therefore behaving exactly as today.
+  roleIds: [{ type: Schema.Types.ObjectId, ref: 'Role' }],
+  tokenVersion: { type: Number, default: 0 },
   // Defaults to INSTITUTE_STUDENT so any account created by an existing code
   // path (admin creation, institute registration, firebase sync) stays inside
   // the institute exactly as before. Only the learner-register endpoint sets
@@ -179,5 +191,26 @@ userSchema.pre('save', async function (next) {
 userSchema.methods.comparePassword = function (password: string): Promise<boolean> {
   return bcrypt.compare(password, (this as IUser).password);
 };
+
+/**
+ * Tenant-local email uniqueness.
+ *
+ * ── Why this is ADDED and the global one is NOT yet dropped ─────────────────
+ * One person may legitimately exist at two organizations — a teacher who
+ * consults for a second institute, a student who moved. Global uniqueness on
+ * `email` makes that impossible.
+ *
+ * But the two constraints are deliberately allowed to coexist for now. Dropping
+ * the global index in the same change would leave a window during which NEITHER
+ * is enforced if the new one fails to build, and duplicate accounts created in
+ * that window cannot be un-created. Order is: build the compound index, verify
+ * it, and only then drop the global one — as a separate, reversible step.
+ *
+ * While both exist the stricter (global) constraint wins, so behaviour for
+ * Org 001 is unchanged. Nothing depends on cross-org duplicates until Org 002
+ * has a user sharing an email with Org 001, which is a deployment-window
+ * concern rather than a code one.
+ */
+userSchema.index({ orgId: 1, email: 1 }, { unique: true, sparse: true });
 
 export default mongoose.model<IUser>('User', userSchema);

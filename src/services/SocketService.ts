@@ -1,8 +1,29 @@
 import { Server as HttpServer } from 'http';
+import { currentOrgId } from '../core/tenancy';
 import { Server, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
 import { createAdapter } from '@socket.io/redis-adapter';
 import { isRedisEnabled, redisPublisher, redisSubscriber } from '../config/redis';
+
+/**
+ * The room name for a class, namespaced by organization.
+ *
+ * ── Why this cannot be `class:${classId}` ───────────────────────────────────
+ * A class LEVEL is not globally unique. Every institute on the platform has an
+ * "11", so `class:11` was one broadcast channel shared by all of them: an
+ * attendance update for one organization's class 11 would reach every other
+ * organization's class 11 as well.
+ *
+ * No shipped client ever called `join_class`, which made this latent rather
+ * than an active leak — but the first client to use it would have inherited a
+ * cross-tenant channel, and nothing in the code would have said so.
+ *
+ * Rooms keyed on a genuinely unique id — `user:<ObjectId>`, `doubt_<ObjectId>`
+ * — need no namespace and do not have one.
+ */
+export function classRoom(orgId: string | null | undefined, classId: string): string {
+  return orgId ? `class:${orgId}:${classId}` : `class:${classId}`;
+}
 
 class SocketService {
   private static instance: SocketService;
@@ -139,14 +160,14 @@ class SocketService {
           return socket.emit('error', { message: 'Maximum rooms joined' });
         }
         
-        socket.join(`class:${classId}`);
+        socket.join(classRoom(currentOrgId(), classId));
         roomCount++;
         console.log(`[Socket] ${socket.id} joined class:${classId}`);
       });
       
       socket.on('leave_class', (classId: string) => {
         if (classId && typeof classId === 'string') {
-          socket.leave(`class:${classId}`);
+          socket.leave(classRoom(currentOrgId(), classId));
           roomCount = Math.max(0, roomCount - 1);
         }
       });
@@ -214,9 +235,13 @@ class SocketService {
     this.io.to(`user:${userId}`).emit(event, data);
   }
 
-  public emitToClass(classId: string, event: string, data: any): void {
+  /**
+   * `orgId` is explicit because the usual caller is a background worker, which
+   * has no ambient request context to fall back on.
+   */
+  public emitToClass(classId: string, event: string, data: any, orgId?: string | null): void {
     if (!this.io) return;
-    this.io.to(`class:${classId}`).emit(event, data);
+    this.io.to(classRoom(orgId ?? currentOrgId(), classId)).emit(event, data);
   }
 
   /**

@@ -12,6 +12,7 @@ import {
   applyPublicVisibilityFloor,
   isStaffRequest,
 } from '../../utils/publicResourceVisibility';
+import { putTenantFile } from '../../core/storage/storageService';
 import youtubeService from '../../services/youtubeService';
 
 const router = Router();
@@ -319,10 +320,18 @@ router.post('/upload-pdf', authMiddleware, uploadLimiter, upload.single('file'),
     // Upload to Firebase Storage
     const timestamp = Date.now();
     const sanitizedName = file.originalname.replace(/[^a-zA-Z0-9.-]/g, '_');
-    const fileName = `study-resources/pdfs/${classLevel}/${subject}/${timestamp}_${sanitizedName}`;
-
     const contentType = resolveContentType(file.mimetype, file.originalname);
-    const fileUrl = await uploadToFirebase(file.buffer, fileName, contentType);
+    // Was `study-resources/pdfs/{classLevel}/{subject}/…` — both tenant values,
+    // so two institutes shared a folder of world-readable PDFs.
+    const fileUrl = (
+      await putTenantFile({
+        buffer: file.buffer,
+        fileName: sanitizedName,
+        contentType,
+        module: 'study-resources',
+        entityId: `${String(classLevel).replace(/\s+/g, '_')}_${String(subject).replace(/\s+/g, '_')}`,
+      })
+    ).storagePath;
 
     // Create resource record
     const resource = new StudyResource({

@@ -5,6 +5,8 @@ export interface AuthPayload {
   id: string;
   role?: string;
   name?: string;
+  /** Present on tokens minted by the P2 audience-aware helpers. */
+  aud?: string;
 }
 
 export const authMiddleware = async (req: Request, res: Response, next: NextFunction) => {
@@ -29,11 +31,32 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as AuthPayload;
-    
+
+    // ── Audience, checked before anything else ────────────────────────────
+    // A platform-staff token must never authenticate a tenant request. It
+    // already failed here, but only by ACCIDENT: PlatformUser lives in its own
+    // collection, so `User.findById` found nothing and the request 401'd on
+    // "User not found". That is a coincidence of storage layout, not a
+    // security boundary — one shared collection, or one `upsert` on login, and
+    // the coincidence evaporates.
+    //
+    // Rejecting the audience explicitly makes it a boundary. `platformAuth`
+    // has always done the reverse check; this is the missing half.
+    //
+    // A token with NO `aud` is legacy and is accepted, exactly as before —
+    // every token in the field predates the audience work, and rejecting them
+    // would log out every user on deploy.
+    if (decoded.aud && decoded.aud !== 'tenant' && decoded.aud !== 'legacy') {
+      return res.status(403).json({
+        message: 'This credential is not valid here.',
+        code: 'TOKEN_AUDIENCE_MISMATCH',
+      });
+    }
+
     // Fetch user from DB to get profile and latest role/assignment metadata
     const User = require('../models/User').default;
     const user = await User.findById(decoded.id)
-      .select('name role email classLevel batch firebaseUid status')
+      .select('name role email classLevel batch firebaseUid status roleIds orgId')
       .lean();
     
     if (!user) {
@@ -51,6 +74,11 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
       batch: (user as any).batch,
       firebaseUid: (user as any).firebaseUid,
       status: (user as any).status,
+      // Needed by resolveUserPermissions. Without these it cannot see assigned
+      // roles and silently falls back to the legacy-role mapping — which would
+      // hand a deliberately narrow custom role its old blanket permissions.
+      roleIds: (user as any).roleIds,
+      orgId: (user as any).orgId,
     };
     next();
   } catch (err) {
@@ -82,7 +110,7 @@ export const optionalAuthMiddleware = async (
     const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as AuthPayload;
     const User = require('../models/User').default;
     const user = await User.findById(decoded.id)
-      .select('name role email classLevel batch firebaseUid status')
+      .select('name role email classLevel batch firebaseUid status roleIds orgId')
       .lean();
 
     if (user) {
@@ -96,6 +124,8 @@ export const optionalAuthMiddleware = async (
         batch: (user as any).batch,
         firebaseUid: (user as any).firebaseUid,
         status: (user as any).status,
+        roleIds: (user as any).roleIds,
+        orgId: (user as any).orgId,
       };
     }
   } catch {
