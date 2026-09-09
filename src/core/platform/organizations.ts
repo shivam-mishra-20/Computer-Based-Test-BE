@@ -204,7 +204,10 @@ export async function setOrganizationStatus(orgId: string, status: string) {
 export async function updateOrganization(orgId: string, patch: Record<string, unknown>) {
   // Whitelisted: an unfiltered $set would let a console bug or a crafted request
   // rewrite `_id`, `createdAt`, or a field a future migration depends on.
-  const allowed = ['name', 'branding', 'locale', 'notes', 'domains', 'isPlatformOwned'];
+  // `mobile` is admitted here so a full organization record round-trips, but
+  // the console edits it through /orgs/:id/mobile — that path checks
+  // uniqueness and requires `app.manage`, which this one does not.
+  const allowed = ['name', 'branding', 'locale', 'notes', 'domains', 'isPlatformOwned', 'mobile'];
   const update: Record<string, unknown> = {};
   for (const key of allowed) {
     if (patch[key] !== undefined) update[key] = patch[key];

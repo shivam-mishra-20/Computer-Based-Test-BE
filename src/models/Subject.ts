@@ -14,9 +14,11 @@ import mongoose, { Document, Schema } from 'mongoose';
  */
 
 export interface ISubject extends Document {
-  orgId: string;
+  orgId?: string | null;
   branchId?: string | null;
   name: string;
+  /** Lowercased, whitespace-collapsed `name`. Derived, never set directly. */
+  nameLower: string;
   code?: string;
   order: number;
   isActive: boolean;
@@ -27,6 +29,7 @@ export interface ISubject extends Document {
 const subjectSchema = new Schema<ISubject>(
   {
     name: { type: String, required: true, trim: true },
+    nameLower: { type: String, required: true },
     code: { type: String, trim: true },
     order: { type: Number, default: 0 },
     isActive: { type: Boolean, default: true },
@@ -34,6 +37,24 @@ const subjectSchema = new Schema<ISubject>(
   { timestamps: true },
 );
 
-subjectSchema.index({ orgId: 1, name: 1 }, { unique: true });
+/**
+ * Keeps `nameLower` in sync with `name` for every write path — `save`,
+ * `create`, AND `insertMany` (`insertMany` validates each doc by default, so
+ * this fires there too, which is what makes the console's bulk
+ * `setOrganizationConfig` replace get case-insensitive dedup for free).
+ */
+subjectSchema.pre('validate', function (next) {
+  if (typeof this.name === 'string') {
+    this.nameLower = this.name.replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+  next();
+});
+
+// Case-insensitive uniqueness per org (or per the shared no-tenant bucket,
+// where `orgId` is null for every document — see subjectService.ts). This is
+// the real race guard: two simultaneous creates for the same subject collide
+// on this index, and the loser is reported back as a conflict rather than
+// silently producing a duplicate.
+subjectSchema.index({ orgId: 1, nameLower: 1 }, { unique: true });
 
 export default mongoose.model<ISubject>('Subject', subjectSchema);

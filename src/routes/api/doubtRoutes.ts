@@ -19,12 +19,132 @@ import { createAndSendNotification } from '../../services/notificationService';
 import { currentOrgId } from '../../core/tenancy';
 import { isLegacyPath, pathBelongsToOrg } from '../../core/storage/paths';
 import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
+import {
+  canAccessDoubt,
+  eligibleTeacherIdsForUnassigned,
+  listDoubts,
+  unreadCountFor,
+  withActivityFields,
+  type DoubtViewer,
+  type DoubtViewerRole,
+} from '../../services/doubtService';
 
 interface AuthRequest extends Request {
   user?: IUser & { _id: any };
 }
 
 const router = Router();
+
+/**
+ * Tell every eligible teacher about a doubt nobody has claimed yet.
+ *
+ * Both a notification and a socket update: the socket keeps an open Doubts
+ * list current (`emitDoubtUpdate` only reaches the student and the ASSIGNED
+ * teacher, so an unassigned thread previously reached neither), and the push
+ * covers everyone who does not have the app open.
+ *
+ * Best-effort by design — a failure here must never fail the student's send.
+ * Once any teacher replies the thread becomes assigned and the normal
+ * single-teacher path takes over, so this fires only while the doubt is
+ * genuinely in the shared pool.
+ */
+async function notifyUnassignedDoubt(
+  doubtId: string,
+  senderName: string,
+  message: string,
+  populated: unknown,
+): Promise<void> {
+  try {
+    const teacherIds = await eligibleTeacherIdsForUnassigned();
+    if (teacherIds.length === 0) return;
+
+    for (const teacherId of teacherIds) {
+      SocketService.emitToUser(teacherId, 'doubt_updated', populated);
+    }
+
+    await Promise.all(
+      teacherIds.map((teacherId) =>
+        createAndSendNotification({
+          userId: teacherId,
+          title: `New doubt from ${senderName}`,
+          body: message.substring(0, 100),
+          type: 'doubt',
+          data: {
+            doubtId,
+            type: 'doubt',
+            role: 'teacher',
+            screen: '/(teacher)/doubts',
+          },
+        }).catch((err) =>
+          console.error('[UnassignedDoubt] Notification error:', err),
+        ),
+      ),
+    );
+  } catch (error) {
+    console.error('[UnassignedDoubt] Fan-out failed:', error);
+  }
+}
+
+/**
+ * The caller as the authorization layer sees them.
+ *
+ * Returns null when the role is not one that participates in doubt chats —
+ * a public learner, for instance, who has no teacher relationship at all.
+ */
+function viewerOf(req: AuthRequest): DoubtViewer | null {
+  const id = (req.user?._id || req.user?.id)?.toString();
+  const role = req.user?.role;
+  if (!id || (role !== 'student' && role !== 'teacher' && role !== 'admin')) {
+    return null;
+  }
+  return { id, role: role as DoubtViewerRole };
+}
+
+/**
+ * Load a conversation and confirm the caller is a participant.
+ *
+ * Every `/:id` route funnels through this. Previously several of them —
+ * including `GET /:id` and `POST /:id/messages`, the two a notification deep
+ * link reaches — loaded the thread by id with no ownership check at all, so
+ * any authenticated user could read or post into anyone's conversation just
+ * by guessing an id. Deep links are now safe precisely BECAUSE the id alone
+ * grants nothing.
+ *
+ * The rule is shared with the list query (`visibilityFilter`), so what a user
+ * can open and what they can list can never drift apart.
+ */
+async function loadAccessibleDoubt(
+  req: AuthRequest,
+  res: Response,
+  doubtId: string,
+): Promise<IDoubt | null> {
+  const viewer = viewerOf(req);
+  if (!viewer) {
+    res.status(403).json({ error: 'Access denied' });
+    return null;
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(doubtId)) {
+    res.status(404).json({ error: 'Doubt not found' });
+    return null;
+  }
+
+  const doubt = await Doubt.findById(doubtId);
+  if (!doubt) {
+    res.status(404).json({ error: 'Doubt not found' });
+    return null;
+  }
+
+  if (!canAccessDoubt(doubt as any, viewer)) {
+    // 403, not 404: the client distinguishes "this conversation is gone" from
+    // "not yours" so a deep link can explain itself instead of bouncing the
+    // user to a home screen with no reason given.
+    res.status(403).json({ error: 'You do not have access to this conversation' });
+    return null;
+  }
+
+  return doubt;
+}
 
 // GET - Fetch available teachers for student to ask doubts
 router.get('/teachers', authMiddleware, async (req: AuthRequest, res: Response) => {
@@ -113,47 +233,29 @@ router.get('/student/my-doubts', authMiddleware, async (req: AuthRequest, res: R
       return res.status(403).json({ error: 'This endpoint is for students only' });
     }
 
-    const filter: any = { student: studentId };
-    
-    if (status) filter.status = status;
+    const viewer = viewerOf(req);
+    if (!viewer) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
 
-    const skip = (Number(page) - 1) * Number(limit);
+    const { doubts, total, totalPages, stats } = await listDoubts({
+      viewer,
+      status: typeof status === 'string' ? status : undefined,
+      page: Math.max(1, Number(page) || 1),
+      limit: Math.min(100, Math.max(1, Number(limit) || 20)),
+    });
 
-    const [doubts, total] = await Promise.all([
-      Doubt.find(filter)
-        .populate('student', 'name email classLevel batch profileImage')
-        .populate('teacher', 'name email profileImage')
-        .populate('messages.sender', 'name email role profileImage')
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(Number(limit))
-        .lean(),
-      Doubt.countDocuments(filter)
-    ]);
-
-    console.log('[GET /student/my-doubts] Found doubts:', doubts.length);
-
-    // Ensure teacher field exists in all doubts
-    // If doubt.teacher is null, try to extract teacher info from messages
+    // A thread the student started that no teacher has claimed still shows the
+    // teacher who actually replied, taken from the messages. Presentation only
+    // — it must never change which threads are RETURNED.
     const doubtsWithTeacher = (doubts as any[]).map(doubt => {
-      if (doubt.teacher) {
-        console.log(`[GET /student/my-doubts] Doubt ${doubt._id} has teacher:`, doubt.teacher?.name);
-        return doubt;
-      }
-      
-      // Debug: Log all messages with their senderRole
-      console.log(`[GET /student/my-doubts] Doubt ${doubt._id} has no teacher field, checking ${doubt.messages?.length || 0} messages`);
-      doubt.messages?.forEach((m: any, i: number) => {
-        console.log(`  Message ${i}: senderRole=${m.senderRole}, sender=${m.sender ? (typeof m.sender === 'object' ? m.sender.name : m.sender) : 'null'}`);
-      });
-      
-      // Find a teacher/admin message with populated sender
+      if (doubt.teacher) return doubt;
+
       const teacherMessage = doubt.messages?.find(
         (m: any) => (m.senderRole === 'teacher' || m.senderRole === 'admin') && m.sender && typeof m.sender === 'object' && m.sender.name
       );
-      
+
       if (teacherMessage && teacherMessage.sender) {
-        console.log(`[GET /student/my-doubts] Found teacher from message: ${teacherMessage.sender.name}`);
         return {
           ...doubt,
           teacher: {
@@ -164,13 +266,13 @@ router.get('/student/my-doubts', authMiddleware, async (req: AuthRequest, res: R
           }
         };
       }
-      
-      console.log(`[GET /student/my-doubts] No teacher message found, returning null teacher`);
-      return {
-        ...doubt,
-        teacher: null
-      };
+
+      return { ...doubt, teacher: null };
     });
+
+    for (const doubt of doubtsWithTeacher as any[]) {
+      doubt.unreadCount = unreadCountFor(doubt, 'student');
+    }
 
     // Convert to public URLs (no regeneration needed)
     for (const doubt of doubtsWithTeacher as any[]) {
@@ -188,18 +290,12 @@ router.get('/student/my-doubts', authMiddleware, async (req: AuthRequest, res: R
       }
     }
 
-    // Group doubts by status for dashboard stats
-    const stats = await Doubt.aggregate([
-      { $match: { student: new mongoose.Types.ObjectId(studentId as string) } },
-      { $group: { _id: '$status', count: { $sum: 1 } } }
-    ]);
-
     return res.json({
       doubts: doubtsWithTeacher,
       total,
-      page: Number(page),
-      totalPages: Math.ceil(total / Number(limit)),
-      stats: stats.reduce((acc, s) => ({ ...acc, [s._id]: s.count }), {})
+      page: Math.max(1, Number(page) || 1),
+      totalPages,
+      stats
     });
   } catch (error) {
     console.error('Error fetching student doubts:', error);
@@ -211,69 +307,27 @@ router.get('/student/my-doubts', authMiddleware, async (req: AuthRequest, res: R
 router.get('/teacher', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
     const { status, batch, subject, page = 1, limit = 20 } = req.query;
-    const teacherId = req.user?._id || req.user?.id;
 
     if (req.user?.role !== 'teacher' && req.user?.role !== 'admin') {
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    const filter: any = {};
-    
-    console.log('[GET /teacher] Query:', req.query);
-    console.log('[GET /teacher] User ID:', teacherId);
-    console.log('[GET /teacher] User role:', req.user?.role);
-    
-    // Teachers see doubts assigned to them OR where they've participated OR unassigned doubts
-    if (req.user?.role === 'teacher') {
-      const teacherObjectId = new mongoose.Types.ObjectId(teacherId as string);
-      
-      filter.$or = [
-        { teacher: teacherObjectId },
-        { teacher: { $exists: false } },
-        { teacher: null },
-        { 'messages.sender': teacherObjectId }  // This will match if ANY message has this sender
-      ];
-      
-      console.log('[GET /teacher] Teacher ObjectId:', teacherObjectId);
+    const viewer = viewerOf(req);
+    if (!viewer) {
+      return res.status(403).json({ error: 'Access denied' });
     }
 
-    if (status) filter.status = status;
-    if (batch) filter.batch = batch;
-    if (subject) filter.subject = subject;
+    const { doubts, total, totalPages, stats } = await listDoubts({
+      viewer,
+      status: typeof status === 'string' ? status : undefined,
+      batch: typeof batch === 'string' ? batch : undefined,
+      subject: typeof subject === 'string' ? subject : undefined,
+      page: Math.max(1, Number(page) || 1),
+      limit: Math.min(100, Math.max(1, Number(limit) || 20)),
+    });
 
-    console.log('[GET /teacher] Final filter:', JSON.stringify(filter, null, 2));
-
-    const skip = (Number(page) - 1) * Number(limit);
-    
-    // Debug: Log all doubts for this teacher (regardless of filter)
-    const allDoubtsWithTeacher = await Doubt.countDocuments({ teacher: new mongoose.Types.ObjectId(teacherId as string) });
-    const allDoubtsWithMessages = await Doubt.countDocuments({ 'messages.sender': new mongoose.Types.ObjectId(teacherId as string) });
-    console.log('[GET /teacher] Debug - Doubts with teacher field:', allDoubtsWithTeacher);
-    console.log('[GET /teacher] Debug - Doubts with messages from teacher:', allDoubtsWithMessages);
-
-    const [doubts, total] = await Promise.all([
-      Doubt.find(filter)
-        .populate('student', 'name email classLevel batch profileImage')
-        .populate('teacher', 'name email profileImage')
-        .populate('messages.sender', 'name email role profileImage')
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(Number(limit))
-        .lean(),
-      Doubt.countDocuments(filter)
-    ]);
-
-    console.log('[GET /teacher] Found doubts:', doubts.length);
-    console.log('[GET /teacher] Total count:', total);
-    
-    if (doubts.length > 0) {
-      console.log('[GET /teacher] First doubt sample:', JSON.stringify({
-        _id: doubts[0]._id,
-        teacher: doubts[0].teacher,
-        student: doubts[0].student,
-        messagesCount: doubts[0].messages?.length,
-        firstMessageSender: doubts[0].messages?.[0]?.sender
-      }, null, 2));
+    for (const doubt of doubts as any[]) {
+      doubt.unreadCount = unreadCountFor(doubt, 'teacher');
     }
 
     // Convert to public URLs (no regeneration needed)
@@ -292,18 +346,12 @@ router.get('/teacher', authMiddleware, async (req: AuthRequest, res: Response) =
       }
     }
 
-    // Group doubts by status for dashboard stats
-    const stats = await Doubt.aggregate([
-      { $match: filter },
-      { $group: { _id: '$status', count: { $sum: 1 } } }
-    ]);
-
     return res.json({
       doubts,
       total,
-      page: Number(page),
-      totalPages: Math.ceil(total / Number(limit)),
-      stats: stats.reduce((acc, s) => ({ ...acc, [s._id]: s.count }), {})
+      page: Math.max(1, Number(page) || 1),
+      totalPages,
+      stats
     });
   } catch (error) {
     console.error('Error fetching doubts:', error);
@@ -429,6 +477,11 @@ router.post('/teacher/start', authMiddleware, messageLimiter, async (req: AuthRe
 // GET - Single doubt details
 router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
+    // Authorization first: this is the endpoint a notification deep link hits,
+    // so the doubt id in a push payload must prove nothing on its own.
+    const allowed = await loadAccessibleDoubt(req, res, req.params.id);
+    if (!allowed) return;
+
     const doubt = await Doubt.findById(req.params.id)
       .populate('student', 'name email classLevel batch phone profileImage')
       .populate('teacher', 'name email profileImage')
@@ -452,7 +505,7 @@ router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
       }
     }
 
-    return res.json(doubt);
+    return res.json(withActivityFields(doubt.toObject() as unknown as Record<string, unknown>));
   } catch (error) {
     console.error('Error fetching doubt:', error);
     return res.status(500).json({ error: 'Failed to fetch doubt' });
@@ -552,7 +605,14 @@ router.post('/', authMiddleware, messageLimiter, async (req: AuthRequest, res: R
         data: { doubtId: (doubt as any)._id.toString(), type: 'doubt', role: 'teacher', screen: '/(teacher)/doubts' }
       }).catch(err => console.error('Notification error:', err));
     } else {
-       // logic for unassigned notification could go here
+      // Nobody owns this thread yet — page the whole eligible pool, scoped to
+      // the student's own organization.
+      void notifyUnassignedDoubt(
+        (doubt as any)._id.toString(),
+        req.user?.name || 'Student',
+        message,
+        populated,
+      );
     }
 
     return res.status(201).json(populated);
@@ -572,46 +632,57 @@ router.post('/:id/messages', authMiddleware, messageLimiter, async (req: AuthReq
       return res.status(400).json({ error: 'Message is required' });
     }
 
-    const doubt = await Doubt.findById(req.params.id);
-    
-    if (!doubt) {
-      return res.status(404).json({ error: 'Doubt not found' });
-    }
+    const doubt = await loadAccessibleDoubt(req, res, req.params.id);
+    if (!doubt) return;
 
     // Add new message to the thread
+    const sentAt = new Date();
     const newMessage = {
       sender: new mongoose.Types.ObjectId(userId as string),
       senderRole: req.user?.role as 'student' | 'teacher' | 'admin',
       message,
       attachments: attachments || [],
-      createdAt: new Date()
+      createdAt: sentAt
     };
 
     doubt.messages.push(newMessage);
-    
-    // Update status logic
+    // Ordering key for every list. Set here as well as in the model hook so a
+    // caller reading `doubt` back before the save still sees the new value.
+    doubt.lastMessageAt = sentAt;
+
+    // ── Status, including REOPENING a resolved thread ────────────────────────
+    // A resolved conversation is a state, not an ending. A new message from
+    // either side moves it back into the active flow rather than being
+    // rejected or silently appended to a thread nobody looks at again.
+    const wasResolved = doubt.status === 'resolved';
+
     if (req.user?.role === 'student') {
       // If student replies, move back to pending so teacher sees it
       doubt.status = 'pending';
-      console.log('[AddMessage] Student replied, status set to pending');
+      doubt.studentLastReadAt = sentAt;
     } else if (req.user?.role === 'teacher' || req.user?.role === 'admin') {
       // If teacher replies, mark in-progress and assign
       doubt.status = 'in-progress';
       // Use userId directly - it's already an ObjectId from authMiddleware
       doubt.teacher = userId as any;
-      doubt.repliedAt = new Date();
-      console.log('[AddMessage] Teacher replied, assigning teacher:', userId, 'to doubt:', doubt._id);
+      doubt.repliedAt = sentAt;
+      doubt.teacherLastReadAt = sentAt;
+    }
+
+    if (wasResolved) {
+      console.log('[AddMessage] Reopened resolved doubt:', doubt._id.toString());
     }
 
     await doubt.save();
 
-    const populated = await Doubt.findById(doubt._id)
+    const populatedRaw = await Doubt.findById(doubt._id)
       .populate('student', 'name email classLevel batch profileImage')
       .populate('teacher', 'name email profileImage')
       .populate('messages.sender', 'name email role profileImage')
       .lean();
-    
-    console.log('[AddMessage] After save - Doubt teacher:', doubt.teacher, 'Messages count:', doubt.messages.length);
+    const populated = populatedRaw
+      ? withActivityFields(populatedRaw as Record<string, unknown>)
+      : populatedRaw;
 
     // Convert to public URLs for all attachments before sending via socket
     if (populated && (populated as any).messages) {
@@ -649,6 +720,14 @@ router.post('/:id/messages', authMiddleware, messageLimiter, async (req: AuthReq
           type: 'doubt',
           data: { doubtId: doubt._id, type: 'doubt', role: 'teacher', screen: '/(teacher)/doubts' }
         });
+      } else {
+        // Still unclaimed — the whole eligible pool needs to know, not nobody.
+        void notifyUnassignedDoubt(
+          doubt._id.toString(),
+          senderName,
+          message,
+          populated,
+        );
       }
     } else {
       // Notify Student
@@ -682,20 +761,18 @@ router.put('/:id/reply', authMiddleware, async (req: AuthRequest, res: Response)
       return res.status(400).json({ error: 'Reply is required' });
     }
 
-    const doubt = await Doubt.findById(req.params.id);
-    
-    if (!doubt) {
-      return res.status(404).json({ error: 'Doubt not found' });
-    }
+    const doubt = await loadAccessibleDoubt(req, res, req.params.id);
+    if (!doubt) return;
 
     // Add new message to the thread
+    const sentAt = new Date();
     const newMessage = {
       sender: new mongoose.Types.ObjectId(teacherId as string),
       // Force sender role from token
       senderRole: req.user?.role as 'teacher' | 'admin',
       message: reply,
       attachments: attachments || [],
-      createdAt: new Date()
+      createdAt: sentAt
     };
 
     doubt.messages.push(newMessage);
@@ -703,8 +780,10 @@ router.put('/:id/reply', authMiddleware, async (req: AuthRequest, res: Response)
     doubt.replyImages = replyImages || [];
     // Enforce teacher assignment
     doubt.teacher = new mongoose.Types.ObjectId(teacherId as string);
-    doubt.repliedAt = new Date();
-    // Enforce status
+    doubt.repliedAt = sentAt;
+    doubt.lastMessageAt = sentAt;
+    doubt.teacherLastReadAt = sentAt;
+    // Enforce status — a reply to a resolved thread reopens it.
     doubt.status = 'in-progress';
 
     await doubt.save();
@@ -747,11 +826,19 @@ router.put('/:id/resolve', authMiddleware, async (req: AuthRequest, res: Respons
       return res.status(403).json({ error: 'Only teachers can resolve doubts' });
     }
 
+    const existing = await loadAccessibleDoubt(req, res, req.params.id);
+    if (!existing) return;
+
+    // Resolving marks state only. It deliberately does NOT touch
+    // `lastMessageAt`: resolving is not conversation activity, and letting it
+    // bump the thread to the top of everyone's list would be noise. The thread
+    // stays exactly where its last real message put it — and stays visible,
+    // because no list filters `resolved` out by default.
     const doubt = await Doubt.findByIdAndUpdate(
       req.params.id,
-      { 
+      {
         status: 'resolved',
-        teacher: req.user?._id 
+        teacher: req.user?._id
       },
       { new: true }
     ).populate('student', 'name email')
@@ -761,10 +848,50 @@ router.put('/:id/resolve', authMiddleware, async (req: AuthRequest, res: Respons
       return res.status(404).json({ error: 'Doubt not found' });
     }
 
-    return res.json(doubt);
+    const payload = withActivityFields(doubt.toObject() as unknown as Record<string, unknown>);
+
+    // Tell both sides the state changed, so a resolve made on one device is
+    // reflected on the other without a manual refresh.
+    SocketService.emitDoubtUpdate(
+      doubt._id.toString(),
+      doubt.student._id ? doubt.student._id.toString() : doubt.student.toString(),
+      doubt.teacher ? (doubt.teacher._id ?? doubt.teacher).toString() : null,
+      'doubt_status',
+      payload
+    );
+
+    return res.json(payload);
   } catch (error) {
     console.error('Error resolving doubt:', error);
     return res.status(500).json({ error: 'Failed to resolve doubt' });
+  }
+});
+
+/**
+ * PUT /:id/read — mark this conversation read for the caller.
+ *
+ * Read state is a per-participant timestamp rather than a boolean so it stays
+ * correct when new messages arrive after the read: the unread count is derived
+ * by comparison, never stored and never used to filter a conversation out of
+ * a list.
+ */
+router.put('/:id/read', authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    const doubt = await loadAccessibleDoubt(req, res, req.params.id);
+    if (!doubt) return;
+
+    const now = new Date();
+    if (req.user?.role === 'student') {
+      doubt.studentLastReadAt = now;
+    } else {
+      doubt.teacherLastReadAt = now;
+    }
+    await doubt.save();
+
+    return res.json({ success: true, readAt: now });
+  } catch (error) {
+    console.error('Error marking doubt read:', error);
+    return res.status(500).json({ error: 'Failed to mark conversation as read' });
   }
 });
 
@@ -775,10 +902,8 @@ router.delete('/:id/permanent', authMiddleware, async (req: AuthRequest, res: Re
       return res.status(403).json({ error: 'Only teachers or admins can permanently delete chats' });
     }
 
-    const doubt = await Doubt.findById(req.params.id);
-    if (!doubt) {
-      return res.status(404).json({ error: 'Doubt not found' });
-    }
+    const doubt = await loadAccessibleDoubt(req, res, req.params.id);
+    if (!doubt) return;
 
     const storagePaths = new Set<string>();
 
@@ -839,10 +964,8 @@ router.delete('/:doubtId/messages/:messageId', authMiddleware, async (req: AuthR
     const { doubtId, messageId } = req.params;
     const userId = (req.user?._id || req.user?.id)?.toString();
 
-    const doubt = await Doubt.findById(doubtId);
-    if (!doubt) {
-      return res.status(404).json({ error: 'Doubt not found' });
-    }
+    const doubt = await loadAccessibleDoubt(req, res, doubtId);
+    if (!doubt) return;
 
     const messageIndex = doubt.messages.findIndex(
       (m) => m._id?.toString() === messageId

@@ -48,6 +48,7 @@ import syllabusRoutes from './routes/api/syllabusRoutes';
 import automationRoutes from './routes/api/automation';
 import resourceRoutes from './routes/api/resourceRoutes';
 import classRequestRoutes from './routes/api/classRequestRoutes';
+import orgRegistrationPublicRoutes from './routes/api/orgRegistrationPublicRoutes';
 import eodRoutes from './routes/api/eodRoutes';
 import playlistRoutes from './routes/api/playlistRoutes';
 import scholarshipRoutes from './routes/api/scholarshipRoutes';
@@ -55,6 +56,7 @@ import { errorHandler } from './middlewares/errorHandler';
 import { globalLimiter } from './middlewares/rateLimiter';
 import { tenantContextMiddleware } from './middlewares/tenantContext';
 import meContextRoutes from './routes/api/meContextRoutes';
+import subjectRoutes from './routes/api/subjectRoutes';
 import { requireModule } from './middlewares/requireModule';
 import orgPublicRoutes from './routes/api/orgPublicRoutes';
 import platformRoutes from './routes/api/platformRoutes';
@@ -330,6 +332,11 @@ app.use('/api/org', orgPublicRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/auth', passwordResetRoutes); // Password reset under /api/auth
 app.use('/api/learner', learnerRoutes); // Public Learner profile, home, saves, progress
+// Public "Register your institute" submissions. Unauthenticated, rate
+// limited, and able to write only to OrganizationRegistration — it creates
+// no tenant. Approval happens in the console; see
+// docs/organization-registration.md.
+app.use('/api/public', orgRegistrationPublicRoutes);
 app.use('/api/public', publicContentRoutes); // Guest + learner content discovery
 app.use('/api/public', publicTestRoutes); // Guest + learner assessment discovery (browse-only)
 app.use('/api/admin-assessments', publicTestAdminRoutes); // Staff authoring for public tests
@@ -361,6 +368,7 @@ app.use('/api/holidays', holidayRoutes);
 app.use('/api/doubts', doubtRoutes);
 app.use('/api/lectures', lectureRoutes);
 app.use('/api/teacher', teacherRoutes);
+app.use('/api/subjects', subjectRoutes);
 app.use('/api/results', resultRoutes);
 app.use('/api/metrics', metricsRoutes);
 app.use('/api/offline-results', offlineResultsRoutes);

@@ -37,6 +37,16 @@ export interface IDoubt extends Document {
   classLevel?: string;
   priority: 'low' | 'normal' | 'high';
   messages: IMessage[];
+  /**
+   * When this conversation last had activity — the timestamp every list sorts
+   * by. Optional because documents written before this field existed do not
+   * carry it; `effectiveLastActivityStage()` supplies the fallback at query
+   * time so those threads still sort correctly with no migration.
+   */
+  lastMessageAt?: Date;
+  /** Per-participant read receipts, for the unread indicator. */
+  studentLastReadAt?: Date;
+  teacherLastReadAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -83,11 +93,39 @@ const doubtSchema = new Schema<IDoubt>({
     default: 'normal' 
   },
   messages: [messageSchema],
+  lastMessageAt: { type: Date, index: true },
+  studentLastReadAt: { type: Date },
+  teacherLastReadAt: { type: Date },
 }, { timestamps: true });
 
-// Compound indexes for efficient queries
+/**
+ * Keep `lastMessageAt` in step with the thread on every save.
+ *
+ * Derived rather than set by each of the five call sites that append a
+ * message — one of them would eventually forget, and a thread whose
+ * `lastMessageAt` silently stops advancing sinks down the list and looks
+ * exactly like the "doubt disappeared" bug this field exists to fix.
+ */
+doubtSchema.pre('save', function (next) {
+  const messages = this.messages;
+  if (messages?.length) {
+    const newest = messages[messages.length - 1];
+    const newestAt = newest?.createdAt ?? new Date();
+    if (!this.lastMessageAt || this.lastMessageAt < newestAt) {
+      this.lastMessageAt = newestAt;
+    }
+  } else if (!this.lastMessageAt) {
+    this.lastMessageAt = this.createdAt ?? new Date();
+  }
+  next();
+});
+
+// Compound indexes for efficient queries. The `lastMessageAt` pairs back the
+// two list endpoints, which sort by latest activity rather than createdAt.
 doubtSchema.index({ status: 1, teacher: 1, createdAt: -1 });
 doubtSchema.index({ batch: 1, subject: 1, status: 1 });
 doubtSchema.index({ student: 1, createdAt: -1 });
+doubtSchema.index({ student: 1, lastMessageAt: -1 });
+doubtSchema.index({ teacher: 1, lastMessageAt: -1 });
 
 export default mongoose.model<IDoubt>('Doubt', doubtSchema);

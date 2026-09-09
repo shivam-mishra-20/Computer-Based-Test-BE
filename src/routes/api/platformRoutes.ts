@@ -18,6 +18,23 @@ import { getEntitlement } from '../../core/entitlements/resolve';
 import { listPlatformAudit, recordPlatformAction } from '../../core/platform/audit';
 import { onboardOrganization } from '../../core/platform/onboarding';
 import {
+  BuildConfigIncomplete,
+  MobileConfigConflict,
+  OrganizationNotFound as MobileOrganizationNotFound,
+  generateBuildConfig,
+  getMobileConfig,
+  reconcileBuildConfig,
+  updateMobileConfig,
+} from '../../core/platform/mobileBuild';
+import {
+  approveRegistration,
+  getRegistration,
+  listRegistrations,
+  setRegistrationVerdict,
+  RegistrationNotActionable,
+  RegistrationNotFound,
+} from '../../core/platform/registrations';
+import {
   createOrganization,
   listOrganizations,
   getOrganizationDetail,
@@ -158,6 +175,25 @@ function handle(fn: (req: Request, res: Response) => Promise<unknown>) {
     } catch (error) {
       if (error instanceof OrgSlugTaken) {
         return res.status(409).json({ message: error.message, code: error.code });
+      }
+      if (error instanceof RegistrationNotFound || error instanceof MobileOrganizationNotFound) {
+        return res.status(404).json({ message: error.message });
+      }
+      // A native identifier another organization already holds. 409, because
+      // the request is well-formed and the resource state is what refuses it.
+      if (error instanceof MobileConfigConflict) {
+        return res.status(409).json({ message: error.message, field: error.field });
+      }
+      // Generation refused because the organization is not ready. The issues
+      // are the answer, not a side note — the caller asked what is missing.
+      if (error instanceof BuildConfigIncomplete) {
+        return res.status(422).json({ message: error.message, issues: error.issues });
+      }
+      // A verdict the record's state does not allow — rejecting a registration
+      // that already became an organization, say. The caller's request is
+      // coherent but the resource is not in a state that permits it.
+      if (error instanceof RegistrationNotActionable) {
+        return res.status(409).json({ message: error.message });
       }
       console.error(`[platform] ${req.method} ${req.path} failed:`, error);
       return res.status(500).json({ message: (error as Error).message || 'Platform request failed' });
@@ -520,6 +556,241 @@ router.post(
       entityId: req.params.id,
     });
     return res.json({ staff: updated });
+  }),
+);
+
+// ── Mobile build configuration ─────────────────────────────────────────────
+//
+// Reading takes `org.read`, like every other view of an organization. WRITING
+// takes `app.manage`, which is deliberately not `org.manage`: the roles differ
+// in what a mistake costs. A wrong colour is fixed by saving again; a wrong
+// Android package name is a second store listing that cannot be merged with
+// the first. See PlatformUser.ts.
+
+router.get(
+  '/orgs/:orgId/mobile',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const profile = (req.query.profile as string) || 'production';
+    const view = await getMobileConfig(
+      req.params.orgId,
+      profile === 'development' || profile === 'preview' ? profile : 'production',
+    );
+    await recordPlatformAction(req, {
+      action: 'mobile.view',
+      orgId: req.params.orgId,
+      entity: 'Org',
+      entityId: req.params.orgId,
+      metadata: { status: view.status, issues: view.issues.length },
+    });
+    return res.json(view);
+  }),
+);
+
+router.put(
+  '/orgs/:orgId/mobile',
+  requirePlatformCapability('app.manage'),
+  handle(async (req, res) => {
+    const before = await getMobileConfig(req.params.orgId);
+    const view = await updateMobileConfig(req.params.orgId, req.body ?? {});
+
+    await recordPlatformAction(req, {
+      action: 'mobile.update',
+      orgId: req.params.orgId,
+      entity: 'Org',
+      entityId: req.params.orgId,
+      changes: req.body,
+      metadata: { statusBefore: before.status, statusAfter: view.status },
+    });
+    // Readiness changing is the operationally interesting event — it is what
+    // decides whether a build can be handed to a developer — so it is recorded
+    // as its own entry rather than buried in the diff of the one above.
+    if (before.status !== view.status) {
+      await recordPlatformAction(req, {
+        action: 'mobile.readiness',
+        orgId: req.params.orgId,
+        entity: 'Org',
+        entityId: req.params.orgId,
+        metadata: { from: before.status, to: view.status },
+      });
+    }
+    return res.json(view);
+  }),
+);
+
+router.post(
+  '/orgs/:orgId/mobile/build-config',
+  requirePlatformCapability('app.manage'),
+  handle(async (req, res) => {
+    const generated = await generateBuildConfig(req.params.orgId);
+    await recordPlatformAction(req, {
+      action: 'mobile.generate',
+      orgId: req.params.orgId,
+      entity: 'Org',
+      entityId: req.params.orgId,
+      metadata: { slug: generated.slug, androidPackage: generated.identity.androidPackage },
+    });
+    return res.json(generated);
+  }),
+);
+
+router.post(
+  '/orgs/:orgId/mobile/reconcile',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const result = await reconcileBuildConfig(req.params.orgId, req.body?.build ?? {});
+    // Only a MISMATCH is audited. Recording every clean comparison would bury
+    // the entries that matter in noise nobody reads.
+    if (!result.matches) {
+      await recordPlatformAction(req, {
+        action: 'mobile.mismatch',
+        orgId: req.params.orgId,
+        entity: 'Org',
+        entityId: req.params.orgId,
+        metadata: { mismatches: result.mismatches },
+      });
+    }
+    return res.json(result);
+  }),
+);
+
+// ── Organization registrations ─────────────────────────────────────────────
+//
+// The staff half of the public "Register your institute" flow. Reading needs
+// `org.read`; approving creates a tenant, so it needs `org.manage` — the same
+// capability `/orgs/onboard` requires, because approval IS that call.
+
+router.get(
+  '/registrations',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const result = await listRegistrations({
+      status: req.query.status as string,
+      search: req.query.search as string,
+      limit: req.query.limit ? Number(req.query.limit) : undefined,
+      skip: req.query.skip ? Number(req.query.skip) : undefined,
+    });
+    return res.json(result);
+  }),
+);
+
+router.get(
+  '/registrations/:id',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const registration = await getRegistration(req.params.id);
+    if (!registration) return res.status(404).json({ message: 'Registration not found' });
+
+    // Opening someone's contact details is itself worth recording — this is
+    // personal data, and "who looked at it" is the question an audit exists to
+    // answer.
+    await recordPlatformAction(req, {
+      action: 'registration.view',
+      entity: 'OrganizationRegistration',
+      entityId: req.params.id,
+    });
+
+    return res.json({ registration });
+  }),
+);
+
+/**
+ * Approve, and provision.
+ *
+ * This does NOT contain a provisioning sequence. It calls
+ * `approveRegistration()`, which calls `onboardOrganization()` — the same
+ * orchestrator `/orgs/onboard` uses. The 207 semantics are preserved for the
+ * same reason they exist there: a partial run leaves a resumable organization,
+ * and re-posting this finishes it rather than duplicating it.
+ */
+router.post(
+  '/registrations/:id/approve',
+  requirePlatformCapability('org.manage'),
+  handle(async (req, res) => {
+    const staff = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+    const result = await approveRegistration(req.params.id, req.body ?? {}, {
+      id: staff?.id,
+    });
+
+    await recordPlatformAction(req, {
+      action: result.created ? 'registration.approve' : 'registration.approve.retry',
+      orgId: result.onboarding.orgId,
+      entity: 'OrganizationRegistration',
+      entityId: req.params.id,
+      metadata: {
+        slug: result.onboarding.slug,
+        complete: result.onboarding.complete,
+        steps: result.onboarding.steps,
+        createdOrganization: result.created,
+      },
+    });
+
+    return res.status(result.onboarding.complete ? 200 : 207).json({
+      registration: result.registration,
+      onboarding: result.onboarding,
+      created: result.created,
+    });
+  }),
+);
+
+router.post(
+  '/registrations/:id/reject',
+  requirePlatformCapability('org.manage'),
+  handle(async (req, res) => {
+    const staff = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+    const registration = await setRegistrationVerdict(
+      req.params.id,
+      'REJECTED',
+      typeof req.body?.note === 'string' ? req.body.note.slice(0, 2000) : undefined,
+      { id: staff?.id },
+    );
+
+    await recordPlatformAction(req, {
+      action: 'registration.reject',
+      entity: 'OrganizationRegistration',
+      entityId: req.params.id,
+      metadata: { note: registration.reviewNote },
+    });
+
+    return res.json({ registration });
+  }),
+);
+
+/**
+ * Ask the applicant for more, or put a registration back in the queue.
+ *
+ * `INFO_REQUESTED` records that staff need something further. With no mail
+ * system in this repository the request itself is made out of band — see
+ * docs/organization-registration.md — and this endpoint records the state so
+ * the queue does not keep presenting the row as untouched.
+ */
+router.post(
+  '/registrations/:id/status',
+  requirePlatformCapability('org.manage'),
+  handle(async (req, res) => {
+    const next = String(req.body?.status ?? '').toUpperCase();
+    if (next !== 'INFO_REQUESTED' && next !== 'PENDING') {
+      return res.status(400).json({
+        message: 'status must be INFO_REQUESTED or PENDING. Use /approve or /reject for a verdict.',
+      });
+    }
+
+    const staff = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+    const registration = await setRegistrationVerdict(
+      req.params.id,
+      next,
+      typeof req.body?.note === 'string' ? req.body.note.slice(0, 2000) : undefined,
+      { id: staff?.id },
+    );
+
+    await recordPlatformAction(req, {
+      action: next === 'PENDING' ? 'registration.reopen' : 'registration.request-info',
+      entity: 'OrganizationRegistration',
+      entityId: req.params.id,
+      metadata: { note: registration.reviewNote },
+    });
+
+    return res.json({ registration });
   }),
 );
 

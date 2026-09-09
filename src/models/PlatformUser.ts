@@ -32,6 +32,12 @@ export const PLATFORM_CAPABILITIES = [
   'staff.manage',
   'impersonate',
   'audit.read',
+  // Editing an organization's NATIVE identity — package name, bundle id,
+  // scheme — and generating its build configuration. Separate from
+  // `org.manage` because the two differ in what a mistake costs: a wrong
+  // colour is fixed by saving again, a wrong package name is a second listing
+  // in a store that cannot be merged with the first.
+  'app.manage',
 ] as const;
 
 /**
@@ -49,7 +55,11 @@ export const PLATFORM_ROLE_CAPABILITIES: Record<PlatformRole, string[]> = {
   owner: [...PLATFORM_CAPABILITIES],
   support: ['org.read', 'impersonate', 'audit.read'],
   billing: ['org.read', 'plan.manage', 'subscription.manage', 'billing.manage', 'audit.read'],
-  engineer: ['org.read', 'audit.read'],
+  // The engineer is the role that actually runs the build, so it is the role
+  // that configures what gets built. It still cannot create, suspend or
+  // otherwise administer an organization — `app.manage` is a narrow grant, not
+  // a step toward `org.manage`.
+  engineer: ['org.read', 'app.manage', 'audit.read'],
 };
 
 /**
