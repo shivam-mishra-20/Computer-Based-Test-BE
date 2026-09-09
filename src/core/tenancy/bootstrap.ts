@@ -17,7 +17,13 @@
 
 import mongoose from 'mongoose';
 import { tenantPlugin } from './plugin';
-import { describeTenancy, tenantEnforcement, tenantMode, pinnedOrgId } from './config';
+import {
+  describeTenancy,
+  isExplicitlyPinned,
+  pinnedOrgId,
+  tenantEnforcement,
+  tenantMode,
+} from './config';
 
 let registered = false;
 
@@ -30,13 +36,33 @@ export function registerTenancy(): void {
   console.log(`[tenancy] plugin registered — ${describeTenancy()}`);
 
   if (tenantMode() === 'pinned' && !pinnedOrgId()) {
-    // Not fatal here: a process may legitimately boot before Org 001 has been
-    // seeded. It IS fatal at request time, where the middleware refuses to
-    // serve without a resolvable organization.
-    console.warn(
-      '[tenancy] TENANT_MODE=pinned but ORG_ID is unset. ' +
-        'Requests will fail until ORG_ID names a real organization.',
-    );
+    // ── Two very different situations, and the log has to tell them apart ──
+    // `tenantMode()` DEFAULTS to 'pinned', so this branch is reached both by a
+    // deployment that asked for pinned mode and forgot ORG_ID, and by one that
+    // has never been configured for tenancy at all.
+    //
+    // Only the first is a fault. `tenantContextMiddleware` checks the same
+    // distinction and 503s only when the mode was set EXPLICITLY; an
+    // unconfigured deployment takes the pre-migration path and serves exactly
+    // as it did before this code existed.
+    //
+    // The message used to say "Requests will fail" in both cases. On the live
+    // legacy deployment — which sets no TENANT_* variables — that was untrue,
+    // and it read as an outage during an unrelated investigation. A warning
+    // that cries wolf is worse than no warning, so each case now says what is
+    // actually true of it.
+    if (isExplicitlyPinned()) {
+      console.warn(
+        '[tenancy] TENANT_MODE=pinned but ORG_ID is unset. ' +
+          'Requests WILL fail with 503 until ORG_ID names a real organization.',
+      );
+    } else {
+      console.info(
+        '[tenancy] No TENANT_MODE set — running pre-migration, unscoped, exactly as before. ' +
+          'This is expected for the legacy deployment. Do not set ORG_ID until an ' +
+          'organization exists to point it at.',
+      );
+    }
   }
 
   if (tenantEnforcement() === 'off') {

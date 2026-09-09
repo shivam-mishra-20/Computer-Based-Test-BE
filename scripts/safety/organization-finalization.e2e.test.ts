@@ -10,8 +10,8 @@
  * The three claims worth the length:
  *
  *   · READINESS IS NOT COSMETIC. The status comes from the validator in
- *     `@platform/client-core`, the same module `client-platform-app` runs at
- *     build time. A configuration the console calls READY is one the build
+ *     `src/core/platform/mobileBuildRules.ts`, the module
+ *     `client-platform-app` mirrors and runs at build time. A configuration the console calls READY is one the build
  *     accepts, and the last section proves the two agree by feeding the same
  *     record to both.
  *
@@ -145,10 +145,12 @@ async function main() {
   const Entitlement = require('../../src/models/Entitlement').default;
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const PlatformAudit = require('../../src/models/PlatformAudit').default;
-  // The very module client-platform-app validates with. Imported here so the
-  // last section can prove both sides agree rather than asserting it.
+  // The very rules client-platform-app validates with — mirrored into
+  // platform-client-core and compared by `npm run safety:mobile-rules`.
+  // Imported here so the last section proves both sides agree rather than
+  // asserting it.
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const shared = require('@platform/client-core');
+  const shared = require('../../src/core/platform/mobileBuildRules');
 
   console.log(`[fin-e2e] target: ${redactUri(uri)}\n`);
 

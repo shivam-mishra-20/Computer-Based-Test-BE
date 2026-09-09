@@ -53,6 +53,7 @@
     "safety:platform-e2e": "ts-node --transpile-only scripts/safety/platform-onboarding.e2e.test.ts",
     "safety:registration-e2e": "ts-node --transpile-only scripts/safety/organization-registration.e2e.test.ts",
     "safety:finalization-e2e": "ts-node --transpile-only scripts/safety/organization-finalization.e2e.test.ts",
+    "safety:mobile-rules": "ts-node --transpile-only scripts/safety/mobile-rules-drift.ts",
     "safety:console-ui": "ts-node --transpile-only scripts/safety/console-ui.e2e.test.ts",
     "safety:platform-auth": "ts-node --transpile-only scripts/safety/platform-auth.test.ts",
     "safety:console-login": "ts-node --transpile-only scripts/safety/console-login.e2e.test.ts",
@@ -72,7 +73,6 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@platform/client-core": "file:../platform-client-core",
     "@heroicons/react": "^2.2.0",
     "@hungknguyen/docx-math-converter": "^1.1.4",
     "@socket.io/redis-adapter": "^8.3.0",

@@ -13,7 +13,7 @@ FINALIZATION                 console → Organization → Branding tab
         ↓
 MOBILE CONFIGURATION         console → Organization → Mobile app tab
         ↓
-READINESS VALIDATION         @platform/client-core           NOT_CONFIGURED
+READINESS VALIDATION         mobileBuildRules.ts             NOT_CONFIGURED
         ↓                                                  → INCOMPLETE
 GENERATE BUILD CONFIG        console → Generate             → READY
         ↓
@@ -95,11 +95,33 @@ Checked for a **production** profile, which is what the console asks:
 
 ### One validator, not two
 
-The rules live in **`@platform/client-core/src/mobileBuild.ts`** and are
-imported by both:
+The rules live in **`central-be/src/core/platform/mobileBuildRules.ts`** and are
+mirrored, byte for byte below the file header, into
+**`platform-client-core/src/mobileBuild.ts`**, which is what
+`client-platform-app/config/resolve.js` validates with at build time.
 
-- **`central-be`** — to answer readiness and to refuse generation
-- **`client-platform-app/config/resolve.js`** — to refuse the build itself
+- **`central-be`** — answers readiness and refuses generation
+- **`client-platform-app`** — refuses the build itself
+
+`npm run safety:mobile-rules` compares the two files and fails on any
+difference, so the guarantee survives the split. It skips — loudly — where the
+`platform-client-core` checkout is absent, which is the normal state inside a
+container.
+
+### Why mirrored rather than imported
+
+The backend imported `@platform/client-core` briefly, and it broke the
+production container. That package is a **sibling git repository**, so
+`file:../platform-client-core` resolves on a developer's machine and nowhere
+else; Railway clones this repository alone. npm does not verify a `file:`
+target exists — it records `{"resolved": "../platform-client-core", "link":
+true}` and exits 0 — and `esbuild --packages=external` leaves bare imports
+unresolved, so the failure surfaced only at `node dist/server.js`.
+
+A server has to be installable from its own checkout. There was a direction
+problem underneath the packaging one too: that package describes itself as
+shared by the two *clients*, and a server depending on a client package has its
+arrows backwards.
 
 This is the point of the whole arrangement. A console that reports READY for a
 build the app then refuses is worse than a console with no readiness at all: it

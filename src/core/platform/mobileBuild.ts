@@ -15,11 +15,16 @@
  * commands that consume it.
  *
  * ── One validator, not two ──────────────────────────────────────────────────
- * The rules live in `@platform/client-core` and are imported by BOTH this
- * module and `client-platform-app/config/resolve.js`. That is the whole point:
+ * The rules live in `./mobileBuildRules`, and `client-platform-app` mirrors
+ * that file byte for byte through `platform-client-core` — `npm run
+ * safety:mobile-rules` fails if the two ever differ. That is the whole point:
  * a console that reports READY for a build the app then refuses is worse than
  * a console with no readiness at all, because it moves the failure to the
  * person least able to diagnose it.
+ *
+ * They are mirrored rather than imported because the shared package is a
+ * SIBLING REPOSITORY — `file:../platform-client-core` exists on a developer's
+ * machine and in no container. See the header of `mobileBuildRules.ts`.
  *
  * What this module adds on top of the shared rules is the part only a server
  * can answer — uniqueness across every organization — and the part only a
@@ -37,7 +42,7 @@ import {
   type MobileBuildMismatch,
   type MobileBuildProfile,
   type MobileBuildStatus,
-} from '@platform/client-core';
+} from './mobileBuildRules';
 import { withoutTenantScope } from '../tenancy/context';
 
 export class MobileConfigConflict extends Error {
