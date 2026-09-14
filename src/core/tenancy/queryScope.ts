@@ -60,7 +60,12 @@ export function tenantScope(): Record<string, never> | { orgId: string } {
   const context = getTenantContext();
   if (!context?.orgId) return {};
 
-  if (context.source === 'claim') return { orgId: context.orgId };
+  // `session` is claim's twin — the organization came from the authenticated
+  // user's record instead of from a claim in their token. Same trust, same
+  // scoping; see the note on TenantContext.source.
+  if (context.source === 'claim' || context.source === 'session') {
+    return { orgId: context.orgId };
+  }
   if (tenantEnforcement() === 'enforce') return { orgId: context.orgId };
 
   return {};

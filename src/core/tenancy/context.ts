@@ -24,8 +24,17 @@ export interface TenantContext {
   branchId?: string | null;
   /** Present for request-bound work; absent for cron and system jobs. */
   userId?: string | null;
-  /** Where this context came from — invaluable when debugging a leak. */
-  source: 'pinned' | 'claim' | 'job' | 'cron' | 'script' | 'test';
+  /**
+   * Where this context came from — invaluable when debugging a leak.
+   *
+   * `session` is `claim`'s twin: the organization came from the authenticated
+   * user's own database record rather than from a claim inside their token.
+   * It exists because tokens are long-lived (3650 days) and predate the
+   * `orgId` claim, so a user backfilled into an organization keeps presenting
+   * a token that does not mention it. Both are "derived from who logged in",
+   * as opposed to `pinned`, which is "derived from configuration".
+   */
+  source: 'pinned' | 'claim' | 'session' | 'job' | 'cron' | 'script' | 'test';
 }
 
 /** An explicitly unscoped unit of work. See `withoutTenantScope`. */

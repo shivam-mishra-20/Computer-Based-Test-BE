@@ -26,6 +26,12 @@
  */
 
 import mongoose, { Document, Schema } from 'mongoose';
+import {
+  APPLICATION_STATUSES,
+  organizationApplicationSchema,
+  type ApplicationStatus,
+  type IOrganizationApplication,
+} from './organizationApplication';
 
 /**
  * Where the submission came from. `WEB` is the public marketing site; the enum
@@ -34,32 +40,23 @@ import mongoose, { Document, Schema } from 'mongoose';
 export type OrganizationRegistrationSource = 'WEB';
 
 /**
- * ── The lifecycle ───────────────────────────────────────────────────────────
- *
- *   PENDING ──────────► APPROVED     (an Org now exists; orgId is set)
- *      │  ▲
- *      │  └── INFO_REQUESTED   (staff need more from the applicant)
- *      │
- *      └────────────► REJECTED
- *
  * `APPROVED` means an organization was created. It does NOT promise the
  * organization is fully configured: `onboardOrganization()` can return a
- * partial result (the 207 case), and that is recorded in
- * `provisioningComplete` and `provisioningSteps` rather than by inventing a
- * fifth status. A half-configured organization is still an approved
- * registration; what it needs is a retry, not a different verdict.
+ * partial result (the 207 case), recorded in `provisioningComplete` and
+ * `provisioningSteps` rather than as a separate status. A half-configured
+ * organization is still an approved registration; what it needs is a retry,
+ * not a different verdict.
+ *
+ * Widened for the full application lifecycle — see `organizationApplication.ts`
+ * for the diagram and for why `PENDING` and `INFO_REQUESTED` kept their names.
+ *
+ * Every historical row holds one of the original four, and all four are still
+ * in this list, so nothing needed migrating.
  */
-export type OrganizationRegistrationStatus =
-  | 'PENDING'
-  | 'INFO_REQUESTED'
-  | 'APPROVED'
-  | 'REJECTED';
+export type OrganizationRegistrationStatus = ApplicationStatus;
 
 export const ORGANIZATION_REGISTRATION_STATUSES: OrganizationRegistrationStatus[] = [
-  'PENDING',
-  'INFO_REQUESTED',
-  'APPROVED',
-  'REJECTED',
+  ...APPLICATION_STATUSES,
 ];
 
 /**
@@ -117,6 +114,28 @@ export interface IOrganizationRegistration extends Document {
    */
   dedupeKey: string;
 
+  /**
+   * The full structured application.
+   *
+   * Absent on every registration submitted before the onboarding flow existed.
+   * That is not corruption and is not an error: readiness reports those rows
+   * as incomplete and the console lets staff fill the gaps, which is exactly
+   * what "backward compatible" has to mean here.
+   */
+  application?: IOrganizationApplication;
+
+  /**
+   * Lets an applicant resume a draft without an account.
+   *
+   * A high-entropy secret, returned once at creation and never listed. It is
+   * the ONLY thing that authorises reading or writing a draft, which is what
+   * keeps one applicant out of another's application without inventing a
+   * login for people who do not have one yet.
+   */
+  draftToken?: string;
+  draftExpiresAt?: Date;
+  submittedAt?: Date;
+
   // ── Review ────────────────────────────────────────────────────────────────
   status: OrganizationRegistrationStatus;
   reviewedBy?: mongoose.Types.ObjectId;
@@ -166,6 +185,14 @@ const OrganizationRegistrationSchema = new Schema<IOrganizationRegistration>(
     source: { type: String, enum: ['WEB'], required: true, default: 'WEB' },
     submittedIp: { type: String, trim: true, maxlength: 64 },
     dedupeKey: { type: String, required: true, index: true },
+
+    application: { type: organizationApplicationSchema, required: false },
+    // `select: false`: the draft token must never ride along in a list or a
+    // detail response. It is read explicitly, by the one route that resumes a
+    // draft, and compared there.
+    draftToken: { type: String, select: false, index: true },
+    draftExpiresAt: { type: Date },
+    submittedAt: { type: Date },
 
     status: {
       type: String,

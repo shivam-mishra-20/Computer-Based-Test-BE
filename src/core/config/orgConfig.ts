@@ -24,6 +24,7 @@
  */
 
 import { currentOrgId, withoutTenantScope } from '../tenancy/context';
+import { tenantScope } from '../tenancy/queryScope';
 import { SUPPORTED_CLASS_VALUES } from '../../config/studentBatchConfig';
 import { CURRICULUM_SUBJECTS } from '../../config/subjects';
 import { ROOMS, ROOM_CAPACITY } from '../../models/RoomAllocation';
@@ -50,9 +51,9 @@ export interface OrgConfiguration {
   subjects: string[];
   rooms: ResolvedRoom[];
   /**
-   * Batches are REAL DATA, not a constant, so there is no legacy fallback:
-   * an organization with no batches genuinely has none, and inventing
-   * Abhigyan's would put another institute's groupings in their picker.
+   * Batches are REAL DATA, not a constant — there is no list to fall back to,
+   * so they are always read from the collection. What varies is how widely
+   * that read is SCOPED; see `readBatches()`.
    */
   batches: ResolvedBatch[];
   /** True when these values came from the legacy constants, not the database. */
@@ -83,6 +84,59 @@ export function legacySubjects(): string[] {
   return [...CURRICULUM_SUBJECTS];
 }
 
+/**
+ * The organization's batches.
+ *
+ * ── Why this is not just `Batch.find({ orgId })` ────────────────────────────
+ * Class levels, subjects and rooms all have a legacy CONSTANT to fall back to
+ * when an organization has configured nothing. Batches do not, and the first
+ * version of this resolver concluded from that it should return `[]` whenever
+ * it could not scope a query. That broke this file's own founding rule:
+ *
+ *     Absent configuration must mean "as before", never "nothing".
+ *
+ * With no tenant context there is no organization whose batch list could be
+ * empty — there is simply no tenancy configured yet, which is exactly where
+ * production sits today. Returning `[]` there emptied the batch picker
+ * everywhere it is used (study materials, homework, class requests) on a
+ * deployment that has always had batches, and the symptom — "no batches
+ * available for this class" — looked like a client bug.
+ *
+ * The same trap applies one step later: a deployment PINNED to an org before
+ * its backfill has run has a context, but no Batch document carries `orgId`
+ * yet, so filtering by it still matches nothing.
+ *
+ * So the read is scoped exactly when the data is known to carry the field —
+ * which is the condition `tenantScope()` already encodes and audits for
+ * individual queries, reused here rather than re-derived:
+ *
+ *   explicit orgId   Always scoped. The caller (console, provisioning) is
+ *                    asking about ONE organization, and answering with
+ *                    everyone's batches would be a cross-tenant leak.
+ *   claim / enforce   Scoped — multi-tenant, and the data carries orgId.
+ *   otherwise         Unscoped, i.e. precisely the pre-tenancy behaviour.
+ */
+export function batchReadScope(
+  explicitOrgId?: string | null,
+): Record<string, never> | { orgId: string } {
+  return explicitOrgId ? { orgId: explicitOrgId } : tenantScope();
+}
+
+async function readBatches(explicitOrgId?: string | null): Promise<ResolvedBatch[]> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const Batch = require('../../models/Batch').default;
+
+  const rows = await Batch.find(batchReadScope(explicitOrgId))
+    .select('name classLevels')
+    .sort({ name: 1 })
+    .lean();
+
+  return (rows as ResolvedBatch[]).map((b) => ({
+    name: b.name,
+    classLevels: b.classLevels ?? [],
+  }));
+}
+
 export function legacyRooms(): ResolvedRoom[] {
   // `roomCapacity()` returns 0 for an unlisted room, but every entry in ROOMS is
   // listed; the ?? 20 mirrors the legacy comment's stated default rather than
@@ -100,20 +154,25 @@ export function legacyRooms(): ResolvedRoom[] {
 export async function getOrgConfiguration(orgId?: string | null): Promise<OrgConfiguration> {
   const org = orgId ?? currentOrgId();
 
-  // No tenant context — pre-migration, or a pre-auth route. Legacy behaviour.
+  // No tenant context — pre-migration, or a pre-auth route. Legacy behaviour,
+  // and for batches that means the real collection read the old code did, NOT
+  // an empty list. See `readBatches()`.
   if (!org) {
     return {
       classLevels: legacyClassLevels(),
       subjects: legacySubjects(),
       rooms: legacyRooms(),
-      batches: [],
+      batches: await readBatches(orgId),
       usingDefaults: { classLevels: true, subjects: true, rooms: true },
     };
   }
 
-  const [classRows, subjectRows, roomRows, batchRows] = await withoutTenantScope(
-    'config:read-org-configuration',
-    async () => {
+  // Batches are read OUTSIDE the unscoped block on purpose: `readBatches()`
+  // decides its own scope from the live tenant context, and inside
+  // `withoutTenantScope` that context reads as absent — which would silently
+  // widen a claim-mode read to every organization's batches.
+  const [[classRows, subjectRows, roomRows], batches] = await Promise.all([
+    withoutTenantScope('config:read-org-configuration', async () => {
       // Required lazily so this module is importable before models compile.
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const ClassLevel = require('../../models/ClassLevel').default;
@@ -121,17 +180,15 @@ export async function getOrgConfiguration(orgId?: string | null): Promise<OrgCon
       const Subject = require('../../models/Subject').default;
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const OrgRoom = require('../../models/OrgRoom').default;
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const Batch = require('../../models/Batch').default;
 
       return Promise.all([
         ClassLevel.find({ orgId: org, isActive: true }).sort({ order: 1 }).lean(),
         Subject.find({ orgId: org, isActive: true }).sort({ order: 1, name: 1 }).lean(),
         OrgRoom.find({ orgId: org, isActive: true }).sort({ order: 1, name: 1 }).lean(),
-        Batch.find({ orgId: org }).select('name classLevels').sort({ name: 1 }).lean(),
       ]);
-    },
-  );
+    }),
+    readBatches(orgId),
+  ]);
 
   const classLevels = (classRows as ResolvedClassLevel[]).length
     ? (classRows as ResolvedClassLevel[]).map((c) => ({
@@ -149,11 +206,6 @@ export async function getOrgConfiguration(orgId?: string | null): Promise<OrgCon
   const rooms = (roomRows as ResolvedRoom[]).length
     ? (roomRows as ResolvedRoom[]).map((r) => ({ name: r.name, capacity: r.capacity }))
     : legacyRooms();
-
-  const batches = (batchRows as ResolvedBatch[]).map((b) => ({
-    name: b.name,
-    classLevels: b.classLevels ?? [],
-  }));
 
   return {
     classLevels,

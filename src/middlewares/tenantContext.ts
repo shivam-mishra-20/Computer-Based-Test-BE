@@ -26,6 +26,7 @@ import { runWithTenant, withoutTenantScope, type TenantContext } from '../core/t
 import { findPublicRoute } from '../core/tenancy/publicRoutes';
 import { isExplicitlyPinned, pinnedOrgId, tenantEnforcement, tenantMode } from '../core/tenancy/config';
 import { resolveOrgFromRequest } from '../core/tenancy/hostResolution';
+import { stashTenantStore } from '../core/tenancy/requestContext';
 
 interface TokenClaims {
   id?: string;
@@ -46,6 +47,20 @@ function peekClaims(req: Request): TokenClaims | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Open the context AND record it on the request.
+ *
+ * The stash is what survives a middleware that consumes the request stream —
+ * multer, or a Redis-backed rate limiter — because those resume the chain from
+ * the socket's async context, where the AsyncLocalStorage store is gone. See
+ * `core/tenancy/requestContext.ts`; without it every multipart upload route
+ * reaches object storage with no organization and is refused.
+ */
+function enterTenant(req: Request, context: TenantContext, next: NextFunction) {
+  stashTenantStore(req, context);
+  return runWithTenant(context, () => next());
 }
 
 /** The explicit organization hint a client may send. Routing only — grants nothing. */
@@ -91,7 +106,7 @@ export function tenantContextMiddleware(req: Request, res: Response, next: NextF
       userId: claims?.id ?? null,
       source: 'pinned',
     };
-    return runWithTenant(context, () => next());
+    return enterTenant(req, context, next);
   }
 
   // ── claim mode ───────────────────────────────────────────────────────────
@@ -114,7 +129,7 @@ export function tenantContextMiddleware(req: Request, res: Response, next: NextF
       return resolveOrgFromRequest({ header: hint })
         .then((resolved) => {
           if (resolved && resolved === claims.orgId) {
-            return runWithTenant(context, () => next());
+            return enterTenant(req, context, next);
           }
           return res.status(400).json({
             message: 'Organization mismatch between credentials and request.',
@@ -129,7 +144,7 @@ export function tenantContextMiddleware(req: Request, res: Response, next: NextF
         );
     }
 
-    return runWithTenant(context, () => next());
+    return enterTenant(req, context, next);
   }
 
   // ── No claim: the PRE-AUTHENTICATION case ────────────────────────────────
@@ -163,7 +178,7 @@ export function tenantContextMiddleware(req: Request, res: Response, next: NextF
       .then((resolved) => {
         if (resolved) {
           const context: TenantContext = { orgId: resolved, userId: null, source: 'claim' };
-          return runWithTenant(context, () => next());
+          return enterTenant(req, context, next);
         }
         return continueWithoutOrg(req, next);
       })
@@ -183,6 +198,7 @@ function continueWithoutOrg(req: Request, next: NextFunction) {
   if (allowed) {
     // A reviewed, justified entry in the allowlist. The reason string reaches
     // the logs, so every bypass that actually fires is traceable.
+    stashTenantStore(req, { unscoped: true, reason: allowed.reason });
     return withoutTenantScope(allowed.reason, () => next());
   }
 

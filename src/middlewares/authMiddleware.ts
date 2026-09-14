@@ -1,5 +1,74 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import { getTenantContext, runWithTenant, type TenantContext } from '../core/tenancy/context';
+import { tenantEnforcement } from '../core/tenancy/config';
+import { stashTenantStore } from '../core/tenancy/requestContext';
+
+/**
+ * Adopt the authenticated user's organization when the request has none.
+ *
+ * ── The gap this closes ─────────────────────────────────────────────────────
+ * `tenantContextMiddleware` runs globally, BEFORE any route, so the only
+ * organization it can see is the one inside the token (or `ORG_ID`). Session
+ * tokens live for 3650 days and the `orgId` claim is newer than most of them,
+ * so a user who has since been backfilled into an organization keeps
+ * presenting a token that does not mention one — and every such request runs
+ * with no tenant context at all.
+ *
+ * Under `TENANT_ENFORCEMENT=warn` that is invisible: reads are not filtered and
+ * a missing context is merely recorded. Object storage is the exception, being
+ * unconditionally fail-closed, which is why it surfaced as a schedule upload
+ * that silently refused to keep its image.
+ *
+ * This middleware already holds the answer: it reads the User document to get
+ * the live role, and that document carries `orgId`. Using it is not a fallback
+ * and invents nothing — it is the authenticated principal's own organization,
+ * read from the database, which is at least as authoritative as a claim the
+ * same login would have minted.
+ *
+ * ── When the two disagree ───────────────────────────────────────────────────
+ * A context that is already open wins; this never overrides one. A user whose
+ * record names a DIFFERENT organization than the open context is a genuine
+ * cross-tenant request, but the response to it is graded the way the rest of
+ * this migration is graded: refuse under `enforce`, log loudly under `warn`.
+ * A half-finished backfill must not start locking people out of a system that
+ * is not yet enforcing isolation.
+ */
+function withUserTenantContext(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+  userId: string,
+  userOrgId: string | null,
+) {
+  const ambient = getTenantContext();
+
+  if (ambient && userOrgId && ambient.orgId !== userOrgId) {
+    if (tenantEnforcement() === 'enforce') {
+      return res.status(403).json({
+        message: 'This account belongs to a different organization.',
+        code: 'TENANT_MISMATCH',
+      });
+    }
+    console.warn(
+      `[tenancy] ${req.method} ${req.path} — user ${userId} belongs to org ${userOrgId} but the ` +
+        `request context is org ${ambient.orgId} (source: ${ambient.source}). Serving under the ` +
+        `request context; this would be refused under TENANT_ENFORCEMENT=enforce.`,
+    );
+    return next();
+  }
+
+  if (!ambient && userOrgId) {
+    const context: TenantContext = { orgId: userOrgId, userId, source: 'session' };
+    // Stashed as well as opened, so it survives a middleware that consumes the
+    // request stream — multer, or a Redis-backed limiter. See
+    // `core/tenancy/requestContext.ts`.
+    stashTenantStore(req, context);
+    return runWithTenant(context, () => next());
+  }
+
+  return next();
+}
 
 export interface AuthPayload {
   id: string;
@@ -80,7 +149,13 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
       roleIds: (user as any).roleIds,
       orgId: (user as any).orgId,
     };
-    next();
+    return withUserTenantContext(
+      req,
+      res,
+      next,
+      decoded.id,
+      (user as any).orgId ? String((user as any).orgId) : null,
+    );
   } catch (err) {
     res.status(401).json({ message: 'Invalid token' });
   }

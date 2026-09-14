@@ -25,6 +25,7 @@
 
 import { withoutTenantScope } from '../tenancy/context';
 import { onboardOrganization, type OnboardingResult } from './onboarding';
+import { applicationToOnboardingInput } from './applicationProvisioning';
 import {
   ORGANIZATION_TYPES,
   type IOrganizationRegistration,
@@ -374,6 +375,12 @@ export interface ApprovalResult {
   onboarding: OnboardingResult;
   /** True when this call created the organization rather than resuming one. */
   created: boolean;
+  /**
+   * Modules the application asked for that the registry does not define.
+   * Dropped rather than passed through — the entitlement resolver would ignore
+   * them anyway, and reporting them is how a typo gets noticed.
+   */
+  droppedModules: string[];
 }
 
 /**
@@ -425,24 +432,36 @@ export async function approveRegistration(
     );
   }
 
+  // ── The application is the base; staff input overrides it ────────────────
+  // This is what makes approval one click. Everything the institute supplied —
+  // branding, class levels, subjects, rooms, batches, policy, modules — is
+  // mapped onto the SAME `onboardOrganization()` input an admin would
+  // otherwise have typed by hand. See applicationProvisioning.ts.
+  //
+  // Staff still win wherever they disagree: an override is a correction, and a
+  // correction that the applicant's data could silently undo would make the
+  // console's edit controls a lie.
+  //
+  // A registration with no `application` — every row from before the long form
+  // existed — maps to an empty base, so this behaves exactly as it did.
+  const mapped = applicationToOnboardingInput(registration, {
+    slug,
+    status: input.status,
+    notes: input.notes,
+  });
+  const base = mapped.input;
+
   const onboarding = await onboardOrganization({
-    organization: {
-      name: registration.organizationName,
-      slug,
-      status: input.status,
-      // Carried so the tenant record explains where it came from without
-      // anyone having to join back to this collection.
-      notes:
-        input.notes ??
-        `Provisioned from public registration ${String(registration._id)} ` +
-          `(${registration.contactName}, ${registration.email}).`,
-    },
-    branding: input.branding,
-    locale: input.locale,
-    configuration: input.configuration as never,
-    policy: input.policy,
-    subscription: input.subscription,
+    organization: base.organization,
+    branding: { ...(base.branding ?? {}), ...(input.branding ?? {}) },
+    locale: { ...(base.locale ?? {}), ...(input.locale ?? {}) },
+    configuration: (input.configuration ?? base.configuration) as never,
+    policy: { ...(base.policy ?? {}), ...(input.policy ?? {}) },
+    subscription: input.subscription ?? base.subscription,
     customRoles: input.customRoles,
+    // Never mapped from the application: it carries no password, deliberately.
+    // Staff supply the credential at approval; the console prefills the name
+    // and email from `mapped.adminPrefill`.
     admin: input.admin,
   });
 
@@ -459,7 +478,12 @@ export async function approveRegistration(
 
   await withoutTenantScope('registration:approve-save', async () => registration.save());
 
-  return { registration, onboarding, created: !alreadyProvisioned };
+  return {
+    registration,
+    onboarding,
+    created: !alreadyProvisioned,
+    droppedModules: mapped.droppedModules,
+  };
 }
 
 /**

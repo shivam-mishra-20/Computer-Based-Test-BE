@@ -40,15 +40,105 @@ uses. There is exactly one provisioning sequence in this codebase.
 
 ---
 
+## Two front doors
+
+There are two public entry points, and both write the same record.
+
+| | `/register-institute/quick` | `/register-institute` |
+|---|---|---|
+| Endpoint | `POST /api/public/organization-registration` | `POST /api/public/organization-applications` (+4) |
+| Asks for | contact details only | the full application, in nine steps |
+| Draft | no | yes — resumable, autosaved |
+| Provisioning | staff enter everything by hand | **approval applies it automatically** |
+
+The short form is the original one and every historical row came through it. It
+still works, is still tested, and is the right tool for someone who only wants
+a call back.
+
+### The long application
+
+Nine steps: organization, branding, academic structure, configuration,
+features, administrator, integrations, legal, review. Each saves on leaving it.
+
+A draft is addressed by its id and authorised by a **one-time token** returned
+at creation and sent in `X-Application-Token`. There is no account, because
+requiring one to apply for one is a loop. The token is high-entropy, stored
+`select: false`, compared in constant time, and **retired on submission** — an
+applicant editing underneath a reviewer is the race that prevents.
+
+A wrong token and a non-existent id return the same 404. Distinguishing them
+would make the endpoint an oracle for which application ids exist.
+
+### What it stores, and what it refuses to
+
+`OrganizationRegistration.application` mirrors what provisioning consumes:
+
+| Section | Maps to |
+|---|---|
+| `organization` | `Org` + `branding.documentAddress` |
+| `branding` | `Org.branding` |
+| `academic` | `ConfigInput` — class levels, subjects, rooms, batches |
+| `policy` | `OrgPolicy` |
+| `modules` | entitlement add-ons |
+| `staff` | the `admin` block's name and email |
+
+Three things are deliberately absent:
+
+- **Internal identifiers.** No orgId, slug or tenant id — an applicant-supplied
+  one would be a tenant-selection primitive on a public endpoint.
+- **Integration credentials.** The form records *which* integrations are wanted
+  and who the provider is. Secrets are entered later in the console, through
+  `Integration.credentials`, which seals them with AES-256-GCM.
+- **The administrator's password.** A public form is the wrong place to receive
+  one. Staff set it at approval; the console prefills name and email.
+
+### Branches
+
+Captured, not provisioned. The backend has **no `Branch` collection** — only a
+`branchId` reference on rooms and policy. They are recorded so nothing is lost,
+and the console marks them as reference only. Nothing pretends otherwise.
+
+### Uploaded assets
+
+Stored **private**, under `applications/{id}/…` — outside the tenant namespace,
+because no organization owns them yet. `ownerOrgIdOf()` returns null for these
+paths, which is the truth.
+
+Validated by **content, not by claim**: magic bytes are sniffed, so a renamed
+executable is refused whatever its extension says. PNG, JPEG, WebP and SVG, up
+to 5 MB. Staff read them through a 15-minute signed URL.
+
+## Approval is one click
+
+`POST /api/platform/registrations/:id/approve` maps the application onto
+`onboardOrganization()` — the same orchestrator, unchanged. Staff supply only
+the administrator password; everything else comes from the application, and any
+field staff override wins.
+
+`GET /api/platform/registrations/:id` also returns `readiness` and a
+`provisioningPreview`, so a reviewer sees what approval will do before pressing
+the button. Readiness is **computed on every read, never stored** — a stored
+flag goes stale the moment its inputs change.
+
+A registration with no `application` maps to an empty base and behaves exactly
+as it did before.
+
 ## Lifecycle
 
 ```
-PENDING ──────────► APPROVED       an Org exists; orgId is linked
-   │  ▲
-   │  └── INFO_REQUESTED           staff need more from the applicant
-   │
-   └────────────► REJECTED         no Org was created
+DRAFT ──► PENDING ──► UNDER_REVIEW ──► APPROVED ──► PROVISIONING
+            │  ▲            │                          │
+            │  └── INFO_REQUESTED                      ▼
+            │                            READY_FOR_ACTIVATION ──► ACTIVATED
+            └──────────► REJECTED
 ```
+
+`PENDING` is what the original flow called "submitted" and what every
+historical row holds — renaming it would have meant a migration and a window
+where two names meant one thing. `INFO_REQUESTED` is the state the
+specification calls "Needs Changes": one state, one name, already in use.
+`DRAFT` is new and hidden from the staff queue by default, because a
+half-filled form is not work for anybody.
 
 `APPROVED` means an organization was **created**. It does not promise the
 organization is fully **configured** — onboarding can partially succeed, and

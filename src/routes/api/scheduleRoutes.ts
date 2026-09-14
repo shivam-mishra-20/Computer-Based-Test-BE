@@ -1,9 +1,7 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
-import sharp from 'sharp';
 import {
   normalizeForMatch,
-  matchBatchLabel,
   matchTeacherName,
   splitCellText,
   parseTimeRangeLabel,
@@ -34,6 +32,25 @@ import {
   validateSessionSet,
 } from '../../services/schedule/scheduleValidator';
 import { tenantScope } from '../../core/tenancy';
+import { currentOrgId } from '../../core/tenancy/context';
+import { preservingTenantContext } from '../../core/tenancy/requestContext';
+import {
+  prepareScheduleImageForVision,
+  visionImageDiagnostics,
+} from '../../services/schedule/scheduleImagePrep';
+import {
+  batchResolved,
+  checkEntryBatches,
+  resolveBatchForClass,
+  type BatchRules,
+} from '../../services/schedule/scheduleBatchResolver';
+import {
+  SCHEDULE_SCHEMA_EXAMPLE,
+  detectTemplateEcho,
+  extractionLooksIncomplete,
+  isOffCell,
+  type ExtractionSummary,
+} from '../../services/schedule/scheduleExtractionContract';
 import {
   SLOT_KEYS,
   invalidateSlotCache,
@@ -1949,43 +1966,9 @@ function resolveScheduleDate(extractedIso: unknown, hintIso: string): { date: st
 // clampRoomNumber / isValidTimeString now come from scheduleValidator — the
 // room range is an institute policy value, not a constant of this route file.
 
-async function normalizeImageForVision(buffer: Buffer): Promise<{ buffer: Buffer; mimeType: string }> {
-  try {
-    const meta = await sharp(buffer).metadata();
-    const format = meta.format;
-
-    // ── .rotate() FIRST, and it is not optional ──────────────────────────
-    // sharp does NOT auto-apply EXIF orientation; resize() alone ignores it
-    // entirely. A phone photo saved with Orientation 6 or 8 (every iPhone and
-    // most Android cameras held in portrait) therefore reached the model
-    // rotated 90 degrees, where a timetable grid is unreadable. That is a
-    // large part of "the same image works when I retry" — retrying from a
-    // screenshot, or from a differently-oriented shot, worked. Called with no
-    // argument, rotate() means "apply the EXIF orientation and strip it".
-    //
-    // Small screenshots are upscaled rather than left alone: a 900px-wide
-    // dense grid downsamples to unreadable glyphs inside the model's own
-    // patching, and withoutEnlargement meant we never gave it more pixels to
-    // work with. 2500 is the same ceiling as before, so large photos are
-    // unchanged.
-    const MIN_WIDTH = 1400;
-    const MAX_WIDTH = 2500;
-    const width = meta.width || 0;
-    const targetWidth = width > 0 && width < MIN_WIDTH ? Math.min(MIN_WIDTH, width * 2) : MAX_WIDTH;
-    const pipeline = () => sharp(buffer).rotate().resize({ width: targetWidth, withoutEnlargement: false });
-
-    if (format === 'jpeg' || format === 'png' || format === 'webp') {
-      const resized = await pipeline().toBuffer();
-      return { buffer: resized, mimeType: format === 'jpeg' ? 'image/jpeg' : `image/${format}` };
-    }
-    // heic/bmp/gif/tiff/unknown → re-encode to PNG (mirrors aiService.ts's OCR normalize step).
-    const png = await pipeline().png().toBuffer();
-    return { buffer: png, mimeType: 'image/png' };
-  } catch (convErr) {
-    console.warn('[schedule/extract-image] image normalize failed, sending original bytes:', convErr instanceof Error ? convErr.message : convErr);
-    return { buffer, mimeType: 'image/png' };
-  }
-}
+// Image preparation lives in services/schedule/scheduleImagePrep.ts so it can be
+// run and measured without booting this route — see that file's header for why
+// that mattered.
 
 function buildScheduleExtractionPrompt(): string {
   // KEEP THIS PROMPT SHORT. Verified A/B against the real 20x9 timetable, both
@@ -2013,8 +1996,8 @@ PER CELL: transcribe the literal visible text verbatim on a SINGLE LINE, joining
 
 DATE: find the date printed once. Source format DD-MM-YYYY; output ISO YYYY-MM-DD.
 
-Return ONLY this raw JSON object, plain JSON (do NOT backslash-escape quotes), no markdown, no commentary:
-{"scheduleDate":"YYYY-MM-DD","sections":[{"columns":["3:30-4:30PM"],"rows":["9th JEE"],"cells":[{"row":"9th JEE","column":"3:30-4:30PM","rawText":"Archit sir 4"}]}],"warnings":[]}
+Return ONLY this raw JSON object, plain JSON (do NOT backslash-escape quotes), no markdown, no commentary. The angle-bracketed values are SLOTS — replace every one with text you actually read in the image, and never output a slot:
+${SCHEDULE_SCHEMA_EXAMPLE}
 
 Rules:
 - Each cell's "row"/"column" must copy EXACTLY a string from that section's own "rows"/"columns" arrays.
@@ -2028,8 +2011,8 @@ Rules:
  */
 function buildMinimalScheduleExtractionPrompt(): string {
   return `Transcribe this timetable image to JSON. Output JSON only. First character must be {.
-{"scheduleDate":"YYYY-MM-DD","sections":[{"columns":["3:30-4:30PM"],"rows":["9th JEE"],"cells":[{"row":"9th JEE","column":"3:30-4:30PM","rawText":"Archit sir 4"}]}],"warnings":[]}
-Columns are time slots, rows are class labels. Copy each non-empty cell's text verbatim. Skip blank cells. The printed date is DD-MM-YYYY.`;
+${SCHEDULE_SCHEMA_EXAMPLE}
+Angle-bracketed values are slots to replace with text read from the image — never output them literally. Columns are time slots, rows are class labels. List EVERY grid (the sheet may hold several stacked ones) and EVERY non-empty cell. Copy each cell's text verbatim. Skip blank cells. The printed date is DD-MM-YYYY.`;
 }
 
 /** ai.vision() has no JSON mode and no built-in retry (unlike chatJSON) — hand-roll one corrective retry. */
@@ -2146,6 +2129,20 @@ async function visionExtractJSON<T = any>(
     const sections = (parsed as any)?.sections;
     if (!Array.isArray(sections)) return { ok: false as const, reason: 'wrong-shape' as const };
 
+    // ── The template-echo check ──────────────────────────────────────────
+    // JSON-shaped and structurally consistent is NOT the same as "read the
+    // image". A small model handed a dense grid can answer by returning the
+    // schema example it was shown, and that answer passes every check above
+    // AND the downstream structural validator, because an example declares
+    // the row and column its own single cell uses. It reached the admin as
+    // one confident, entirely fabricated class. Retrying is right: this is a
+    // re-roll of a non-deterministic model, not a verdict on the image.
+    const echo = detectTemplateEcho(parsed as any);
+    if (echo) {
+      console.warn(`[${attemptLabel}] response rejected as a template echo: ${echo}`);
+      return { ok: false as const, reason: `template-echo:${echo}` as const };
+    }
+
     return { ok: true as const, value: parsed as T };
   };
 
@@ -2185,18 +2182,54 @@ router.post(
   requireRole('admin'),
   aiLimiter,
   uploadLimiter,
-  scheduleImageUpload.single('image'),
+  // ── Why the upload middleware is wrapped ──────────────────────────────
+  // multer consumes the request STREAM and resumes the chain from the
+  // socket's async context, where the AsyncLocalStorage tenant context no
+  // longer exists — so without this the handler below runs with no
+  // organization and `putTenantFile` refuses the write. `uploadLimiter`
+  // ahead of it does the same thing through its Redis socket. The wrapper
+  // re-enters the context stashed by `tenantContextMiddleware`, which is the
+  // same verified context the request started in — nothing is re-derived and
+  // nothing client-supplied is consulted.
+  preservingTenantContext(scheduleImageUpload.single('image')),
   async (req: Request, res: Response) => {
     try {
       if (!req.file) {
         return res.status(400).json({ error: 'No image uploaded' });
       }
 
+      // ── The organization is resolved ONCE, before any storage write ──────
+      // Read here rather than left to `putTenantFile`'s ambient lookup so the
+      // photo is attributed to the organization this request authenticated
+      // as, not to whatever context happens to be open several awaits later.
+      //
+      // OPTIONAL, deliberately. Reading the admin's own photo needs no
+      // organization; only KEEPING it does. Refusing the whole request over
+      // the keeping blocked the one thing the admin came for — a transcription
+      // of their timetable — over a convenience (the compare-to-original
+      // panel) they had not asked for. So a missing organization skips the
+      // upload and says so, and extraction continues.
+      //
+      // What it must NOT do is fall back to an unscoped write: a file under no
+      // organization can never be authorized afterwards, which is why
+      // `putTenantFile` refuses one. Absent an organization there is simply no
+      // upload — not an upload somewhere else.
+      const orgId = currentOrgId();
+
       const dateHint = typeof req.body?.dateHint === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(req.body.dateHint)
         ? req.body.dateHint
         : new Date().toISOString().split('T')[0];
 
-      const { buffer: visionBuffer, mimeType } = await normalizeImageForVision(req.file.buffer);
+      // ── What the model is actually given, measured ───────────────────────
+      // The FULL frame, resized only. No crop, no tiling, no region split — a
+      // timetable sheet can hold several stacked grids and any boundary is a
+      // chance to cut one in half. `fullFrame` in the log below is the evidence
+      // for that claim (aspect ratio preserved), and it is dimensions and byte
+      // counts only: never the pixels, never base64.
+      const prepared = await prepareScheduleImageForVision(req.file.buffer);
+      const { buffer: visionBuffer, mimeType } = prepared;
+      const imageDiagnostics = visionImageDiagnostics(prepared);
+      console.log('[schedule/extract-image] image handed to the model', imageDiagnostics);
 
       // Upload the ORIGINAL bytes (not the downscaled copy sent to the model) so the
       // review screen's compare-to-original panel is full quality.
@@ -2204,18 +2237,50 @@ router.post(
       // Org-namespaced. A schedule photo is an internal working document, so it
       // is uploaded PRIVATE and the review screen fetches it through a signed
       // URL like every other tenant file.
-      const storedImage = await putTenantFile({
-        buffer: req.file.buffer,
-        fileName: `schedule-import.${ext}`,
-        contentType: req.file.mimetype,
-        module: 'schedule',
-      });
-      const imageUrl = storedImage.storagePath;
+      //
+      // `imageUrl` is '' when there was no organization to attribute the file
+      // to. The review screen already treats an absent image as "no original to
+      // compare against" rather than a failure, and the warning below says why.
+      let imageUrl = '';
+      const storageWarnings: string[] = [];
+      if (orgId) {
+        const storedImage = await putTenantFile({
+          buffer: req.file.buffer,
+          fileName: `schedule-import.${ext}`,
+          contentType: req.file.mimetype,
+          module: 'schedule',
+          orgId,
+        });
+        imageUrl = storedImage.storagePath;
+      } else {
+        console.warn(
+          '[schedule/extract-image] no organization context — extracting without keeping the image',
+        );
+        storageWarnings.push(
+          'The original photo was not saved because your session carries no organization, ' +
+            'so the side-by-side comparison is unavailable. The extracted classes below are unaffected.',
+        );
+      }
 
+      // ── The organization's OWN class -> batch map ────────────────────────
+      // This is the authority for batch identity — the same call the student
+      // forms and the schedule pickers use. The image never contributes a batch
+      // name; at most it contributes a hint that has to match one of these.
+      //
+      // Loaded only WITH an organization context, for two reasons. Reading it
+      // unscoped would offer another institute's batches; and
+      // `getStudentBatchConfigFromDatabase` begins with
+      // `mergeAdvancedBasicBatchValues()`, which WRITES — an unscoped run of
+      // that merges and deletes batches across organizations, which is the
+      // destructive case batchConfigService's own header describes.
+      //
+      // Without it, extraction still runs: class, times, teacher, room and raw
+      // text all come from the image. Only the batch is left for later.
       const [batchConfig, teacherDocs] = await Promise.all([
-        getStudentBatchConfigFromDatabase(),
+        orgId ? getStudentBatchConfigFromDatabase() : Promise.resolve(null),
         User.find({ role: 'teacher' }).select('_id name').lean(),
       ]);
+      const batchRules: BatchRules | null = batchConfig ? batchConfig.batchRules : null;
       const teacherList = teacherDocs.map((t: any) => ({ id: String(t._id), name: String(t.name || '') }));
 
       // batchConfig/teacherList are NOT sent to the model — they're used below,
@@ -2253,11 +2318,21 @@ router.post(
       interface RejectedCell { row: string; column: string; rawText: string; reason: string }
       const rejected: RejectedCell[] = [];
       let declaredCellCount = 0;
+      // Cells the model returned WITH text. Measured live: this model lists
+      // empty intersections too (33 of 55 in one run, all `rawText: ""`), so
+      // counting every returned cell as "populated" would tell the admin the
+      // sheet is three times fuller than it is — in a summary whose whole job
+      // is to be trusted about completeness.
+      let populatedCellCount = 0;
+      let offCellCount = 0;
+      const declaredRowLabels = new Set<string>();
+      const declaredColumnLabels = new Set<string>();
       const seenCellKeys = new Set<string>();
       const seenResolvedKeys = new Set<string>();
 
       type BuiltEntry = ReturnType<typeof buildEntry>;
       function buildEntry(idx: number, opts: {
+        sectionIndex: number;
         rowLabel: string; columnLabel: string; rawText: string;
         classLevel: string; classLevelRaw: string; rowNeedsReview: boolean;
         columnParsed: { startTimeSlot: string; endTimeSlot: string; assumedMeridiem: boolean } | null;
@@ -2268,11 +2343,19 @@ router.post(
         if (!classLevel) uncertainFields.add('classLevel');
         if (opts.rowNeedsReview) uncertainFields.add('classLevel');
 
-        const batchCandidates = classLevel ? batchConfig.batchRules[classLevel] || [] : [];
+        // ── Batch identity comes from the organization, never the photo ────
+        // `batchHint` is the leftover row text ("jee even"). It is kept for
+        // review and debugging and is NEVER stored as a batch name. The
+        // resolver returns an existing batch or nothing at all; there is no
+        // third option and no fallback to the hint.
         const rowParsed = parseRowLabel(opts.rowLabel);
-        const batchRaw = rowParsed?.batch || '';
-        const { matched: matchedBatch } = matchBatchLabel(batchRaw, batchCandidates);
-        if (batchRaw && !matchedBatch) uncertainFields.add('batch');
+        const batchHint = rowParsed?.batch || '';
+        const batchResolution = resolveBatchForClass({
+          classLevel,
+          hint: batchHint,
+          batchRules,
+        });
+        if (!batchResolved(batchResolution.status)) uncertainFields.add('batch');
 
         const split = splitCellText(opts.rawText);
         const teacherRaw = split.teacherName.replace(/[\s,\-–—]*\d{1,2}\s*$/, '').trim();
@@ -2295,14 +2378,22 @@ router.post(
           uncertainFields.add('endTimeSlot');
         }
 
-        const subject = `Class ${classLevel || opts.classLevelRaw || '?'}${matchedBatch ? ' · ' + matchedBatch : ''}`.trim();
+        const subject = `Class ${classLevel || opts.classLevelRaw || '?'}${
+          batchResolution.batch ? ' · ' + batchResolution.batch : ''
+        }`.trim();
 
         return {
           tempId: `extract-${idx}-${Date.now()}`,
           classLevel,
           classLevelRaw: opts.classLevelRaw,
-          batch: matchedBatch || batchRaw,
-          batchRaw,
+          // Only ever an EXISTING batch name, or ''. The hint travels beside
+          // it, clearly labelled, so the review screen can say "the photo said
+          // 'jee even'" without that text ever becoming an identity.
+          batch: batchResolution.batch,
+          batchHint,
+          batchStatus: batchResolution.status,
+          availableBatches: batchResolution.availableBatches,
+          batchSuggestions: batchResolution.suggestions,
           startTimeSlot,
           endTimeSlot,
           roomNumber,
@@ -2313,6 +2404,23 @@ router.post(
           confidence: (uncertainFields.size > 0 ? 'low' : 'high') as 'high' | 'low',
           needsReview: uncertainFields.size > 0,
           uncertainFields: Array.from(uncertainFields),
+          // ── Source evidence ─────────────────────────────────────────────
+          // Enough to answer "why is this entry here, and where did each
+          // value come from?" without re-running the model. `source.rawText`
+          // is the transcription BEFORE any splitting or matching, so a
+          // resolved teacher can always be checked against the printed cell —
+          // which is the question nobody could answer when "Abhigyan sir 8"
+          // surfaced as "Archit sir / room 4".
+          source: {
+            sectionIndex: opts.sectionIndex,
+            rowLabel: opts.rowLabel,
+            columnLabel: opts.columnLabel,
+            rawText: opts.rawText,
+            teacherRaw,
+            status: (uncertainFields.size === 0
+              ? 'resolved'
+              : 'needs-review') as 'resolved' | 'needs-review',
+          },
         };
       }
 
@@ -2322,6 +2430,8 @@ router.post(
       sections.forEach((section, sectionIdx) => {
         const declaredRows: string[] = Array.isArray(section?.rows) ? section.rows.map((r: any) => String(r ?? '')) : [];
         const declaredColumns: string[] = Array.isArray(section?.columns) ? section.columns.map((c: any) => String(c ?? '')) : [];
+        declaredRows.forEach((r) => declaredRowLabels.add(`${sectionIdx}|${normalizeForMatch(r)}`));
+        declaredColumns.forEach((c) => declaredColumnLabels.add(`${sectionIdx}|${normalizeForMatch(c)}`));
         const rowByNorm = new Map(declaredRows.map((r) => [normalizeForMatch(r), r]));
         const columnByNorm = new Map(declaredColumns.map((c) => [normalizeForMatch(c), c]));
 
@@ -2348,10 +2458,20 @@ router.post(
             rejected.push({ row: rowRaw, column: columnRaw, rawText, reason: 'blank cell' });
             return;
           }
+          populatedCellCount += 1;
 
           const cellKey = `${sectionIdx}|${normalizeForMatch(matchedRow)}|${normalizeForMatch(matchedColumn)}`;
           if (seenCellKeys.has(cellKey)) {
             rejected.push({ row: rowRaw, column: columnRaw, rawText, reason: 'duplicate cell (same row+column already used)' });
+            return;
+          }
+
+          // A closure marker states there is NO class here. It used to pass
+          // `looksLikeScheduleCell` — one short word, no prose — and became an
+          // entry taught by a teacher named "OFF". Counted, not dropped
+          // silently, so the review screen can say how many were ignored.
+          if (isOffCell(rawText)) {
+            offCellCount += 1;
             return;
           }
 
@@ -2368,6 +2488,7 @@ router.post(
 
           seenCellKeys.add(cellKey);
           const entry = buildEntry(entries.length, {
+            sectionIndex: sectionIdx,
             rowLabel: matchedRow,
             columnLabel: matchedColumn,
             rawText,
@@ -2406,23 +2527,76 @@ router.post(
       });
 
       const modelWarnings = Array.isArray(raw?.warnings) ? raw.warnings : [];
+      // Blank cells are not a problem worth reporting: the model returns them
+      // routinely and dropping them is the correct behaviour, not a loss.
+      const meaningfulRejections = rejected.filter((r) => r.reason !== 'blank cell');
       const rejectionSummary =
-        rejected.length > 0
-          ? [`${rejected.length} extracted cell(s) were rejected (not shown) — see meta.rejected for detail.`]
+        meaningfulRejections.length > 0
+          ? [`${meaningfulRejections.length} extracted cell(s) were rejected (not shown) — see meta.rejected for detail.`]
           : [];
+
+      // ── What was detected, so nobody has to infer it ─────────────────────
+      // The old response reported `totalFound` and nothing about the GRID, so
+      // one entry out of a 23x8 timetable looked the same as one entry out of a
+      // one-class day. These counts are what let the review screen say which
+      // it was — and what `extractionLooksIncomplete` reasons over.
+      const summary: ExtractionSummary = {
+        sections: Array.isArray(raw?.sections) ? raw.sections.length : 0,
+        rowLabels: declaredRowLabels.size,
+        timeColumns: declaredColumnLabels.size,
+        populatedCells: populatedCellCount,
+        offCells: offCellCount,
+        rejectedCells: meaningfulRejections.length,
+        entries: entries.length,
+        needsReview: entries.filter((e) => e.needsReview).length,
+        resolved: entries.filter((e) => !e.needsReview).length,
+        needsBatchSelection: entries.filter((e) => !batchResolved(e.batchStatus)).length,
+      };
+      const incomplete = extractionLooksIncomplete(summary);
+
+      const batchWarnings =
+        summary.needsBatchSelection > 0
+          ? [
+              `${summary.needsBatchSelection} class(es) could not be matched to one of your existing ` +
+                `batches. Pick the batch for each before saving — batches are never created from the photo.`,
+            ]
+          : [];
+
+      const incompleteWarnings = incomplete
+        ? [
+            `Only ${summary.populatedCells} filled cell(s) were read from a ${summary.rowLabels}-row × ` +
+              `${summary.timeColumns}-column grid. This reading looks incomplete — check it against the ` +
+              `photo before saving, and re-upload a sharper image if classes are missing.`,
+          ]
+        : [];
+
+      console.log('[schedule/extract-image] extraction summary', { ...summary, incomplete });
 
       res.json({
         imageUrl,
         scheduleDate,
         scheduleDateNeedsReview,
         entries,
-        warnings: [...modelWarnings, ...rejectionSummary],
+        warnings: [...storageWarnings, ...incompleteWarnings, ...batchWarnings, ...modelWarnings, ...rejectionSummary],
+        summary,
+        // The organization's real class -> batch map, so the review screen can
+        // offer EXISTING batches to choose from. Empty without an organization
+        // context, in which case the schedule is still shown and the batch is
+        // simply not resolvable yet.
+        batchesByClass: batchRules ?? {},
+        // Advisory to the client: the review screen refuses one-click save
+        // while this is set, so a reading that stopped early cannot be
+        // committed as if it were the whole timetable.
+        requiresReview: incomplete || summary.needsReview > 0 || summary.needsBatchSelection > 0,
+        incomplete,
         meta: {
           declaredCells: declaredCellCount,
           totalFound: entries.length,
-          needsReviewCount: entries.filter((e) => e.needsReview).length,
-          rejectedCount: rejected.length,
+          needsReviewCount: summary.needsReview,
+          rejectedCount: meaningfulRejections.length,
+          offCells: offCellCount,
           rejected,
+          image: imageDiagnostics,
         },
       });
     } catch (error: any) {
@@ -2485,6 +2659,20 @@ async function validateBulkEntries(
   }
 
   issues.push(...validateSessionSet(sessions, existing));
+
+  // ── Batch identity, checked against the organization's own records ───────
+  // The review screen refuses to submit an unresolved entry, but a client
+  // check is a convenience, not a control: this endpoint accepts whatever JSON
+  // it is posted. This is what actually makes "the timetable image is not the
+  // batch master" true — a name that is not one of the organization's existing
+  // batches for that class cannot be written, whatever the caller sends.
+  //
+  // Skipped without an organization context, where there is no authoritative
+  // list to check against; the tenancy layer already refuses the write itself.
+  if (currentOrgId()) {
+    const { batchRules } = await getStudentBatchConfigFromDatabase();
+    issues.push(...checkEntryBatches(entries as any[], batchRules));
+  }
 
   return { valid: !hasBlockingIssue(issues), issues };
 }

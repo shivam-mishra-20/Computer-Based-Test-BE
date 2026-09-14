@@ -27,6 +27,13 @@ export {
 
 export { tenantScope, tenantScopeActive } from './queryScope';
 
+export {
+  preservingTenantContext,
+  withStashedTenantContext,
+  stashTenantStore,
+  stashedTenantStore,
+} from './requestContext';
+
 export { registerTenancy, verifyTenantPluginApplied } from './bootstrap';
 
 export { forEachOrg, type ForEachOrgSummary, type OrgRunResult } from './forEachOrg';

@@ -26,6 +26,8 @@ import {
   reconcileBuildConfig,
   updateMobileConfig,
 } from '../../core/platform/mobileBuild';
+import { assessApplication, applicationToOnboardingInput } from '../../core/platform/applicationProvisioning';
+import { signAsset } from '../../core/platform/applications';
 import {
   approveRegistration,
   getRegistration,
@@ -681,6 +683,12 @@ router.get(
     const registration = await getRegistration(req.params.id);
     if (!registration) return res.status(404).json({ message: 'Registration not found' });
 
+    // Computed, never stored. A readiness flag written to the document would
+    // go stale the moment anything it depends on changed, and an admin would
+    // be reading yesterday's answer.
+    const readiness = assessApplication(registration as never);
+    const mapped = applicationToOnboardingInput(registration as never);
+
     // Opening someone's contact details is itself worth recording — this is
     // personal data, and "who looked at it" is the question an audit exists to
     // answer.
@@ -690,7 +698,47 @@ router.get(
       entityId: req.params.id,
     });
 
-    return res.json({ registration });
+    return res.json({
+      registration,
+      readiness,
+      // What provisioning WOULD apply, so an admin can see it before pressing
+      // the button rather than discovering it in the result.
+      provisioningPreview: {
+        slug: mapped.input.organization.slug,
+        branding: mapped.input.branding ?? {},
+        configuration: mapped.input.configuration ?? {},
+        policy: mapped.input.policy ?? {},
+        modules: mapped.input.subscription?.addOns ?? [],
+        droppedModules: mapped.droppedModules,
+        adminPrefill: mapped.adminPrefill,
+      },
+    });
+  }),
+);
+
+/**
+ * A signed, expiring URL for one uploaded brand asset.
+ *
+ * The object is private and sits outside the tenant namespace, so there is no
+ * owning organization to check against — the authorisation is this route's
+ * `org.read` capability, and the signature is short-lived.
+ */
+router.get(
+  '/registrations/:id/assets/:assetId',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const registration = await getRegistration(req.params.id);
+    if (!registration) return res.status(404).json({ message: 'Registration not found' });
+
+    const assets = (registration as { application?: { assets?: { assetId: string; storagePath: string; mimeType: string; filename: string }[] } })
+      .application?.assets ?? [];
+    const asset = assets.find((a) => a.assetId === req.params.assetId);
+    if (!asset) return res.status(404).json({ message: 'Asset not found on this application' });
+
+    // Fifteen minutes: long enough to render a page, short enough that a URL
+    // pasted into a ticket stops working.
+    const url = await signAsset(asset.storagePath, 15 * 60 * 1000);
+    return res.json({ url, filename: asset.filename, mimeType: asset.mimeType });
   }),
 );
 
@@ -722,6 +770,7 @@ router.post(
         complete: result.onboarding.complete,
         steps: result.onboarding.steps,
         createdOrganization: result.created,
+        droppedModules: result.droppedModules,
       },
     });
 
@@ -729,6 +778,7 @@ router.post(
       registration: result.registration,
       onboarding: result.onboarding,
       created: result.created,
+      droppedModules: result.droppedModules,
     });
   }),
 );

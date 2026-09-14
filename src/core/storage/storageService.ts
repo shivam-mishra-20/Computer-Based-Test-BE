@@ -159,6 +159,65 @@ export async function signedUrlForTenantPath(
 }
 
 /**
+ * Store a file that belongs to an APPLICATION, not to a tenant.
+ *
+ * ── Why this is not `putTenantFile` ─────────────────────────────────────────
+ * An organization application exists before any organization does. It has no
+ * orgId, and `putTenantFile` refuses without one — correctly, because an
+ * unattributed file under `organizations/` could never be authorized later.
+ *
+ * Passing a fake orgId to get around that would be worse than the problem: the
+ * path would parse as tenant-owned to `ownerOrgIdOf()`, and a future
+ * ownership check would hand an applicant's upload to whichever organization
+ * happened to match the invented id.
+ *
+ * So application uploads live under their own prefix, outside the tenant
+ * namespace entirely. `ownerOrgIdOf()` returns null for them, which is the
+ * truth: no organization owns this yet. They are PRIVATE — no public ACL — and
+ * are read through `signUnchecked` by the platform routes, which have already
+ * authorized the caller as staff.
+ *
+ * If the application is approved, the assets are copied into the new
+ * organization's tenant namespace; if it is rejected, they can be deleted with
+ * the application and nothing references them.
+ */
+export async function putApplicationAsset(input: {
+  buffer: Buffer;
+  applicationId: string;
+  fileName: string;
+  contentType: string;
+  kind: string;
+}): Promise<StoredFile> {
+  const fileId = newFileId();
+  const safeApp = sanitizeSegment(input.applicationId);
+  const safeKind = sanitizeSegment(input.kind);
+  const safeName = sanitizeSegment(input.fileName);
+  const storagePath = `applications/${safeApp}/${safeKind}/${fileId}_${safeName}`;
+
+  const file = getBucket().file(storagePath);
+  await file.save(input.buffer, {
+    contentType: input.contentType,
+    metadata: {
+      contentType: input.contentType,
+      metadata: {
+        applicationId: safeApp,
+        kind: safeKind,
+        originalName: safeName,
+      },
+    },
+  });
+
+  return {
+    storagePath,
+    fileId,
+    fileName: input.fileName,
+    contentType: input.contentType,
+    size: input.buffer.length,
+    orgId: '',
+  };
+}
+
+/**
  * Sign without an ownership check.
  *
  * For callers that have ALREADY authorized the file by another route — a
