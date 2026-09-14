@@ -93,6 +93,38 @@ export function withStashedTenantContext<T>(req: Request, fn: () => T): T {
  * large, wrong type) reaches the error handler, and an error handler that logs
  * or records outside the tenant context attributes the failure to nobody.
  */
+/**
+ * Wrap a whole multer instance, so every route that uses it is covered.
+ *
+ * ── Why the instance and not the call sites ─────────────────────────────────
+ * Seventeen routes call `upload.single(...)`, and every one of them loses the
+ * tenant context the moment multer reads the request body. Wrapping them one by
+ * one is seventeen chances to miss one, and the eighteenth route added next
+ * month inherits the bug silently. Wrapping the instance means a caller cannot
+ * opt out by accident: `upload.single('file')` is already correct.
+ *
+ * The returned object is the multer instance with its middleware factories
+ * replaced. Everything else on it — `.storage`, limits, the fileFilter — is the
+ * original, so behaviour is unchanged apart from the context surviving.
+ */
+export function preservingTenantContextOn<T extends object>(instance: T): T {
+  const FACTORIES = ['single', 'array', 'fields', 'any', 'none'] as const;
+
+  return new Proxy(instance, {
+    get(target, prop, receiver) {
+      const value = Reflect.get(target, prop, receiver);
+      if (typeof value !== 'function') return value;
+      if (!(FACTORIES as readonly (string | symbol)[]).includes(prop)) {
+        return value.bind(target);
+      }
+      return (...args: unknown[]) =>
+        preservingTenantContext(
+          (value as (...a: unknown[]) => RequestHandler).apply(target, args),
+        );
+    },
+  });
+}
+
 export function preservingTenantContext(inner: RequestHandler): RequestHandler {
   return function preservedTenantContext(
     req: Request,

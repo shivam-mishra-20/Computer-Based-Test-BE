@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
+import { preservingTenantContextOn } from '../../core/tenancy/requestContext';
 import Material, { AssignmentType } from '../../models/Material';
 import User from '../../models/User';
 import { authMiddleware } from '../../middlewares/authMiddleware';
@@ -411,10 +412,14 @@ const notifyMaterialPublished = async (material: any): Promise<void> => {
 // Accept PDFs/images/Word docs by mimetype OR extension so files the app lets
 // teachers pick (HEIC photos, Drive files sent as application/octet-stream,
 // image/jpg) are not rejected. See uploadFileTypes.ts.
-const upload = multer({
+// Wrapped so the tenant context survives the multipart parse: multer consumes
+// the request STREAM and resumes the chain from the socket's async context,
+// where the AsyncLocalStorage store is gone — so the handler below reached
+// object storage with no organization. See core/tenancy/requestContext.ts.
+const upload = preservingTenantContextOn(multer({
   storage: multer.memoryStorage(),
   fileFilter: materialFileFilter,
-});
+}));
 
 // Get materials (filtered by assignment for students)
 router.get('/', authMiddleware, async (req: Request, res: Response) => {

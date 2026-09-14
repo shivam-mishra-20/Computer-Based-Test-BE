@@ -23,9 +23,17 @@
  * Keeping the photo needs one; reading it does not. So the route treats the
  * organization as OPTIONAL: without one it extracts anyway and warns that the
  * original was not kept. The line these checks hold is that "optional" never
- * becomes an unattributed write — no organization means no upload at all, not
- * an upload onto some shared path, because a file under no owner can never be
- * authorized afterwards. `putTenantFile` still refuses one outright.
+ * becomes an unattributed write to an ORGANIZATION — the schedule route skips
+ * the upload entirely rather than guessing an owner.
+ *
+ * Storage itself is a separate decision, and a later one: `putTenantFile` no
+ * longer refuses every no-organization write, because the deployment serving
+ * abhigyan-gurukul-app has never had one. It stores such a file in its own
+ * unattributed namespace, private, owned by nobody — see
+ * `storage-legacy-compat.test.ts`. What survives unchanged is that no
+ * organization can ever claim that file, and that a caller which declares
+ * itself tenant-only, or a deployment that is enforcing isolation, is still
+ * refused outright.
  *
  * ── What this proves, and what it deliberately does not ─────────────────────
  * Everything here runs against the REAL modules over a REAL HTTP server: the
@@ -80,7 +88,7 @@ import {
 } from '../../src/core/tenancy/context';
 import { preservingTenantContext } from '../../src/core/tenancy/requestContext';
 import {
-  putTenantFile,
+  resolveStorageTarget,
   StorageAccessDenied,
 } from '../../src/core/storage/storageService';
 import {
@@ -558,27 +566,57 @@ async function main() {
 
     // ════════════════════════════════════════════════════════════════════════
     console.log(
-      '\nputTenantFile stays fail-closed — the guard does not replace it',
+      '\nstorage attribution — fail-closed where isolation is live, compatible where it is not',
     );
     // ════════════════════════════════════════════════════════════════════════
 
-    // Runs with NO ambient context, and must refuse BEFORE Firebase is touched.
-    // That ordering is what makes this safe to run without a credential.
+    // ── The decision, taken WITHOUT touching Firebase ─────────────────────
+    // `resolveStorageTarget` is the attribution decision on its own, and it is
+    // the part that carries the security properties. Calling `putTenantFile`
+    // here would now run past the guard and reach `file.save()` — this
+    // machine's .env holds live credentials and a test must never write into
+    // the real bucket.
+    const unscopedTarget = runWithoutAnyContext(() =>
+      resolveStorageTarget({
+        buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+        fileName: 'schedule-import.png',
+        contentType: 'image/png',
+        module: 'schedule',
+      }),
+    );
+    // Legacy compatibility: an unattributed write is permitted while isolation
+    // is not being enforced, but it is never GIVEN an organization.
+    eq('an unscoped write is attributed to nobody', unscopedTarget.orgId, '');
+    eq(
+      'and lands in the no-organization namespace',
+      unscopedTarget.kind,
+      'legacy',
+    );
+    check(
+      'so no organization can ever claim it',
+      !pathBelongsToOrg(unscopedTarget.storagePath, ORG_A) &&
+        !pathBelongsToOrg(unscopedTarget.storagePath, ORG_B),
+      unscopedTarget.storagePath,
+    );
+
+    // The fail-closed property still holds where isolation is actually live.
+    process.env.TENANT_ENFORCEMENT = 'enforce';
     let refused: unknown = null;
-    await runWithoutAnyContext(async () => {
-      try {
-        await putTenantFile({
-          buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47]),
-          fileName: 'schedule-import.png',
+    try {
+      runWithoutAnyContext(() =>
+        resolveStorageTarget({
+          buffer: Buffer.from([0x89]),
+          fileName: 'x.png',
           contentType: 'image/png',
           module: 'schedule',
-        });
-      } catch (err) {
-        refused = err;
-      }
-    });
+        }),
+      );
+    } catch (err) {
+      refused = err;
+    }
+    process.env.TENANT_ENFORCEMENT = 'warn';
     check(
-      'an unscoped write is refused',
+      'under enforce an unscoped write is still refused',
       refused instanceof StorageAccessDenied,
     );
     eq(
@@ -587,21 +625,25 @@ async function main() {
       'STORAGE_ACCESS_DENIED',
     );
 
-    let refusedExplicitNull: unknown = null;
+    // A caller that declares itself tenant-only is refused in every mode.
+    let refusedRequireOrg: unknown = null;
     try {
-      await putTenantFile({
-        buffer: Buffer.from([0x89]),
-        fileName: 'x.png',
-        contentType: 'image/png',
-        module: 'schedule',
-        orgId: null,
-      });
+      runWithoutAnyContext(() =>
+        resolveStorageTarget({
+          buffer: Buffer.from([0x89]),
+          fileName: 'x.png',
+          contentType: 'image/png',
+          module: 'schedule',
+          orgId: null,
+          requireOrg: true,
+        }),
+      );
     } catch (err) {
-      refusedExplicitNull = err;
+      refusedRequireOrg = err;
     }
     check(
-      'an explicit null organization is refused too',
-      refusedExplicitNull instanceof StorageAccessDenied,
+      'a tenant-only caller is refused even under warn',
+      refusedRequireOrg instanceof StorageAccessDenied,
     );
 
     // ════════════════════════════════════════════════════════════════════════

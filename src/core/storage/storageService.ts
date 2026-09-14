@@ -28,10 +28,12 @@
  * which is a separate, explicit call with a separate, non-tenant path.
  */
 
-import { currentOrgId } from '../tenancy';
+import { currentOrgId, legacyStorageCompatEnabled } from '../tenancy';
 import {
   isAbsoluteUrl,
+  isLegacyNamespacePath,
   isLegacyPath,
+  legacyFilePath,
   parseTenantPath,
   pathBelongsToOrg,
   sanitizeSegment,
@@ -42,6 +44,9 @@ import {
 
 /** Seven days. Long enough that a URL handed to a client survives a session. */
 export const DEFAULT_SIGNED_URL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Naming the namespace in a log without hand-building a path literal. */
+const LEGACY_NAMESPACE_LABEL = 'the no-organization namespace';
 
 export class StorageAccessDenied extends Error {
   readonly code = 'STORAGE_ACCESS_DENIED';
@@ -82,6 +87,17 @@ export interface PutTenantFileInput {
   entityId?: string;
   /** Defaults to the ambient tenant context. */
   orgId?: string | null;
+  /**
+   * Refuse rather than fall back to the no-organization namespace.
+   *
+   * For callers that are tenant-only BY DEFINITION — anything on the platform
+   * surface, or a feature introduced after the migration — where an absent
+   * organization is a bug in the caller, not a legacy request to be
+   * accommodated. Legacy compatibility exists for the application that predates
+   * organizations; it is not a general escape hatch, and this is how a new
+   * caller opts out of inheriting it.
+   */
+  requireOrg?: boolean;
 }
 
 export interface StoredFile {
@@ -90,7 +106,10 @@ export interface StoredFile {
   fileName: string;
   contentType: string;
   size: number;
+  /** '' for an object stored without an organization. Never invented. */
   orgId: string;
+  /** True when this landed in the no-organization namespace. */
+  legacy?: boolean;
 }
 
 /**
@@ -100,22 +119,121 @@ export interface StoredFile {
  * an unattributed file is exactly the thing this whole change exists to
  * prevent, and a path with no owner cannot be authorized later.
  */
-export async function putTenantFile(input: PutTenantFileInput): Promise<StoredFile> {
+export interface StorageTarget {
+  kind: 'tenant' | 'legacy';
+  storagePath: string;
+  fileId: string;
+  /** '' for the unattributed namespace. Never invented. */
+  orgId: string;
+}
+
+/**
+ * WHERE a file goes, and whether it may be stored at all.
+ *
+ * Separated from the upload for the same reason `pathBelongsToOrg` is checked
+ * before Firebase is contacted: the decision is a pure function, it is the part
+ * that carries the security properties, and it can therefore be exercised
+ * exhaustively without a credential, a bucket, or a network. Everything the
+ * regression suite asserts about attribution is asserted here.
+ *
+ * Throws `StorageAccessDenied` in exactly the cases the old `putTenantFile`
+ * did — an absent organization where no legacy surface exists to accommodate.
+ */
+export function resolveStorageTarget(input: PutTenantFileInput): StorageTarget {
   const orgId = input.orgId ?? currentOrgId();
+  const fileId = newFileId();
+
   if (!orgId) {
-    throw new StorageAccessDenied(
-      'Cannot store a tenant file without an organization context.',
-    );
+    if (input.requireOrg || !legacyStorageCompatEnabled()) {
+      throw new StorageAccessDenied(
+        'Cannot store a tenant file without an organization context.',
+      );
+    }
+    return {
+      kind: 'legacy',
+      orgId: '',
+      fileId,
+      storagePath: legacyFilePath({
+        module: input.module,
+        entityId: input.entityId,
+        fileId,
+        fileName: input.fileName,
+      }),
+    };
   }
 
-  const fileId = newFileId();
-  const storagePath = tenantFilePath({
+  return {
+    kind: 'tenant',
     orgId: String(orgId),
-    module: input.module,
-    entityId: input.entityId,
     fileId,
-    fileName: input.fileName,
-  });
+    storagePath: tenantFilePath({
+      orgId: String(orgId),
+      module: input.module,
+      entityId: input.entityId,
+      fileId,
+      fileName: input.fileName,
+    }),
+  };
+}
+
+export async function putTenantFile(input: PutTenantFileInput): Promise<StoredFile> {
+  const target = resolveStorageTarget(input);
+  const orgId = target.kind === 'tenant' ? target.orgId : null;
+
+  // ── No organization: refuse, or store it as unattributed ────────────────
+  // Refusing outright is right once isolation is live, and was wrong for the
+  // deployment serving abhigyan-gurukul-app, where most requests have never
+  // carried an organization. That refusal broke homework, materials, study
+  // resources and doubt attachments at once — features that worked for years —
+  // to enforce, in this subsystem alone, a guarantee the rest of the system is
+  // not yet making. `legacyStorageCompatEnabled()` reads the same switch that
+  // decides whether anything else is enforced.
+  //
+  // The file is NOT given an organization. It goes to its own namespace, stays
+  // PRIVATE, and `ownerOrgIdOf()` reports null for it — no tenant can claim it
+  // by guessing a path, and nothing has to be un-done when it is later
+  // migrated.
+  if (!orgId) {
+    const { fileId, storagePath } = target;
+
+    // Loud on purpose. Every one of these is a file that will need attributing
+    // when the backfill runs, and a silent compatibility path is one nobody
+    // remembers to close.
+    console.warn(
+      `[storage] no organization context — storing ${input.module}/` +
+        `${input.entityId ?? '-'} under ${LEGACY_NAMESPACE_LABEL}. ` +
+        `The object is private and unattributed.`,
+    );
+
+    const file = getBucket().file(storagePath);
+    await file.save(input.buffer, {
+      contentType: input.contentType,
+      // Still no `public: true` and no makePublic(). Missing attribution is
+      // never a reason to widen access.
+      metadata: {
+        contentType: input.contentType,
+        metadata: {
+          orgId: '',
+          legacy: 'true',
+          module: input.module,
+          entityId: input.entityId ?? '',
+          originalName: sanitizeSegment(input.fileName),
+        },
+      },
+    });
+
+    return {
+      storagePath,
+      fileId,
+      fileName: input.fileName,
+      contentType: input.contentType,
+      size: input.buffer.length,
+      orgId: '',
+      legacy: true,
+    };
+  }
+
+  const { fileId, storagePath } = target;
 
   const file = getBucket().file(storagePath);
   await file.save(input.buffer, {
@@ -139,6 +257,7 @@ export async function putTenantFile(input: PutTenantFileInput): Promise<StoredFi
     contentType: input.contentType,
     size: input.buffer.length,
     orgId: String(orgId),
+    legacy: false,
   };
 }
 
@@ -154,6 +273,24 @@ export async function signedUrlForTenantPath(
   options: { ttlMs?: number; orgId?: string | null } = {},
 ): Promise<string> {
   const orgId = options.orgId ?? currentOrgId();
+
+  // ── Unattributed objects ────────────────────────────────────────────────
+  // A `legacy/` object belongs to no organization, so `pathBelongsToOrg` says
+  // no to everyone — correct for guessing, useless for reading back the file
+  // that was just uploaded. It is readable while legacy compatibility is on,
+  // which is the same condition under which it could be written.
+  //
+  // This is NOT an authorization bypass. It is the same position the rest of
+  // the system takes in this mode: the caller has already been authenticated,
+  // and the RECORD that references this path — the homework, the doubt, the
+  // material — is what decides whether this caller may see it. That check
+  // happens in the route, exactly as it did before organizations existed, and
+  // is unchanged by this function.
+  if (isLegacyNamespacePath(storagePath)) {
+    if (!legacyStorageCompatEnabled()) throw new StorageAccessDenied();
+    return signUnchecked(storagePath, options.ttlMs);
+  }
+
   if (!pathBelongsToOrg(storagePath, orgId)) throw new StorageAccessDenied();
   return signUnchecked(storagePath, options.ttlMs);
 }
@@ -255,6 +392,14 @@ export async function resolveFileUrl(
   // Legacy: an absolute URL to an already-public object. Unchanged.
   if (isAbsoluteUrl(stored)) return stored;
 
+  // The no-organization namespace is PRIVATE and is signed, not published.
+  // This must precede the pre-tenant branch below, which would otherwise hand
+  // back a public storage.googleapis.com URL for an object that has no public
+  // ACL — a link that both fails and misdescribes the object.
+  if (isLegacyNamespacePath(stored)) {
+    return signedUrlForTenantPath(stored, options);
+  }
+
   // Legacy: a bare path from before the tenant prefix existed.
   if (isLegacyPath(stored)) {
     return `https://storage.googleapis.com/${bucketName()}/${stored}`;
@@ -277,7 +422,14 @@ export async function deleteTenantFile(
   options: { orgId?: string | null } = {},
 ): Promise<void> {
   const orgId = options.orgId ?? currentOrgId();
-  if (!pathBelongsToOrg(storagePath, orgId)) throw new StorageAccessDenied();
+  // Same reasoning as signing: an unattributed object is reachable on the same
+  // terms it was written on, and the route's own ownership check is what
+  // authorizes the caller.
+  if (isLegacyNamespacePath(storagePath)) {
+    if (!legacyStorageCompatEnabled()) throw new StorageAccessDenied();
+  } else if (!pathBelongsToOrg(storagePath, orgId)) {
+    throw new StorageAccessDenied();
+  }
   await getBucket().file(storagePath).delete({ ignoreNotFound: true } as never);
 }
 
@@ -290,6 +442,9 @@ export async function deleteTenantFile(
  */
 export function ownerOrgIdOf(stored: string | null | undefined): string | null {
   if (!stored) return null;
+  // An unattributed object has no owner, and saying so is the point of the
+  // separate namespace: no organization can ever be matched against it.
+  if (isLegacyNamespacePath(stored)) return null;
   const direct = parseTenantPath(stored);
   if (direct) return direct.orgId;
   const fromUrl = isAbsoluteUrl(stored) ? storagePathFromPublicUrl(stored, bucketName()) : null;

@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import mongoose from 'mongoose';
 import multer from 'multer';
+import { preservingTenantContextOn } from '../../core/tenancy/requestContext';
 import StudyResource from '../../models/StudyResource';
 import { authMiddleware, optionalAuthMiddleware } from '../../middlewares/authMiddleware';
 import { uploadLimiter } from '../../middlewares/rateLimiter';
@@ -19,13 +20,17 @@ const router = Router();
 
 // Configure multer for PDF uploads. Accept by mimetype OR .pdf extension so a PDF
 // picked from a cloud provider (sent as application/octet-stream) isn't rejected.
-const upload = multer({
+// Wrapped so the tenant context survives the multipart parse: multer consumes
+// the request STREAM and resumes the chain from the socket's async context,
+// where the AsyncLocalStorage store is gone — so the handler below reached
+// object storage with no organization. See core/tenancy/requestContext.ts.
+const upload = preservingTenantContextOn(multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 50 * 1024 * 1024, // 50MB max
   },
   fileFilter: pdfFileFilter,
-});
+}));
 
 // ============ Public Routes ============
 

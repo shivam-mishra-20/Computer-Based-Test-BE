@@ -4,12 +4,17 @@ import { learnerRegister } from '../../controllers/learnerController';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import { authLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
 import multer from 'multer';
+import { preservingTenantContextOn } from '../../core/tenancy/requestContext';
 
 const router = Router();
 
 // Multer config for profile image uploads
 const storage = multer.memoryStorage();
-const upload = multer({ 
+// Wrapped so the tenant context survives the multipart parse: multer consumes
+// the request STREAM and resumes the chain from the socket's async context,
+// where the AsyncLocalStorage store is gone — so the handler below reached
+// object storage with no organization. See core/tenancy/requestContext.ts.
+const upload = preservingTenantContextOn(multer({ 
   storage, 
   limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
   fileFilter: (req, file, cb) => {
@@ -20,7 +25,7 @@ const upload = multer({
       cb(new Error('Invalid file type'));
     }
   }
-});
+}));
 
 // POST endpoints used by clients (with rate limiting)
 router.post('/register', authLimiter, register);

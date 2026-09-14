@@ -53,6 +53,31 @@ export type StorageModule = (typeof STORAGE_MODULES)[number];
 
 export const TENANT_PREFIX = 'organizations';
 
+/**
+ * Where a file goes when there is NO organization to attribute it to.
+ *
+ * ── Why a namespace of its own ──────────────────────────────────────────────
+ * The deployment serving abhigyan-gurukul-app has no organization on most
+ * requests, and `putTenantFile` refused those writes outright. The tempting
+ * fixes are all worse than the problem:
+ *
+ *   organizations/unknown/…   parses as tenant-owned to `parseTenantPath`, so a
+ *                             future ownership check would hand the file to
+ *                             whichever organization is later called "unknown".
+ *   organizations/{ORG_001}/… attributes one institute's files to another the
+ *                             moment a second tenant exists.
+ *   the old flat paths        `materials/11/Physics/…` is the collision this
+ *                             whole scheme was built to remove.
+ *
+ * So an unattributed file says so, in the path. `ownerOrgIdOf()` returns null
+ * for it — which is the truth — and `pathBelongsToOrg()` refuses it for every
+ * organization, so no tenant can ever claim it by guessing a path.
+ *
+ * These objects are PRIVATE, exactly like tenant ones. "No organization" is a
+ * statement about attribution, never about access.
+ */
+export const LEGACY_PREFIX = 'legacy';
+
 /** Strip anything that could escape the intended prefix or confuse a bucket. */
 export function sanitizeSegment(input: string): string {
   return String(input ?? '')
@@ -87,6 +112,38 @@ export function tenantFilePath(input: TenantPathInput): string {
     `${sanitizeSegment(input.fileId)}_${sanitizeSegment(input.fileName)}`,
   ].filter(Boolean);
   return parts.join('/');
+}
+
+export interface LegacyPathInput {
+  module: StorageModule;
+  /** The owning record, when there is one — a homework id, a doubt id. */
+  entityId?: string;
+  /** Unique per object. An ObjectId or a uuid; never a timestamp alone. */
+  fileId: string;
+  fileName: string;
+}
+
+/**
+ * `legacy/{module}/{entityId}/{fileId}_{fileName}`
+ *
+ * The same shape as a tenant path minus the organization segment, so the two
+ * are comparable at a glance and a later migration is a prefix rewrite rather
+ * than a re-derivation.
+ */
+export function legacyFilePath(input: LegacyPathInput): string {
+  const parts = [
+    LEGACY_PREFIX,
+    sanitizeSegment(input.module),
+    input.entityId ? sanitizeSegment(input.entityId) : null,
+    `${sanitizeSegment(input.fileId)}_${sanitizeSegment(input.fileName)}`,
+  ].filter(Boolean);
+  return parts.join('/');
+}
+
+/** True for an object this backend stored under the no-organization namespace. */
+export function isLegacyNamespacePath(path: string | null | undefined): boolean {
+  if (!path) return false;
+  return String(path).replace(/^\/+/, '').startsWith(`${LEGACY_PREFIX}/`);
 }
 
 export interface ParsedTenantPath {
@@ -125,6 +182,11 @@ export function parseTenantPath(path: string | null | undefined): ParsedTenantPa
  */
 export function isLegacyPath(path: string | null | undefined): boolean {
   if (!path) return false;
+  // `legacy/` is NOT one of these. Those objects are written by this backend
+  // today and are PRIVATE, so handing back a public storage.googleapis.com URL
+  // for one would both fail and misrepresent it as world-readable. They are
+  // signed like any other private object — see `isLegacyNamespacePath`.
+  if (isLegacyNamespacePath(path)) return false;
   return !String(path).replace(/^\/+/, '').startsWith(`${TENANT_PREFIX}/`);
 }
 

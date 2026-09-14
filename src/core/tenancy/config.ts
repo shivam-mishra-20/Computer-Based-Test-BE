@@ -147,6 +147,37 @@ export function shouldRunScheduledJobs(): boolean {
   return !isExplicitlyPinned();
 }
 
+/**
+ * May a file be stored without an organization?
+ *
+ * ── Why this is a question at all ───────────────────────────────────────────
+ * `putTenantFile` is unconditionally fail-closed: no organization, no write.
+ * That is right for a deployment whose isolation is live, and wrong for the one
+ * serving abhigyan-gurukul-app today, where there is no organization on most
+ * requests and never has been. Homework uploads started returning
+ * STORAGE_ACCESS_DENIED for a guarantee the deployment is not yet making.
+ *
+ * ── Why it is tied to enforcement and not a new flag ────────────────────────
+ * `TENANT_ENFORCEMENT=enforce` already means exactly the thing being asked
+ * here: the backfill has run, every document carries an orgId, reads are
+ * filtered and a missing context throws. A deployment in that state must not
+ * accept an unattributed file — there is no legacy surface left to be
+ * compatible with.
+ *
+ * Under `warn` — today's production, and every developer machine — isolation is
+ * explicitly NOT being relied upon: the plugin does not filter a single read.
+ * Refusing a write there enforces, in one subsystem only, a guarantee the rest
+ * of the system is not making, which is how a storage change took down an
+ * unrelated feature.
+ *
+ * So this is not a new global boolean. It is a reading of the switch that
+ * already exists, and flipping that switch turns the compatibility path off
+ * along with everything else it turns on.
+ */
+export function legacyStorageCompatEnabled(): boolean {
+  return tenantEnforcement() !== 'enforce';
+}
+
 /** One-line summary for the startup banner, so misconfiguration is visible. */
 export function describeTenancy(): string {
   const mode = tenantMode();

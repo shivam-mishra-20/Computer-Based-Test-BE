@@ -1,5 +1,6 @@
 import express, { Request, Response } from 'express';
 import multer from 'multer';
+import { preservingTenantContextOn } from '../../core/tenancy/requestContext';
 import path from 'path';
 import fs from 'fs';
 import { Types } from 'mongoose';
@@ -35,7 +36,11 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({
+// Wrapped so the tenant context survives the multipart parse: multer consumes
+// the request STREAM and resumes the chain from the socket's async context,
+// where the AsyncLocalStorage store is gone — so the handler below reached
+// object storage with no organization. See core/tenancy/requestContext.ts.
+const upload = preservingTenantContextOn(multer({
   storage,
   limits: {
     fileSize: 50 * 1024 * 1024, // 50MB limit
@@ -45,7 +50,7 @@ const upload = multer({
   // reason webp/heic/screenshot uploads were being rejected before OCR ran.
   // (See utils/uploadFileTypes.ts — the codebase's canonical upload filter.)
   fileFilter: attachmentFileFilter,
-});
+}));
 
 /**
  * POST /api/import-paper

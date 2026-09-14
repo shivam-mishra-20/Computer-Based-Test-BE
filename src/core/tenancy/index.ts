@@ -20,6 +20,7 @@ export {
   tenantEnforcement,
   pinnedOrgId,
   shouldRunScheduledJobs,
+  legacyStorageCompatEnabled,
   describeTenancy,
   type TenantMode,
   type TenantEnforcement,

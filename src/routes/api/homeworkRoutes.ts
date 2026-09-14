@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
+import { preservingTenantContextOn } from '../../core/tenancy/requestContext';
 import Homework from '../../models/Homework';
 import StudentProgress from '../../models/StudentProgress';
 import User from '../../models/User';
@@ -21,11 +22,15 @@ const router = Router();
 // Configure multer for memory storage. Accept PDFs/images by mimetype OR extension
 // so files the app lets teachers pick (HEIC photos, Drive PDFs sent as
 // application/octet-stream, image/jpg) are not rejected. See uploadFileTypes.ts.
-const upload = multer({
+// Wrapped so the tenant context survives the multipart parse: multer consumes
+// the request STREAM and resumes the chain from the socket's async context,
+// where the AsyncLocalStorage store is gone — so the handler below reached
+// object storage with no organization. See core/tenancy/requestContext.ts.
+const upload = preservingTenantContextOn(multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 25 * 1024 * 1024 }, // 25MB max
   fileFilter: attachmentFileFilter,
-});
+}));
 const normalizeClassValue = (value: unknown): string =>
   typeof value === 'string'
     ? value.replace(/Class\s*/i, '').trim()
