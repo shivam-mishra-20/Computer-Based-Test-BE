@@ -6,6 +6,12 @@
 import OpenAI from 'openai';
 import { aiConfig } from '../config';
 import { safeParse, stripReasoning } from '../json';
+import {
+  consumeChatStream,
+  describeStream,
+  type StreamBounds,
+  type StreamResult,
+} from '../streamAccumulator';
 import type {
   AIProvider,
   ChatMessage,
@@ -41,17 +47,13 @@ function toUsage(u: any) {
 }
 
 /**
- * Consume a streamed chat completion into text + usage. We stream (not because
- * we surface tokens) but to keep the HTTP connection alive: with stream:false,
- * NVIDIA withholds response headers until the whole completion is ready, and
- * Node's undici fetch aborts at its 300s headersTimeout. Streaming sends headers
- * immediately and tokens continuously, so long generations (minutes) complete.
+ * Consume a stream into text, using the shared accumulator.
  *
- * The idle watchdog is what makes a HUNG request fail fast: it aborts the
- * stream if no token arrives for `idleMs`. Each token resets the timer, so a
- * slow-but-progressing generation is never cut off — only a genuinely stalled
- * connection (the cause of the multi-minute stages) is killed, letting
- * withFallback move on immediately.
+ * The accumulation rules are unchanged — `delta.content` is still the only
+ * thing that becomes the answer. What moved into `streamAccumulator.ts` is the
+ * bookkeeping that was missing: the reasoning channel is measured rather than
+ * dropped, and the loop records WHY it ended. See that module's header for the
+ * failure those two omissions produced.
  */
 async function streamToText(
   stream: any,
@@ -60,68 +62,18 @@ async function streamToText(
   maxDurationMs?: number,
   maxOutputChars?: number,
   maxStreamChunks?: number,
-): Promise<{ raw: string; usage: any; finishReason?: string; streamChunks: number }> {
-  let raw = '';
-  let usage: any;
-  let finishReason: string | undefined;
-  let streamChunks = 0;
-  let watchdog: NodeJS.Timeout | undefined;
-  // One-shot hard cap, separate from the idle watchdog — never reset, so it
-  // fires even while tokens keep flowing continuously (e.g. a model that
-  // narrates instead of converging on an answer).
-  const hardCap = maxDurationMs ? setTimeout(() => controller.abort(), maxDurationMs) : undefined;
-  const arm = () => {
-    if (watchdog) clearTimeout(watchdog);
-    watchdog = setTimeout(() => controller.abort(), idleMs);
+  maxSilentChunks?: number,
+  maxReasoningCharsBeforeContent?: number,
+): Promise<StreamResult> {
+  const bounds: StreamBounds = {
+    idleMs,
+    maxDurationMs,
+    maxOutputChars,
+    maxStreamChunks,
+    maxSilentChunks,
+    maxReasoningCharsBeforeContent,
   };
-  try {
-    arm();
-    for await (const chunk of stream) {
-      arm(); // a token arrived — reset the idle deadline
-      // NOTE: only `delta.content` is collected. Reasoning models on this
-      // endpoint stream their chain-of-thought in a SEPARATE
-      // `delta.reasoning_content` field (verified live), which we
-      // deliberately ignore — that keeps narration out of structured output.
-      streamChunks++;
-      const delta = chunk?.choices?.[0]?.delta?.content;
-      if (delta) raw += delta;
-      if (chunk?.choices?.[0]?.finish_reason) finishReason = chunk.choices[0].finish_reason;
-      if (chunk?.usage) usage = chunk.usage;
-
-      // ---- Output bounds. Both exist because max_tokens is NOT honored by
-      // this endpoint on every model (verified: a 200-token cap returned 2,980
-      // completion tokens), so a model that degenerates into repeating itself
-      // has no server-side bound at all. `break` is the documented way to stop
-      // early: the SDK aborts the request. Reported as 'length' because that is
-      // what it is — a truncated response the caller must not parse.
-
-      // (a) Accumulated content. Works when the provider streams text
-      //     incrementally. NOTE: it is inert on providers that withhold text
-      //     and flush it in one final chunk — see (b).
-      if (maxOutputChars && raw.length > maxOutputChars) {
-        finishReason = 'length';
-        break;
-      }
-
-      // (b) Chunk count as a live token proxy. NVIDIA's nemotron-3 vision
-      //     endpoint streams one EMPTY delta per generated token and delivers
-      //     the entire text in a single final chunk. Measured twice on a 20x9
-      //     timetable: 6,847 chunks / 7,141 tokens and 31,324 chunks / 32,768
-      //     tokens — a steady ~0.96 chunks per token. So counting chunks is the
-      //     ONLY real-time view of how much the model has generated; content
-      //     length and the idle watchdog are both blind until the very end
-      //     (31,323 of those 31,324 chunks carried nothing at all, resetting
-      //     the idle timer every ~8ms while producing no output).
-      if (maxStreamChunks && streamChunks > maxStreamChunks) {
-        finishReason = 'length';
-        break;
-      }
-    }
-  } finally {
-    if (watchdog) clearTimeout(watchdog);
-    if (hardCap) clearTimeout(hardCap);
-  }
-  return { raw, usage, finishReason, streamChunks };
+  return consumeChatStream(stream, controller, bounds);
 }
 
 function toDataUrl(img: VisionImage): string {
@@ -242,10 +194,15 @@ export class NvidiaProvider implements AIProvider {
       { signal: controller.signal },
     );
 
-    const { raw, usage } = await streamToText(stream, controller, idleMs);
+    const streamed = await streamToText(stream, controller, idleMs);
+    if (streamed.stop === 'provider-error') {
+      // Surfaced rather than swallowed: this used to return an empty string and
+      // the caller reported "the model said nothing".
+      throw new Error(`NVIDIA chat failed — ${streamed.providerError}`);
+    }
     return {
-      text: stripReasoning(raw),
-      usage: toUsage(usage),
+      text: stripReasoning(streamed.content),
+      usage: toUsage(streamed.usage),
       provider: this.name,
       model,
       latencyMs: Date.now() - started,
@@ -316,22 +273,42 @@ export class NvidiaProvider implements AIProvider {
       { signal: controller.signal },
     );
 
-    const { raw, usage, finishReason, streamChunks } = await streamToText(
+    const streamed = await streamToText(
       stream,
       controller,
       idleMs,
       opts.maxDurationMs,
       opts.maxOutputChars,
       opts.maxStreamChunks,
+      opts.maxSilentChunks,
+      opts.maxReasoningCharsBeforeContent,
     );
+
+    // One line that names the actual outcome. Every previous report of this
+    // endpoint "returning nothing" had to be diagnosed from chunk counts alone.
+    if (!streamed.content) {
+      console.warn(
+        `[nvidia:vision] ${opts.label || 'vision'} produced no answer — ${describeStream(streamed)}`,
+      );
+    }
+
+    // A provider failure is a failure, not an empty answer. Throwing lets the
+    // facade's retry/fallback see it for what it is; returning '' made every
+    // caller guess.
+    if (streamed.stop === 'provider-error') {
+      throw new Error(`NVIDIA vision failed — ${streamed.providerError}`);
+    }
+
     return {
-      text: stripReasoning(raw),
-      usage: toUsage(usage),
+      text: stripReasoning(streamed.content),
+      usage: toUsage(streamed.usage),
       provider: this.name,
       model,
       latencyMs: Date.now() - started,
-      finishReason,
-      streamChunks,
+      finishReason: streamed.finishReason,
+      streamChunks: streamed.streamChunks,
+      stop: streamed.stop,
+      reasoningChars: streamed.reasoning.length,
     };
   }
 

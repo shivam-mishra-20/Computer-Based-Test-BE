@@ -347,6 +347,112 @@ function main() {
   );
 
   // ══════════════════════════════════════════════════════════════════════════
+  console.log('\na class may be assigned to SEVERAL existing batches');
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // Two batches of one class sharing a teacher, room and slot is a combined
+  // session — valid under the schedule policy — so the selection is a list.
+  // What does NOT change is where the names are allowed to come from.
+  const multi = checkEntryBatches(
+    [
+      {
+        tempId: 'm1',
+        classLevel: '11',
+        batches: ['JEE Morning', 'JEE Evening'],
+      },
+      {
+        tempId: 'm2',
+        classLevel: '11',
+        batches: ['Commerce CBSE', 'Commerce GSEB'],
+      },
+      { tempId: 'm3', classLevel: '11', batches: ['JEE Morning', 'jee even'] },
+      { tempId: 'm4', classLevel: '11', batches: [] },
+      {
+        tempId: 'm5',
+        classLevel: '11',
+        batch: 'JEE Morning',
+        batches: ['JEE Evening'],
+      },
+      { tempId: 'm6', classLevel: '7', batches: [] },
+    ],
+    EXISTING,
+  );
+  const issuesFor = (id: string) => multi.filter((i) => i.tempId === id);
+
+  eq('two real batches are accepted', issuesFor('m1').length, 0);
+  eq('so are two commerce batches', issuesFor('m2').length, 0);
+  eq(
+    'image text alongside a real batch is still refused',
+    issuesFor('m3')[0]?.rule,
+    'batchMustExist',
+  );
+  check(
+    'and the refusal names the offending one, not the valid one',
+    /jee even/.test(issuesFor('m3')[0]?.message || '') &&
+      !/"JEE Morning" is not/.test(issuesFor('m3')[0]?.message || ''),
+    issuesFor('m3')[0]?.message,
+  );
+  eq(
+    'an empty selection is still refused',
+    issuesFor('m4')[0]?.rule,
+    'batchSelectionRequired',
+  );
+  check(
+    'and now asks for one OR MORE',
+    /which one or ones/.test(issuesFor('m4')[0]?.message || ''),
+    issuesFor('m4')[0]?.message,
+  );
+  eq(
+    'the legacy single field is folded in, not fought with',
+    issuesFor('m5').length,
+    0,
+  );
+  eq('a class with no batches still needs none', issuesFor('m6').length, 0);
+
+  // Every name in a multi-selection is checked, not only the first.
+  const allBad = checkEntryBatches(
+    [
+      {
+        tempId: 'x',
+        classLevel: '11',
+        batches: ['JEE Morning', 'made up', 'also fake'],
+      },
+    ],
+    EXISTING,
+  );
+  eq('each invalid name is reported', allBad.length, 2);
+  check(
+    'and the valid one is not',
+    !allBad.some((i) => /"JEE Morning"/.test(i.message)),
+    JSON.stringify(allBad.map((i) => i.message)),
+  );
+
+  check(
+    'the writer stores every selected batch',
+    routeSrc.includes('batches: entryBatches(entry),'),
+  );
+  check(
+    'and keeps `batch` as the first, for the queries that read the single field',
+    routeSrc.includes("batch: entryBatches(entry)[0] || '',"),
+  );
+  check(
+    'notifications reach every batch on the session, not just the first',
+    routeSrc.includes('const docBatches = getScheduleBatches(doc);'),
+  );
+  check(
+    'the conflict validator still receives the list',
+    routeSrc.includes(
+      'batches: Array.isArray(entry?.batches) ? entry.batches : undefined,',
+    ),
+  );
+  check(
+    'extraction emits the list form from the start',
+    routeSrc.includes(
+      'batches: batchResolution.batch ? [batchResolution.batch] : [],',
+    ),
+  );
+
+  // ══════════════════════════════════════════════════════════════════════════
   console.log('\n9 — teacher, room and time do not depend on batch identity');
   // ══════════════════════════════════════════════════════════════════════════
 

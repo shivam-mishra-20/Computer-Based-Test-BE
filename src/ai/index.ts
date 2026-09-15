@@ -15,7 +15,6 @@ export { aiConfig, fallbackEnabled } from './config';
 export {
   getProvider,
   getPrimaryProvider,
-  getFallbackProvider,
 } from './factory';
 export { runBatch } from './batch';
 export { pickModel } from './models';

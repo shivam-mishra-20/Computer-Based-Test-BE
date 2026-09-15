@@ -235,19 +235,36 @@ export interface BatchCheckIssue {
  * database through this endpoint, whatever the caller sends.
  */
 export function checkEntryBatches(
-  entries: Array<{ tempId?: string; classLevel?: unknown; batch?: unknown }>,
+  entries: Array<{
+    tempId?: string;
+    classLevel?: unknown;
+    batch?: unknown;
+    batches?: unknown;
+  }>,
   batchRules: BatchRules,
 ): BatchCheckIssue[] {
   const issues: BatchCheckIssue[] = [];
 
   entries.forEach((entry) => {
     const classLevel = String(entry?.classLevel ?? '').trim();
-    const batch = String(entry?.batch ?? '').trim();
     const available = Array.isArray(batchRules[classLevel])
       ? batchRules[classLevel]
       : [];
 
-    if (!batch) {
+    // ── One class can legitimately run for SEVERAL batches at once ─────────
+    // Two batches of the same class sharing a teacher, room and slot is a
+    // combined session, which the schedule policy already treats as valid. So
+    // the selection is a LIST; `batch` is the single-value form older callers
+    // still send, and is folded in rather than handled on its own path.
+    const selected = Array.from(
+      new Set(
+        [...(Array.isArray(entry?.batches) ? entry.batches : []), entry?.batch]
+          .map((b) => String(b ?? '').trim())
+          .filter(Boolean),
+      ),
+    );
+
+    if (selected.length === 0) {
       // Only an omission when the class actually has batches to choose from.
       if (available.length > 0) {
         issues.push({
@@ -257,23 +274,26 @@ export function checkEntryBatches(
           rule: 'batchSelectionRequired',
           message:
             `Class ${classLevel || '?'} has ${available.length} batches ` +
-            `(${available.join(', ')}). Choose which one this class is for before saving.`,
+            `(${available.join(', ')}). Choose which one or ones this class is for before saving.`,
         });
       }
       return;
     }
 
-    if (!matchBatchName(batch, available)) {
+    // EVERY selected name is checked. Validating only the first would let the
+    // rest through unchecked, which is the hole this function exists to close.
+    selected.forEach((name) => {
+      if (matchBatchName(name, available)) return;
       issues.push({
         tempId: entry?.tempId,
         field: 'batch',
         severity: 'error',
         rule: 'batchMustExist',
         message: available.length
-          ? `"${batch}" is not a batch for class ${classLevel || '?'}. Existing batches: ${available.join(', ')}.`
-          : `Class ${classLevel || '?'} has no batches configured, so "${batch}" cannot be assigned.`,
+          ? `"${name}" is not a batch for class ${classLevel || '?'}. Existing batches: ${available.join(', ')}.`
+          : `Class ${classLevel || '?'} has no batches configured, so "${name}" cannot be assigned.`,
       });
-    }
+    });
   });
 
   return issues;

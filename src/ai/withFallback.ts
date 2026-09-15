@@ -1,11 +1,18 @@
 /**
  * The `ai` facade — the single seam every feature calls. Wraps the active
- * provider with: bounded retries (NVIDIA_MAX_RETRIES), automatic NVIDIA→Ollama
- * fallback, structured logging, and JSON parsing. Features never import a vendor
- * SDK directly.
+ * provider with bounded retries (NVIDIA_MAX_RETRIES), structured logging, and
+ * JSON parsing. Features never import a vendor SDK directly.
+ *
+ * ── The automatic Ollama fallback was removed ───────────────────────────────
+ * It was never configured on any deployment, so it could only fail — and
+ * because it failed LAST, its error replaced the primary's. A NVIDIA 500
+ * reached callers as "OLLAMA_VISION_MODEL is not configured", which told an
+ * admin nothing about what had actually gone wrong and cost an extra attempt on
+ * every failure. The primary's error is now what callers see, which is the
+ * whole point of having one.
  */
 import { aiConfig } from './config';
-import { getFallbackProvider, getPrimaryProvider } from './factory';
+import { getPrimaryProvider } from './factory';
 import { logAICall } from './logging';
 import { safeParse } from './json';
 import type {
@@ -21,7 +28,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * A timeout/abort is not transient — the model is just slow. Retrying only
- * multiplies the wait, so we skip remaining attempts and go straight to fallback.
+ * multiplies the wait, so we stop retrying and surface it immediately.
  */
 function isTimeout(err: any): boolean {
   const name = String(err?.name || '');
@@ -37,20 +44,18 @@ function isTimeout(err: any): boolean {
   );
 }
 
-/**
- * Execute `op` against the primary provider with retries; on exhaustion fall
- * back to Ollama (when primary is NVIDIA). Logs every attempt.
- */
+/** Execute `op` against the primary provider with bounded retries. */
 async function run(
   op: (p: AIProvider) => Promise<ChatResult>,
   label?: string,
 ): Promise<ChatResult> {
   const primary = getPrimaryProvider();
-  const fallback = getFallbackProvider();
   const primaryAttempts =
     primary.name === 'nvidia' ? aiConfig.nvidia.maxRetries + 1 : 1;
 
   let lastErr: unknown;
+  /** The provider's failure, surfaced as-is once the retries are spent. */
+  let primaryErr: unknown;
   let retries = 0;
 
   for (let i = 0; i < primaryAttempts; i++) {
@@ -68,50 +73,24 @@ async function run(
       return res;
     } catch (err) {
       lastErr = err;
+      primaryErr = err;
       retries = i + 1;
       if (isTimeout(err)) break; // slow model — don't multiply the wait by retrying
       if (i < primaryAttempts - 1) await sleep(400 * Math.pow(2, i));
     }
   }
 
-  if (fallback) {
-    try {
-      const res = await op(fallback);
-      logAICall({
-        provider: res.provider,
-        model: res.model,
-        label,
-        latencyMs: res.latencyMs,
-        usage: res.usage,
-        retries,
-        ok: true,
-        fellBack: true,
-      });
-      return res;
-    } catch (err) {
-      lastErr = err;
-      logAICall({
-        provider: fallback.name,
-        model: '-',
-        label,
-        latencyMs: 0,
-        ok: false,
-        fellBack: true,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
+  const surfaced = primaryErr ?? lastErr;
   logAICall({
     provider: primary.name,
     model: '-',
     label,
-    latencyMs: 0,
     retries,
+    latencyMs: 0,
     ok: false,
-    error: lastErr instanceof Error ? lastErr.message : String(lastErr),
+    error: surfaced instanceof Error ? surfaced.message : String(surfaced),
   });
-  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+  throw surfaced instanceof Error ? surfaced : new Error(String(surfaced));
 }
 
 export const ai = {
@@ -129,7 +108,7 @@ export const ai = {
     return res.text;
   },
 
-  /** Chat whose text is parsed into JSON of type T (with fallback + repair).
+  /** Chat whose text is parsed into JSON of type T (with retries + repair).
    * If every repair pass in safeParse fails (e.g. an unescaped quote inside a
    * string — unfixable mechanically), ONE corrective retry shows the model its
    * own broken output and asks for strictly valid JSON. Without this, a single

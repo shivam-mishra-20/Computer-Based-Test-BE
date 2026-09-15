@@ -138,7 +138,14 @@ export const aiConfig = {
   },
 };
 
-/** Whether automatic NVIDIA→Ollama fallback should be attempted. */
+/**
+ * Retained as `false` because the automatic NVIDIA -> Ollama fallback is gone.
+ *
+ * Kept rather than deleted because it is re-exported from `src/ai/index.ts` and
+ * a removed export is a build break for anything importing it; returning false
+ * is the honest answer now. See the note in factory.ts for why the fallback
+ * went away.
+ */
 export function fallbackEnabled(): boolean {
-  return aiConfig.provider === 'nvidia';
+  return false;
 }

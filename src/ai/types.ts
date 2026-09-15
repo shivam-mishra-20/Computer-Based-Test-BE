@@ -66,6 +66,28 @@ export interface ChatOptions {
    * default; opt in per call.
    */
   maxStreamChunks?: number;
+  /**
+   * Cap on CONSECUTIVE chunks that carry no text of any kind.
+   *
+   * The bound that separates "slow" from "producing nothing". `maxStreamChunks`
+   * cannot: a provider that streams one empty frame per generated token looks
+   * identical to one emitting empty frames forever, and both were allowed to
+   * burn the caller's whole deadline before reporting an empty result. A model
+   * that is visibly reasoning resets this and keeps its full budget.
+   * Unset by default; opt in per call.
+   */
+  maxSilentChunks?: number;
+  /**
+   * Cap on streamed chain-of-thought while the answer is still empty.
+   *
+   * Catches a reasoning model whose thinking switch did not take effect: it
+   * streams tokens continuously (so the idle watchdog never fires) and produces
+   * no answer (so the content cap never fires), until the wall-clock cap kills
+   * it minutes later with nothing to show. Conditional on content being empty,
+   * so a model that reasons AND answers is never truncated.
+   * Unset by default; opt in per call.
+   */
+  maxReasoningCharsBeforeContent?: number;
 }
 
 export interface Usage {
@@ -90,6 +112,19 @@ export interface ChatResult {
   /** Chunks consumed from the stream. Diagnostic: on a provider that buffers
    *  its text into one final chunk this is the only usable progress signal. */
   streamChunks?: number;
+  /**
+   * Why the stream ended — 'complete', 'duration-cap', 'provider-error', …
+   *
+   * `finishReason` is the MODEL's account of why it stopped, and it is absent
+   * exactly when something went wrong. This is OUR account, and it is always
+   * present, so a caller can tell a provider failure from a slow model from an
+   * empty answer instead of seeing one indistinguishable empty result.
+   */
+  stop?: import('./streamAccumulator').StreamStop;
+  /** Characters of chain-of-thought the model streamed. Never part of `text`. */
+  reasoningChars?: number;
+  /** Provider failure as a SHAPE (name/status/code) — never the message body. */
+  providerError?: string;
 }
 
 export interface HealthResult {

@@ -2059,11 +2059,44 @@ async function visionExtractJSON<T = any>(
   // 49s-to-250s spread of runs. maxStreamChunks fails a runaway earlier and on
   // the right signal; this only catches a stream that stalls in a way neither
   // the chunk cap nor the idle watchdog can see.
-  const attemptMaxDurationMs = 150000;
+  //
+  // Retuned from measurement, NOT raised. Every healthy run recorded against
+  // this model and image on 2026-09-15 finished well inside it:
+  //   11.5s · 12.4s · 12.9s · 14.7s · 15.7s · 17.0s · 36.8s · 53.2s
+  // 90s leaves ~70% headroom over the slowest, and caps the two-attempt worst
+  // case at 180s instead of 260s — a dead provider now costs the admin three
+  // minutes rather than four and a half.
+  const attemptMaxDurationMs = 90000;
+  // ── Why there is NO silent-chunk bound here ────────────────────────────
+  // `maxSilentChunks` exists in the accumulator and is the right bound for a
+  // provider that streams text incrementally. This endpoint does not: measured
+  // 2026-09-15, a healthy 4000px run delivered 549 chunks of which 548 carried
+  // nothing — the whole answer arrives in the FINAL chunk. Healthy runs of
+  // 2,524 and (per earlier measurement) 6,847 chunks are on record.
+  //
+  // So on this provider "consecutive silent chunks" is indistinguishable from
+  // "working normally", and any threshold low enough to catch a dead stream is
+  // low enough to truncate a real extraction. A first attempt at 3,000 would
+  // have cut the 2,524-chunk run that produced the correct timetable. The
+  // wall-clock cap below is the honest bound for a dead stream here.
+  // ── The bound that ends a REASONING RUNAWAY early ───────────────────────
+  // Reproduced live (2026-09-15): with the thinking switch not in effect, this
+  // model streamed 7,324 chunks and 19,939 characters of chain-of-thought in
+  // 120 seconds and never emitted one character of answer — which is the
+  // reported production failure, chunk for chunk. Neither the idle watchdog
+  // (tokens kept arriving) nor the content cap (no content) nor the silent
+  // bound (reasoning is not silence) can see it; only the wall clock could, two
+  // minutes later.
+  //
+  // With thinking off, a healthy run streams ZERO reasoning characters. A run
+  // that reasons AND answers is never cut, because this is conditional on the
+  // answer still being empty. 8,000 sits above the 6,645 of a reasoning run
+  // that did answer, and well below the 19,939 of one that did not.
+  const maxReasoningCharsBeforeContent = 8000;
   // Ceiling on the admin's TOTAL wait across both attempts, so a retry can
   // never double a worst case into multiple minutes. Attempt two runs on
   // whatever is left, and is skipped entirely if too little remains to matter.
-  const totalBudgetMs = 260000;
+  const totalBudgetMs = 180000;
   const deadline = Date.now() + totalBudgetMs;
   const remainingMs = () => deadline - Date.now();
 
@@ -2078,11 +2111,14 @@ async function visionExtractJSON<T = any>(
       maxDurationMs: Math.min(attemptMaxDurationMs, Math.max(remainingMs(), 0)),
       maxOutputChars,
       maxStreamChunks,
+      maxReasoningCharsBeforeContent,
       label: attemptLabel,
     });
 
     const text = res.text || '';
     const truncated = res.finishReason === 'length';
+    const stop = res.stop;
+    const reasoningChars = res.reasoningChars ?? 0;
     // Diagnostics on the RAW response (never the image/base64) so a future
     // failure is debuggable from logs alone. streamChunks is the important one
     // on this endpoint: it is the only measure of how much the model generated
@@ -2092,6 +2128,12 @@ async function visionExtractJSON<T = any>(
     console.log(`[${attemptLabel}] raw response diagnostics`, {
       length: text.length,
       finishReason: res.finishReason,
+      // OUR account of why the stream ended. `finishReason` is the MODEL's, and
+      // it is absent precisely when something went wrong — which is why an
+      // aborted stream, a provider 500 and a genuinely empty answer all used to
+      // look identical here.
+      stop,
+      reasoningChars,
       truncated,
       completionTokens: res.usage?.completionTokens,
       streamChunks: res.streamChunks,
@@ -2107,10 +2149,26 @@ async function visionExtractJSON<T = any>(
       return { ok: false as const, reason: 'truncated' as const };
     }
 
-    // No content at all. On this endpoint that does NOT mean the model sat
-    // idle — text only ever arrives in the final chunk, so any abort before
-    // that point looks identical to silence. Retryable for exactly that reason.
-    if (!text.trim()) return { ok: false as const, reason: 'empty' as const };
+    // ── No content: say WHICH kind of nothing ────────────────────────────
+    // Text only ever arrives in the final chunk on this endpoint, so an abort
+    // before that point looks identical to silence. `stop` and the reasoning
+    // length are what tell them apart, and the distinction decides whether a
+    // retry is worth the admin's time at all.
+    if (!text.trim()) {
+      if (stop === 'silent-stream') {
+        return { ok: false as const, reason: 'provider-silent' as const };
+      }
+      if (reasoningChars > 0) {
+        // The model streamed chain-of-thought and never reached an answer.
+        // Retrying the SAME prompt re-rolls the same behaviour; the minimal
+        // prompt is a genuinely different request, so one retry is justified.
+        return { ok: false as const, reason: 'reasoned-without-answering' as const };
+      }
+      if (stop === 'duration-cap' || stop === 'chunk-cap' || stop === 'reasoning-runaway') {
+        return { ok: false as const, reason: 'cut-off' as const };
+      }
+      return { ok: false as const, reason: 'empty' as const };
+    }
 
     // Cheapest possible tell that the model answered as an assistant instead of
     // as an extractor ("The user wants me to transcribe…"). Bail on the FIRST
@@ -2149,11 +2207,33 @@ async function visionExtractJSON<T = any>(
   const first = await attempt(prompt, label);
   if (first.ok) return first.value;
 
-  // EVERY failure mode here is retryable, because all of them are re-rolls of
-  // the same non-deterministic model rather than verdicts on the image:
-  // measured at temperature 0, the identical request converged in 38s on one
-  // run and looped to the token ceiling on the next. The retry is bounded by
-  // the shared deadline, so this can never become an unbounded wait.
+  // ── Which failures are worth a second two-minute wait? ──────────────────
+  // Not all of them, which is the change. The old rule retried EVERYTHING on
+  // the grounds that the model is non-deterministic — true of the model, false
+  // of the provider. A 500 does not become a 200 because you asked again with
+  // a shorter prompt, and a stream that emitted nothing at all is not a
+  // re-rollable dice throw. Those now fail in seconds instead of burning the
+  // admin's remaining budget to arrive at the same answer.
+  const RETRYABLE: ReadonlySet<string> = new Set([
+    // Genuine re-rolls of a non-deterministic model: measured at temperature 0,
+    // the identical request converged in 38s on one run and looped to the token
+    // ceiling on the next.
+    'empty',
+    'truncated',
+    'not-json',
+    'unparseable',
+    'wrong-shape',
+    'cut-off',
+    'reasoned-without-answering',
+  ]);
+  // A template echo is also a re-roll — the model answered, just not from the
+  // image. Its reason carries a suffix, so it is matched by prefix.
+  const retryable =
+    RETRYABLE.has(first.reason) || first.reason.startsWith('template-echo:');
+  if (!retryable) {
+    throw new Error(`Schedule extraction failed (${first.reason}) — not retryable`);
+  }
+
   const MIN_USEFUL_RETRY_MS = 45000;
   if (remainingMs() < MIN_USEFUL_RETRY_MS) {
     throw new Error(`Schedule extraction did not complete (${first.reason}, no time left to retry)`);
@@ -2172,7 +2252,9 @@ async function visionExtractJSON<T = any>(
   const second = await attempt(buildMinimalScheduleExtractionPrompt(), `${label}:minimal`);
   if (second.ok) return second.value;
 
-  throw new Error(`Schedule extraction failed to produce usable JSON (${first.reason} → ${second.reason})`);
+  throw new Error(
+    `Schedule extraction failed to produce usable JSON (${first.reason} → ${second.reason})`,
+  );
 }
 
 // Extract entries from an uploaded schedule photo. Nothing is written to Mongo here.
@@ -2295,13 +2377,28 @@ router.post(
       try {
         raw = await visionExtractJSON(prompt, { data: visionBuffer, mimeType }, 'schedule-extract');
       } catch (visionErr) {
-        // Don't surface err.message here: on a real NVIDIA failure, withFallback's
-        // Ollama fallback throws its own unrelated "OLLAMA_VISION_MODEL not configured"
-        // error and that (not the real failure) is what a naive res.json({error:err.message})
-        // would show the admin. Log the real one, show a generic, actionable one.
+        // The error reaching here is now the PROVIDER's own, not an unrelated
+        // fallback's — the automatic Ollama fallback was removed precisely
+        // because its "not configured" message replaced every real failure. It
+        // is still not echoed to the client: a provider error body can contain
+        // a masked credential. It is logged, and the admin gets the actionable
+        // half of it.
         console.error('[schedule/extract-image] vision extraction failed:', visionErr);
+        // ── Tell the admin which problem they actually have ────────────────
+        // "Try a clearer photo" is useless advice when the AI service returned
+        // a 500 — the photo was never the problem, and the admin re-uploads the
+        // same image twice before giving up. A provider failure and an
+        // unreadable image need different actions, so they get different
+        // messages. The provider's own text is never echoed: it can contain a
+        // masked credential.
+        const failure = String((visionErr as Error)?.message || '');
+        const providerFailed = /NVIDIA (?:vision|chat) failed|provider-silent|not retryable/.test(failure);
         return res.status(502).json({
-          error: "Couldn't read this schedule image. Try a clearer photo, or add classes manually with Add Schedule.",
+          error: providerFailed
+            ? 'The AI service is not responding right now. Nothing was lost — try again in a minute, ' +
+              'or add classes manually with Add Schedule.'
+            : "Couldn't read this schedule image. Try a clearer photo, or add classes manually with Add Schedule.",
+          code: providerFailed ? 'AI_PROVIDER_UNAVAILABLE' : 'AI_COULD_NOT_READ_IMAGE',
         });
       }
 
@@ -2390,6 +2487,11 @@ router.post(
           // it, clearly labelled, so the review screen can say "the photo said
           // 'jee even'" without that text ever becoming an identity.
           batch: batchResolution.batch,
+          // The multi-select form. One class can run for several batches at
+          // once (a combined session), so the review screen edits a LIST and
+          // `batch` stays as its first element for every caller and query that
+          // still reads the single field.
+          batches: batchResolution.batch ? [batchResolution.batch] : [],
           batchHint,
           batchStatus: batchResolution.status,
           availableBatches: batchResolution.availableBatches,
@@ -2606,6 +2708,23 @@ router.post(
   }
 );
 
+/**
+ * The batches an incoming review-screen entry names, normalized.
+ *
+ * Accepts both shapes: `batches: []` from the multi-select, and the older
+ * single `batch`. Deduped, blanks dropped, order preserved — the first survives
+ * into `Schedule.batch` for the many queries that still read it.
+ */
+function entryBatches(entry: any): string[] {
+  const raw = [
+    ...(Array.isArray(entry?.batches) ? entry.batches : []),
+    entry?.batch,
+  ];
+  return Array.from(
+    new Set(raw.map((b) => String(b ?? '').trim()).filter(Boolean)),
+  );
+}
+
 /** Re-exported shape for the bulk routes; the engine owns the definition. */
 type BulkValidationIssue = ValidationIssue;
 
@@ -2714,8 +2833,14 @@ router.post('/bulk', authMiddleware, requireRole('admin'), invalidateCacheOn(['s
       date,
       subject,
       classLevel: entry.classLevel,
-      batch: entry.batch || '',
-      batches: entry.batch ? [entry.batch] : [],
+      // ── A session may belong to SEVERAL batches ────────────────────────
+      // `batches` is the real audience; `batch` is kept as its first element
+      // because a great deal of existing code still queries the single field.
+      // Both are matched on read — `applyBatchFilter` and
+      // `buildStudentClassAudienceClause` already `$or` across the two — so a
+      // combined session reaches every selected batch's students.
+      batch: entryBatches(entry)[0] || '',
+      batches: entryBatches(entry),
       startTimeSlot: entry.startTimeSlot,
       endTimeSlot: entry.endTimeSlot,
       // Non-null: validateBulkEntries already rejected any entry with an invalid room above.
@@ -2736,10 +2861,16 @@ router.post('/bulk', authMiddleware, requireRole('admin'), invalidateCacheOn(['s
     const byTeacher = new Map<string, { teacherName: string; count: number }>();
 
     for (const doc of created) {
-      const batchKey = `${doc.classLevel}|${doc.batch || ''}`;
-      const batchGroup = byBatch.get(batchKey);
-      if (batchGroup) batchGroup.count += 1;
-      else byBatch.set(batchKey, { classLevel: doc.classLevel, batch: doc.batch || '', count: 1 });
+      // Every batch the session belongs to, not just the first. Keying on
+      // `doc.batch` alone meant the second batch of a combined session was
+      // never told its class had been scheduled.
+      const docBatches = getScheduleBatches(doc);
+      for (const batch of docBatches.length ? docBatches : ['']) {
+        const batchKey = `${doc.classLevel}|${batch}`;
+        const batchGroup = byBatch.get(batchKey);
+        if (batchGroup) batchGroup.count += 1;
+        else byBatch.set(batchKey, { classLevel: doc.classLevel, batch, count: 1 });
+      }
 
       if (doc.teacherId) {
         const teacherGroup = byTeacher.get(doc.teacherId);

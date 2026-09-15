@@ -33,7 +33,14 @@ export function getPrimaryProvider(): AIProvider {
   return getProvider(aiConfig.provider);
 }
 
-/** The fallback provider (Ollama) when the primary is NVIDIA; else null. */
-export function getFallbackProvider(): AIProvider | null {
-  return aiConfig.provider === 'nvidia' ? getProvider('ollama') : null;
-}
+// The automatic NVIDIA -> Ollama fallback was REMOVED.
+//
+// It was never configured on any deployment, so it could only ever fail — and
+// because it failed LAST, its error ("OLLAMA_VISION_MODEL is not configured")
+// replaced the real one. A NVIDIA 500 reached callers wearing an unrelated
+// message about a local model nobody runs, which is why the schedule route had
+// to throw the message away and show a generic string instead.
+//
+// Ollama is still selectable as the PRIMARY provider (AI_PROVIDER=ollama) —
+// the EPUB automation runner uses exactly that. What is gone is the silent
+// switch to it when NVIDIA fails.
