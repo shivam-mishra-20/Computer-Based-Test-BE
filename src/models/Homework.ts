@@ -70,5 +70,8 @@ homeworkSchema.index({ assignmentType: 1, assignedClasses: 1, status: 1 });
 homeworkSchema.index({ assignmentType: 1, assignedBatches: 1, status: 1 });
 homeworkSchema.index({ assignmentType: 1, assignedStudents: 1, status: 1 });
 homeworkSchema.index({ dueDate: 1, status: 1 });
+// Teacher activity report: one teacher's homework over a date range, newest
+// first. The existing { createdBy, status } index cannot serve the sort.
+homeworkSchema.index({ createdBy: 1, createdAt: -1 });
 
 export default mongoose.model<IHomework>('Homework', homeworkSchema);

@@ -127,5 +127,8 @@ doubtSchema.index({ batch: 1, subject: 1, status: 1 });
 doubtSchema.index({ student: 1, createdAt: -1 });
 doubtSchema.index({ student: 1, lastMessageAt: -1 });
 doubtSchema.index({ teacher: 1, lastMessageAt: -1 });
+// Teacher activity report dates a doubt by `updatedAt`, which is set on every
+// write; `lastMessageAt` is absent on threads written before it existed.
+doubtSchema.index({ teacher: 1, updatedAt: -1 });
 
 export default mongoose.model<IDoubt>('Doubt', doubtSchema);

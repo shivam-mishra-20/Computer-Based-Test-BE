@@ -453,6 +453,57 @@ function main() {
   );
 
   // ══════════════════════════════════════════════════════════════════════════
+  console.log(
+    '\nclearing a date removes that day, and only that day, silently',
+  );
+  // ══════════════════════════════════════════════════════════════════════════
+
+  const clearBlock = routeSrc.slice(
+    routeSrc.indexOf("router.delete('/date/:date'"),
+    routeSrc.indexOf("router.delete('/:scheduleId'"),
+  );
+  check('the clear-date route exists', clearBlock.length > 0);
+
+  // The whole reason the route exists: a day is usually cleared because it was
+  // entered wrongly, and a push per removed row would tell students their real
+  // classes had been cancelled.
+  check(
+    'it sends NO notification',
+    !/notifyScheduleAudienceByBatches|sendScheduleNotification|sendTeacherNotification/.test(
+      clearBlock,
+    ),
+  );
+
+  // A regular slot is a weekly commitment that merely falls on this date.
+  check(
+    'it touches CUSTOM sessions only',
+    clearBlock.includes("scheduleType: 'custom' as const"),
+  );
+  check(
+    'so one bad day cannot cancel every future week',
+    !clearBlock.includes("scheduleType: 'regular'"),
+  );
+
+  check(
+    'it is scoped to the organization',
+    clearBlock.includes('...tenantScope(),'),
+  );
+  check('admin only', clearBlock.includes("user.role !== 'admin'"));
+  check('the date must be a real date', clearBlock.includes('$/.test(date)'));
+
+  // Retire rather than erase, so a day that genuinely ran stays in history —
+  // and a deactivated row blocks nothing, so the date is free to re-import.
+  check(
+    'it deactivates by default',
+    clearBlock.includes('updateMany(scope, { $set: { isActive: false } })'),
+  );
+  check(
+    'with a hard-delete escape hatch',
+    clearBlock.includes('deleteMany(scope)'),
+  );
+  check('and reports how many it cleared', clearBlock.includes('cleared'));
+
+  // ══════════════════════════════════════════════════════════════════════════
   console.log('\n9 — teacher, room and time do not depend on batch identity');
   // ══════════════════════════════════════════════════════════════════════════
 

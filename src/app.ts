@@ -44,6 +44,7 @@ import practiceTestRoutes from './routes/api/practiceTestRoutes';
 import leaveRoutes from './routes/api/leaveRoutes';
 import attendanceRuleRoutes from './routes/api/attendanceRuleRoutes';
 import dailyHoursRoutes from './routes/api/dailyHoursRoutes';
+import teacherActivityRoutes from './routes/api/teacherActivityRoutes';
 import syllabusRoutes from './routes/api/syllabusRoutes';
 import automationRoutes from './routes/api/automation';
 import resourceRoutes from './routes/api/resourceRoutes';
@@ -387,6 +388,7 @@ app.use('/api/leaves', leaveRoutes);
 app.use('/api/attendance-rules', attendanceRuleRoutes);
 // Daily working hours report (attendance + schedule + EOD, read-only)
 app.use('/api/daily-hours', dailyHoursRoutes);
+app.use('/api/teacher-activity', teacherActivityRoutes);
 // Syllabus management routes
 app.use('/api/syllabus', syllabusRoutes);
 // Study resources (videos/PDFs) routes

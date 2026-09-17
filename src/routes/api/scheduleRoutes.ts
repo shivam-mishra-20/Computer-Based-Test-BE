@@ -1865,6 +1865,70 @@ router.get('/students', authMiddleware, async (req: Request, res: Response) => {
   }
 });
 // Delete schedule - Invalidates schedule caches
+/**
+ * Clear every class scheduled for ONE date. Silently.
+ *
+ * ── Why this is its own route ───────────────────────────────────────────────
+ * Deleting twenty-odd sessions one at a time fires twenty-odd "Class
+ * Cancelled" pushes at every affected student, for a day that is usually being
+ * cleared precisely because it was entered wrong — a bad photo import, a
+ * duplicated day. The notification is the problem, not a side effect of it, so
+ * this route sends NONE. That is the whole reason it exists rather than the UI
+ * looping over `DELETE /:scheduleId`.
+ *
+ * ── What it touches, and what it deliberately does not ──────────────────────
+ * CUSTOM sessions on that date only. A regular slot is a WEEKLY commitment that
+ * merely happens to fall on the date being cleared; retiring it here would
+ * silently cancel every future Tuesday because one Tuesday was wrong. Weekly
+ * slots are ended from their own row, where the consequence is visible.
+ *
+ * ── Retire, not erase ───────────────────────────────────────────────────────
+ * Same rule as the single delete: rows are deactivated, not dropped, so a day
+ * that genuinely ran stays in the history every report reads. Every live view
+ * filters `isActive`, and so does conflict validation — so a cleared date is
+ * immediately free to re-import, which is the common next step. `?hard=true`
+ * erases instead, for a day that never ran and should leave no trace.
+ */
+router.delete('/date/:date', authMiddleware, invalidateCacheOn(['schedule']), async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    // Admin only. The single-session delete allows teachers, but wiping a whole
+    // day for every class at once is not the same authority.
+    if (user.role !== 'admin') {
+      return res.status(403).json({ error: 'Only admins can clear a whole day of classes' });
+    }
+
+    const date = String(req.params.date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return res.status(400).json({ error: 'A valid date (YYYY-MM-DD) is required' });
+    }
+
+    const hard = String(req.query.hard || '') === 'true';
+    const scope = {
+      ...tenantScope(),
+      scheduleType: 'custom' as const,
+      date,
+      ...(hard ? {} : { isActive: true }),
+    };
+
+    if (hard) {
+      const result = await Schedule.deleteMany(scope);
+      console.log(`[schedule] ${user.id} hard-cleared ${result.deletedCount ?? 0} custom session(s) on ${date}`);
+      return res.json({ success: true, cleared: result.deletedCount ?? 0, date, mode: 'deleted' });
+    }
+
+    const result = await Schedule.updateMany(scope, { $set: { isActive: false } });
+    const cleared = result.modifiedCount ?? 0;
+    console.log(`[schedule] ${user.id} cleared ${cleared} custom session(s) on ${date} (no notifications sent)`);
+
+    // No notification, by design. See the header.
+    res.json({ success: true, cleared, date, mode: 'deactivated' });
+  } catch (error: any) {
+    console.error('[schedule] clear-date failed:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 router.delete('/:scheduleId', authMiddleware, invalidateCacheOn(['schedule']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;

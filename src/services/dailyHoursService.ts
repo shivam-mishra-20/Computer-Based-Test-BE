@@ -155,24 +155,67 @@ export function eachDate(from: Date, to: Date): Date[] {
 export class TeacherIdentityIndex {
   private byAlias = new Map<string, string>();
   private ambiguous = new Set<string>();
+  /** The reverse of `byAlias`, for callers that must build a query instead of
+   *  resolving a row they already hold — see `aliasesFor`. */
+  private byUser = new Map<string, Set<string>>();
+  /** Alias key → the raw text it was derived from, since name keys are
+   *  lower-cased and prefixed and a database query needs the original. */
+  private rawOf = new Map<string, string>();
 
   constructor(users: Array<{ _id: any; name?: string; firebaseUid?: string }>) {
     for (const user of users) {
       const id = String(user._id);
-      this.add(id, id);
-      if (user.firebaseUid) this.add(String(user.firebaseUid), id);
-      if (user.name) this.add(`name:${String(user.name).trim().toLowerCase()}`, id);
+      this.add(id, id, id);
+      if (user.firebaseUid) this.add(String(user.firebaseUid), id, String(user.firebaseUid));
+      if (user.name) {
+        const name = String(user.name).trim();
+        this.add(`name:${name.toLowerCase()}`, id, name);
+      }
     }
   }
 
-  private add(alias: string, userId: string): void {
+  private add(alias: string, userId: string, raw: string): void {
     if (!alias) return;
+    if (!this.rawOf.has(alias)) this.rawOf.set(alias, raw);
+
+    const owned = this.byUser.get(userId) || new Set<string>();
+    owned.add(alias);
+    this.byUser.set(userId, owned);
+
     const existing = this.byAlias.get(alias);
     if (existing && existing !== userId) {
       this.ambiguous.add(alias);
       return;
     }
     this.byAlias.set(alias, userId);
+  }
+
+  /**
+   * Every identifier that unambiguously means this teacher.
+   *
+   * The inverse of `resolve`: `resolve` is for a row you already have, this is
+   * for building the query that fetches them. Ambiguous aliases are left out by
+   * the same rule `resolve` applies — a name two teachers share identifies
+   * neither, and a query that used it would return a colleague's rows.
+   *
+   * Ids and names are returned separately because they are stored in different
+   * fields, and a name has to be matched against the raw text rather than the
+   * lower-cased key this index sorts by.
+   */
+  public aliasesFor(userId: string): { ids: string[]; names: string[] } {
+    const owned = this.byUser.get(String(userId));
+    const ids: string[] = [];
+    const names: string[] = [];
+    if (!owned) return { ids, names };
+
+    for (const alias of owned) {
+      if (this.ambiguous.has(alias)) continue;
+      const raw = this.rawOf.get(alias);
+      if (!raw) continue;
+      if (alias.startsWith('name:')) names.push(raw);
+      else ids.push(raw);
+    }
+    return { ids, names };
   }
 
   resolve(rawId?: string | null, rawName?: string | null): string | null {

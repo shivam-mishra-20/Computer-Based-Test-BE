@@ -98,5 +98,8 @@ materialSchema.index({ isPublished: 1, classLevel: 1, subject: 1 });
 materialSchema.index({ assignmentType: 1, assignedClasses: 1 });
 materialSchema.index({ assignmentType: 1, assignedBatches: 1 });
 materialSchema.index({ assignmentType: 1, assignedStudents: 1 });
+// Teacher activity report: what one teacher uploaded over a date range.
+// `uploadedBy` had no index at all before this.
+materialSchema.index({ uploadedBy: 1, createdAt: -1 });
 
 export default mongoose.model<IMaterial>('Material', materialSchema);

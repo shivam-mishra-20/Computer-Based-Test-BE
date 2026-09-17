@@ -141,6 +141,10 @@ const testResultSchema = new Schema<ITestResult>(
 testResultSchema.index({ class: 1, batch: 1, testDate: -1 });
 testResultSchema.index({ class: 1, subject: 1 });
 testResultSchema.index({ createdBy: 1, createdAt: -1 });
+// Teacher activity report filters and sorts on `testDate` (the day the test
+// was actually held), not on when the row was written, so the index above
+// does not serve it.
+testResultSchema.index({ createdBy: 1, testDate: -1 });
 testResultSchema.index({ assignmentType: 1, assignedClasses: 1, testDate: -1 });
 testResultSchema.index({ assignmentType: 1, assignedBatches: 1, testDate: -1 });
 testResultSchema.index({ assignmentType: 1, assignedStudents: 1, testDate: -1 });

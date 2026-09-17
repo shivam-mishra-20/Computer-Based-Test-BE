@@ -32,5 +32,8 @@ const announcementSchema = new Schema<IAnnouncement>({
 // Index for efficient queries
 announcementSchema.index({ isPublished: 1, createdAt: -1 });
 announcementSchema.index({ target: 1, targetClass: 1, targetBatch: 1 });
+// Teacher activity report: notices posted by one teacher, newest first.
+// `createdBy` had no index at all before this.
+announcementSchema.index({ createdBy: 1, createdAt: -1 });
 
 export default mongoose.model<IAnnouncement>('Announcement', announcementSchema);
