@@ -137,10 +137,49 @@ export const uploadLimiter = rateLimit({
 export const publicFormLimiter = rateLimit({
   windowMs: envNumber('PUBLIC_FORM_RATE_LIMIT_WINDOW_MS', 60 * 60 * 1000),
   max: envNumber('PUBLIC_FORM_RATE_LIMIT_MAX', 20),
-  message: 'Too many submissions from this device, please try again later',
+  // JSON, not a bare string. express-rate-limit sends a string as text/plain,
+  // and every client here reads `data.message` from JSON — so the one message
+  // that most needs to be read ("you are rate limited, wait") arrived as an
+  // unparseable body and surfaced as the browser's own "Too Many Requests".
+  message: { message: 'Too many submissions from this device, please try again later' },
   standardHeaders: true,
   legacyHeaders: false,
   store: createRedisStore('rl:public-form:'),
+  passOnStoreError: true,
+  validate: false,
+});
+
+/**
+ * Working on a draft you already hold the token for.
+ *
+ * ── Why this is not `publicFormLimiter` ─────────────────────────────────────
+ * That limiter is sized for a SUBMISSION — "a real person submits a handful of
+ * these", which is true of the one-shot class-request and call-back forms it
+ * was written for. The institute onboarding application is not a submission;
+ * it is a nine-step form that autosaves on every step and re-reads the draft on
+ * every page load. One person filling it in once costs about a dozen requests:
+ * a create, eight saves, a submit, and a resume for each reload. Against a
+ * ceiling of twenty an hour, the SECOND honest attempt from the same address is
+ * refused — and on a coaching centre's office Wi-Fi or a CGNAT carrier, that
+ * address is shared by everyone in the building. See the note at the top of
+ * this file: this is the same failure mode, on the one route that was added
+ * after it was written.
+ *
+ * ── Why a high ceiling here is not a hole ───────────────────────────────────
+ * These three routes are guarded by the draft token, not by the limiter. An
+ * id without its token gets the same 404 as an id that does not exist, so
+ * there is nothing here to spam that possession of a 43-character secret does
+ * not already gate. The endpoints that CREATE a row — the call-back form and
+ * `POST /organization-applications` — keep the tight ceiling, because that is
+ * where the spam actually lands. `globalLimiter` still applies underneath.
+ */
+export const draftEditLimiter = rateLimit({
+  windowMs: envNumber('DRAFT_EDIT_RATE_LIMIT_WINDOW_MS', 60 * 60 * 1000),
+  max: envNumber('DRAFT_EDIT_RATE_LIMIT_MAX', 300),
+  message: { message: 'Too many changes from this device, please try again in a few minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: createRedisStore('rl:draft-edit:'),
   passOnStoreError: true,
   validate: false,
 });

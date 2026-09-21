@@ -26,6 +26,26 @@ import {
   reconcileBuildConfig,
   updateMobileConfig,
 } from '../../core/platform/mobileBuild';
+import {
+  BuildNotAllowed,
+  BuildNotFound,
+  buildReadiness,
+  cancelBuild,
+  getBuild,
+  listBuilds,
+  markFailed,
+  publicBuildView,
+  startBuild,
+} from '../../core/platform/appBuilds';
+import {
+  NativeAssetRejected,
+  nativeAssetState,
+  saveNativeAsset,
+  type NativeAssetKind,
+} from '../../core/platform/mobileAssets';
+import { BUILD_ARTIFACT_TYPES } from '../../models/AppBuildJob';
+import { enqueuePrepare } from '../../queues/appBuildQueue';
+import { uploadNativeAsset } from '../../middlewares/uploadNativeAsset';
 import { assessApplication, applicationToOnboardingInput } from '../../core/platform/applicationProvisioning';
 import { signAsset } from '../../core/platform/applications';
 import {
@@ -653,6 +673,225 @@ router.post(
       });
     }
     return res.json(result);
+  }),
+);
+
+// ── Mobile app builds ──────────────────────────────────────────────────────
+//
+// The console's whole build surface. Reading a build takes `org.read`, like
+// every other view of an organization; STARTING one takes `app.manage`, the
+// same narrow grant that lets someone set an Android package name — because
+// the two mistakes cost the same thing. A build is a store artifact wearing an
+// institute's name.
+//
+// Nothing here waits for a build. Every handler returns in milliseconds and
+// the work happens in the queue; see queues/appBuildQueue.ts for why the
+// polling is a separate short job rather than a handler that blocks.
+
+router.get(
+  '/orgs/:orgId/mobile/build-readiness',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const readiness = await buildReadiness(req.params.orgId);
+    return res.json(readiness);
+  }),
+);
+
+router.get(
+  '/orgs/:orgId/mobile/assets',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    return res.json({ assets: await nativeAssetState(req.params.orgId) });
+  }),
+);
+
+router.post(
+  '/orgs/:orgId/mobile/assets/:kind',
+  requirePlatformCapability('app.manage'),
+  uploadNativeAsset.single('file'),
+  handle(async (req, res) => {
+    const file = (req as Request & { file?: { buffer: Buffer; originalname: string } }).file;
+    if (!file) return res.status(400).json({ message: 'No file was received.' });
+    try {
+      const saved = await saveNativeAsset(
+        req.params.orgId,
+        req.params.kind as NativeAssetKind,
+        file,
+      );
+      await recordPlatformAction(req, {
+        action: 'mobile.asset.upload',
+        orgId: req.params.orgId,
+        entity: 'Org',
+        entityId: req.params.orgId,
+        metadata: { kind: saved.kind, bytes: saved.bytes },
+      });
+      return res.status(201).json({ asset: saved, assets: await nativeAssetState(req.params.orgId) });
+    } catch (err) {
+      if (err instanceof NativeAssetRejected) return res.status(400).json({ message: err.message });
+      throw err;
+    }
+  }),
+);
+
+router.get(
+  '/orgs/:orgId/mobile/builds',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const builds = await listBuilds(req.params.orgId, Number(req.query.limit) || 25);
+    return res.json({ builds: builds.map(publicBuildView) });
+  }),
+);
+
+/**
+ * Start a build.
+ *
+ * Answers 200 with `created: false` when an identical build is already
+ * running, rather than 409. A second click is not an error to correct — the
+ * person meant to start one build, and the honest reply is the build they
+ * started. `force: true` is the explicit rebuild, which supersedes it.
+ */
+router.post(
+  '/orgs/:orgId/mobile/builds',
+  requirePlatformCapability('app.manage'),
+  handle(async (req, res) => {
+    const artifactType = String(req.body?.artifactType ?? '').toLowerCase();
+    if (!BUILD_ARTIFACT_TYPES.includes(artifactType as never)) {
+      return res.status(400).json({
+        message: 'Choose APK or AAB.',
+      });
+    }
+
+    const actor = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+    try {
+      const { build, created } = await startBuild({
+        orgId: req.params.orgId,
+        platform: 'android',
+        artifactType: artifactType as 'apk' | 'aab',
+        requestedBy: String(actor?.id ?? ''),
+        force: req.body?.force === true,
+      });
+
+      if (created) {
+        try {
+          await enqueuePrepare({
+            buildId: String(build._id),
+            orgId: req.params.orgId,
+            platform: 'android',
+            artifactType: artifactType as 'apk' | 'aab',
+          });
+        } catch (err) {
+          // The row exists but nothing will ever pick it up. Left alone it
+          // would sit in `queued` for ever AND hold the live-build slot, so
+          // the next click would be told a build is already running when none
+          // is. Failing it here keeps the record honest and the slot free.
+          await markFailed(String(build._id), {
+            errorCode: 'QUEUE_UNAVAILABLE',
+            errorMessage: 'The build could not be queued. The build service is unavailable — try again shortly.',
+            errorDetail: (err as Error)?.message,
+          });
+          return res.status(503).json({
+            message: 'The build could not be queued. The build service is unavailable — try again shortly.',
+          });
+        }
+        // Audited on creation only. Recording the duplicate clicks as well
+        // would bury the entries that matter under a person's mouse.
+        await recordPlatformAction(req, {
+          action: 'mobile.build.start',
+          orgId: req.params.orgId,
+          entity: 'AppBuildJob',
+          entityId: String(build._id),
+          metadata: {
+            buildNumber: build.buildNumber,
+            artifactType: build.artifactType,
+            appVersion: build.appVersion,
+            profile: build.buildProfile,
+            androidPackage: (build.resolvedIdentity as Record<string, string> | undefined)?.androidPackage,
+          },
+        });
+      }
+
+      return res.status(created ? 201 : 200).json({ build: publicBuildView(build), created });
+    } catch (err) {
+      if (err instanceof BuildNotAllowed) {
+        return res.status(422).json({ message: err.message, problems: err.problems });
+      }
+      if (err instanceof BuildConfigIncomplete) {
+        return res.status(422).json({
+          message: err.message,
+          problems: err.issues.map((i) => i.message),
+        });
+      }
+      throw err;
+    }
+  }),
+);
+
+router.get(
+  '/mobile/builds/:buildId',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    try {
+      return res.json({ build: publicBuildView(await getBuild(req.params.buildId)) });
+    } catch (err) {
+      if (err instanceof BuildNotFound) return res.status(404).json({ message: err.message });
+      throw err;
+    }
+  }),
+);
+
+router.post(
+  '/mobile/builds/:buildId/cancel',
+  requirePlatformCapability('app.manage'),
+  handle(async (req, res) => {
+    try {
+      const result = await cancelBuild(req.params.buildId);
+      const build = await getBuild(req.params.buildId);
+      if (result.cancelled) {
+        await recordPlatformAction(req, {
+          action: 'mobile.build.cancel',
+          orgId: String(build.orgId),
+          entity: 'AppBuildJob',
+          entityId: req.params.buildId,
+          metadata: { buildNumber: build.buildNumber },
+        });
+      }
+      return res.json({ ...result, build: publicBuildView(build) });
+    } catch (err) {
+      if (err instanceof BuildNotFound) return res.status(404).json({ message: err.message });
+      throw err;
+    }
+  }),
+);
+
+/**
+ * Where to download the finished artifact.
+ *
+ * The URL is EAS's own, not one this server invents, and the binary is not
+ * proxied: an APK is tens of megabytes and streaming it through the API buys
+ * nothing except a slower download and a busy Node process. The request is
+ * audited because who took a signed build out of the system is worth knowing.
+ */
+router.get(
+  '/mobile/builds/:buildId/artifact',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    try {
+      const build = await getBuild(req.params.buildId);
+      if (build.status !== 'completed' || !build.artifactUrl) {
+        return res.status(409).json({ message: 'This build has no downloadable file.' });
+      }
+      await recordPlatformAction(req, {
+        action: 'mobile.build.download',
+        orgId: String(build.orgId),
+        entity: 'AppBuildJob',
+        entityId: req.params.buildId,
+        metadata: { buildNumber: build.buildNumber, artifactType: build.artifactType },
+      });
+      return res.json({ url: build.artifactUrl, filename: build.artifactFilename });
+    } catch (err) {
+      if (err instanceof BuildNotFound) return res.status(404).json({ message: err.message });
+      throw err;
+    }
   }),
 );
 

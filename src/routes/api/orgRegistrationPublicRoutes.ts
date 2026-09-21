@@ -21,8 +21,8 @@
  */
 
 import express, { Request, Response } from 'express';
-import { publicFormLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
-import { upload } from '../../middlewares/upload';
+import { draftEditLimiter, publicFormLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
+import { uploadBrandAsset } from '../../middlewares/uploadBrandAsset';
 import {
   RegistrationValidationError,
   publicView,
@@ -32,6 +32,7 @@ import {
   AssetRejected,
   DraftNotEditable,
   DraftNotFound,
+  applicantAssetViews,
   createDraft,
   draftView,
   loadDraft,
@@ -189,17 +190,19 @@ router.post('/organization-applications', publicFormLimiter, async (req: Request
 });
 
 /** Resume a draft. */
-router.get('/organization-applications/:id', publicFormLimiter, async (req: Request, res: Response) => {
+router.get('/organization-applications/:id', draftEditLimiter, async (req: Request, res: Response) => {
   try {
     const found = await loadDraft(req.params.id, draftTokenOf(req));
-    return res.json({ draft: draftView(found) });
+    // Assets travel alongside the draft rather than inside it: the stored
+    // record has a private storage path, and only a signed URL is displayable.
+    return res.json({ draft: draftView(found), assets: await applicantAssetViews(found) });
   } catch (err) {
     return handleApplicationError(res, err, 'load');
   }
 });
 
 /** Save a step. Sections are replaced whole — see `saveDraft`. */
-router.patch('/organization-applications/:id', publicFormLimiter, async (req: Request, res: Response) => {
+router.patch('/organization-applications/:id', draftEditLimiter, async (req: Request, res: Response) => {
   try {
     const updated = await saveDraft(
       req.params.id,
@@ -234,7 +237,9 @@ router.patch('/organization-applications/:id', publicFormLimiter, async (req: Re
 router.post(
   '/organization-applications/:id/assets',
   uploadLimiter,
-  upload.single('file'),
+  // Not the shared `upload`: that one refuses image/svg+xml, which is the file
+  // this form recommends. See middlewares/uploadBrandAsset.ts.
+  uploadBrandAsset.single('file'),
   async (req: Request, res: Response) => {
     try {
       const file = (req as Request & { file?: { buffer: Buffer; originalname: string; mimetype: string } }).file;
@@ -245,7 +250,9 @@ router.post(
         file,
         String(req.body?.kind ?? 'logo'),
       );
-      return res.status(201).json({ draft: draftView(updated) });
+      return res
+        .status(201)
+        .json({ draft: draftView(updated), assets: await applicantAssetViews(updated) });
     } catch (err) {
       return handleApplicationError(res, err, 'asset upload');
     }
@@ -253,7 +260,7 @@ router.post(
 );
 
 /** Submit. Validates, stamps, and retires the token. */
-router.post('/organization-applications/:id/submit', publicFormLimiter, async (req: Request, res: Response) => {
+router.post('/organization-applications/:id/submit', draftEditLimiter, async (req: Request, res: Response) => {
   try {
     const submitted = await submitApplication(req.params.id, draftTokenOf(req));
     return res.json({

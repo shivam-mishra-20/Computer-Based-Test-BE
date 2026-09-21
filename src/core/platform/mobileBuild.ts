@@ -299,8 +299,17 @@ export async function generateBuildConfig(
   if (mobile.androidVersionCode) {
     optionalNative.push(`    androidVersionCode: ${Number(mobile.androidVersionCode)},`);
   }
+  // ALWAYS, not only once an EAS project exists.
+  //
+  // The Expo slug names the EAS project, and it is what `eas init --account X`
+  // creates or links. Emitting it only after provisioning meant the FIRST
+  // build of an organization ran with the default slug — so automatic
+  // provisioning would have created or linked `@account/client-platform-app`,
+  // the shared platform project, for every institute in turn. One EAS project
+  // holding many Android packages is one set of credentials for applications
+  // that must not share them.
+  optionalNative.push(`    expoSlug: ${js(slug)},`);
   if (mobile.easProjectId) {
-    optionalNative.push(`    expoSlug: ${js(slug)},`);
     optionalNative.push(`    easProjectId: ${js(String(mobile.easProjectId))},`);
     if (mobile.easOwner) optionalNative.push(`    easOwner: ${js(String(mobile.easOwner))},`);
   }

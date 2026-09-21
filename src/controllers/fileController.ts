@@ -254,17 +254,24 @@ export const getDoubtFiles = async (req: AuthRequest, res: Response) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    // Use public URLs (no regeneration needed)
-    const filesWithUrls = files.map((file: any) => {
-      // Ensure URL is public URL format
-      const publicUrl = file.url.startsWith('http') 
-        ? file.url 
-        : `https://storage.googleapis.com/${bucket.name}/${file.storagePath}`;
-      return {
-        ...file,
-        url: publicUrl,
-      };
-    });
+    // ── Sign, do not fabricate ──────────────────────────────────────────
+    // This built `https://storage.googleapis.com/<bucket>/<path>` for any
+    // stored value that was not already a URL. That was correct while every
+    // object carried a public ACL; against the PRIVATE objects `putTenantFile`
+    // now writes it is a link that 403s. `resolveFileUrl` signs a private path
+    // and passes a genuinely public legacy URL through untouched.
+    const orgId = currentOrgId();
+    const filesWithUrls = await Promise.all(
+      files.map(async (file: any) => {
+        try {
+          const url = await resolveFileUrl(file.storagePath || file.url, { orgId });
+          return { ...file, url: url ?? '' };
+        } catch {
+          // One unreadable file must not fail the whole listing.
+          return { ...file, url: '' };
+        }
+      }),
+    );
 
     return res.json({
       success: true,

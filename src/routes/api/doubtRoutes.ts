@@ -14,6 +14,10 @@ import {
 import mongoose from 'mongoose';
 import FileMetadata from '../../models/FileMetadata';
 import { bucket } from '../../config/firebase';
+import {
+  signDoubtAttachments,
+  signDoubtListAttachments,
+} from '../../core/storage/serialize';
 import SocketService from '../../services/SocketService';
 import { createAndSendNotification } from '../../services/notificationService';
 import { currentOrgId } from '../../core/tenancy';
@@ -270,25 +274,15 @@ router.get('/student/my-doubts', authMiddleware, async (req: AuthRequest, res: R
       return { ...doubt, teacher: null };
     });
 
-    for (const doubt of doubtsWithTeacher as any[]) {
-      doubt.unreadCount = unreadCountFor(doubt, 'student');
-    }
+    // ── Make every attachment fetchable ──────────────────────────────────
+    // Doubt attachments store a PATH since `putTenantFile` began writing
+    // PRIVATE objects. Returning it raw gave the client a string it cannot
+    // load; fabricating a public storage.googleapis.com URL for it — which is
+    // what stood here — gave the client a link that 403s. `resolveFileUrl`
+    // signs a private path, passes a legacy public URL through unchanged, and
+    // knows which is which.
+    await signDoubtListAttachments(doubtsWithTeacher as unknown[]);
 
-    // Convert to public URLs (no regeneration needed)
-    for (const doubt of doubtsWithTeacher as any[]) {
-      if (doubt.messages && doubt.messages.length > 0) {
-        for (const message of doubt.messages) {
-          if (message.attachments && message.attachments.length > 0) {
-            for (const attachment of message.attachments) {
-              // Ensure URL is public URL format
-              if (!attachment.url || !attachment.url.startsWith('https://storage.googleapis.com')) {
-                attachment.url = `https://storage.googleapis.com/${bucket.name}/${attachment.storagePath}`;
-              }
-            }
-          }
-        }
-      }
-    }
 
     return res.json({
       doubts: doubtsWithTeacher,
@@ -330,21 +324,7 @@ router.get('/teacher', authMiddleware, async (req: AuthRequest, res: Response) =
       doubt.unreadCount = unreadCountFor(doubt, 'teacher');
     }
 
-    // Convert to public URLs (no regeneration needed)
-    for (const doubt of doubts as any[]) {
-      if (doubt.messages && doubt.messages.length > 0) {
-        for (const message of doubt.messages) {
-          if (message.attachments && message.attachments.length > 0) {
-            for (const attachment of message.attachments) {
-              // Ensure URL is public URL format
-              if (!attachment.url || !attachment.url.startsWith('https://storage.googleapis.com')) {
-                attachment.url = `https://storage.googleapis.com/${bucket.name}/${attachment.storagePath}`;
-              }
-            }
-          }
-        }
-      }
-    }
+    await signDoubtListAttachments(doubts as unknown[]);
 
     return res.json({
       doubts,
@@ -467,6 +447,8 @@ router.post('/teacher/start', authMiddleware, messageLimiter, async (req: AuthRe
       createdDoubts.push(populated);
     }
 
+    await signDoubtListAttachments(createdDoubts as unknown[]);
+
     return res.status(201).json({ doubts: createdDoubts });
   } catch (error) {
     console.error('[TeacherStartDoubt] Error:', error);
@@ -493,19 +475,12 @@ router.get('/:id', authMiddleware, async (req: AuthRequest, res: Response) => {
 
     // Convert to public URLs (no regeneration needed)
     if (doubt.messages && doubt.messages.length > 0) {
-      for (const message of doubt.messages) {
-        if (message.attachments && message.attachments.length > 0) {
-          for (const attachment of message.attachments) {
-            // Ensure URL is public URL format
-            if (!attachment.url || !attachment.url.startsWith('https://storage.googleapis.com')) {
-              attachment.url = `https://storage.googleapis.com/${bucket.name}/${attachment.storagePath}`;
-            }
-          }
-        }
-      }
     }
 
-    return res.json(withActivityFields(doubt.toObject() as unknown as Record<string, unknown>));
+    const detail = withActivityFields(doubt.toObject() as unknown as Record<string, unknown>);
+    await signDoubtAttachments(detail);
+
+    return res.json(detail);
   } catch (error) {
     console.error('Error fetching doubt:', error);
     return res.status(500).json({ error: 'Failed to fetch doubt' });
@@ -584,6 +559,7 @@ router.post('/', authMiddleware, messageLimiter, async (req: AuthRequest, res: R
       .populate('teacher', 'name email profileImage')
       .populate('messages.sender', 'name email role profileImage')
       .lean();
+    await signDoubtAttachments(populated);
     
     // Emit socket event for new/updated conversation to user rooms
     SocketService.emitDoubtUpdate(
@@ -684,18 +660,12 @@ router.post('/:id/messages', authMiddleware, messageLimiter, async (req: AuthReq
       ? withActivityFields(populatedRaw as Record<string, unknown>)
       : populatedRaw;
 
-    // Convert to public URLs for all attachments before sending via socket
-    if (populated && (populated as any).messages) {
-      for (const msg of (populated as any).messages) {
-        if (msg.attachments && msg.attachments.length > 0) {
-          for (const attachment of msg.attachments) {
-            if (attachment.storagePath && (!attachment.url || !attachment.url.startsWith('https://storage.googleapis.com'))) {
-              attachment.url = `https://storage.googleapis.com/${bucket.name}/${attachment.storagePath}`;
-            }
-          }
-        }
-      }
-    }
+    // ── Sign before emitting ──────────────────────────────────────────────
+    // The socket payload is what the chat screen renders on arrival, so an
+    // unsigned attachment here is exactly the "sent it, saw nothing" symptom.
+    // This used to fabricate a public storage.googleapis.com URL, which 403s
+    // against the private objects putTenantFile writes.
+    await signDoubtAttachments(populated);
 
     // Emit socket event to doubt room AND user rooms for real-time chat list updates
     const studentId = doubt.student.toString();
@@ -1016,18 +986,10 @@ router.delete('/:doubtId/messages/:messageId', authMiddleware, async (req: AuthR
       .populate('teacher', 'name email profileImage')
       .populate('messages.sender', 'name email role profileImage')
       .lean();
+    await signDoubtAttachments(populated);
 
     // Fix attachment URLs
     if (populated && (populated as any).messages) {
-      for (const msg of (populated as any).messages) {
-        if (msg.attachments?.length) {
-          for (const att of msg.attachments) {
-            if (att.storagePath && (!att.url || !att.url.startsWith('https://storage.googleapis.com'))) {
-              att.url = `https://storage.googleapis.com/${bucket.name}/${att.storagePath}`;
-            }
-          }
-        }
-      }
     }
 
     const studentId = doubt.student.toString();

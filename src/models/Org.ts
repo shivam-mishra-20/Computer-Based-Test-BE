@@ -61,9 +61,21 @@ export interface IOrgMobile {
    * numbering must not restart. Absent otherwise, so EAS manages it.
    */
   androidVersionCode?: number;
-  /** An existing EAS project, for an organization already on EAS. */
+  /**
+   * The organization's EAS project.
+   *
+   * Set by hand for an institute that already had one, and otherwise created
+   * automatically by the first build — see core/platform/easProvisioning.ts.
+   * Once present it is never re-created: it is the identity of the app on
+   * Expo, and a second project would mean a second set of Android credentials
+   * for the same store listing.
+   */
   easProjectId?: string;
   easOwner?: string;
+  /** The project slug on Expo, which is the organization slug. */
+  easProjectSlug?: string;
+  /** When it was created automatically. Absent for one entered by hand. */
+  easProvisionedAt?: Date;
   /** Behind the splash and the launch frame. */
   backgroundColor?: string;
   /**
@@ -73,6 +85,20 @@ export interface IOrgMobile {
    */
   assetsReady?: boolean;
   assetsNote?: string;
+  /**
+   * The five images a build compiles in, as stored objects.
+   *
+   * Uploaded from the console, downloaded by the build worker. Present here
+   * rather than only in the app repository because a worker has no checkout —
+   * see core/platform/mobileAssets.ts.
+   */
+  nativeAssets?: {
+    kind: string;
+    storagePath: string;
+    filename: string;
+    bytes: number;
+    uploadedAt: Date;
+  }[];
 }
 
 /** Runtime branding, applied by both clients without a deploy. */
@@ -172,9 +198,25 @@ const orgSchema = new Schema<IOrg>(
         androidVersionCode: Number,
         easProjectId: String,
         easOwner: String,
+        easProjectSlug: String,
+        easProvisionedAt: Date,
         backgroundColor: String,
         assetsReady: Boolean,
         assetsNote: String,
+        // The five native images, once the server holds them. `assetsReady`
+        // above used to be the only record that they existed anywhere, because
+        // they lived in a repository this server could not see; it is now
+        // derived from this list — see core/platform/mobileAssets.ts.
+        nativeAssets: [
+          {
+            _id: false,
+            kind: String,
+            storagePath: String,
+            filename: String,
+            bytes: Number,
+            uploadedAt: Date,
+          },
+        ],
       },
       required: false,
       _id: false,

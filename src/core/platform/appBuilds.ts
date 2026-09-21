@@ -1,0 +1,592 @@
+/**
+ * Mobile app builds, as the console sees them.
+ *
+ * ── What this owns ──────────────────────────────────────────────────────────
+ * The RECORD and the RULES: whether a build may start, what it is called, that
+ * two identical ones cannot run at once, and how a job moves between states.
+ * The work itself — workspace, assets, EAS — belongs to the worker, and
+ * nothing in this module spawns a process or waits on a network call to Expo.
+ * An HTTP handler calling into here returns in milliseconds.
+ *
+ * ── Readiness is answered before anything is queued ─────────────────────────
+ * Section 3 asks that a build which cannot succeed is never queued, and that
+ * the reason is a sentence rather than a stack trace. Both matter for the same
+ * reason: the person clicking the button is an administrator, and "Missing app
+ * icon: icon.png" is something they can act on, while `ENOENT` forty minutes
+ * into a Gradle run is something they have to escalate. So every condition
+ * that can be checked cheaply is checked here, up front, and the refusal names
+ * the field and the next action.
+ */
+
+import mongoose from 'mongoose';
+import AppBuildJob, {
+  LIVE_BUILD_STATUSES,
+  type BuildArtifactType,
+  type BuildPlatform,
+  type BuildStatus,
+  type IAppBuildJob,
+} from '../../models/AppBuildJob';
+import { withoutTenantScope } from '../tenancy/context';
+import { getMobileConfig } from './mobileBuild';
+import { nativeAssetState, syncAssetsReady } from './mobileAssets';
+import { isEasConfigured } from './easClient';
+import { profileNameFor } from './appBuildWorkspace';
+
+export class BuildNotAllowed extends Error {
+  readonly code = 'BUILD_NOT_ALLOWED';
+  constructor(message: string, readonly problems: string[] = []) {
+    super(message);
+    this.name = 'BuildNotAllowed';
+  }
+}
+
+export class BuildNotFound extends Error {
+  readonly code = 'BUILD_NOT_FOUND';
+  constructor() {
+    super('Build not found');
+    this.name = 'BuildNotFound';
+  }
+}
+
+function orgModel() {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  return require('../../models/Org').default;
+}
+
+async function loadOrg(orgId: string): Promise<Record<string, any> | null> {
+  if (!mongoose.Types.ObjectId.isValid(orgId)) return null;
+  return withoutTenantScope('app-build:load-org', async () => orgModel().findById(orgId));
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Readiness
+   ══════════════════════════════════════════════════════════════════════════ */
+
+export interface BuildReadiness {
+  ready: boolean;
+  /** Sentences an administrator can act on. Never a stack trace. */
+  problems: string[];
+  appVersion: string;
+  slug: string;
+  identity: {
+    orgId: string;
+    appName: string;
+    androidPackage: string;
+    iosBundleId: string;
+    scheme: string;
+    apiBaseUrl: string;
+  } | null;
+  assets: Awaited<ReturnType<typeof nativeAssetState>>;
+  /** Whether this SERVER can build at all, as opposed to this organization. */
+  easConfigured: boolean;
+  /**
+   * The organization's Expo project, if it has one yet.
+   *
+   * `connected: false` is not a fault — it means the first build will create
+   * it. The console says exactly that, so nobody has to know what EAS is.
+   */
+  easProject: {
+    connected: boolean;
+    projectId: string | null;
+    account: string | null;
+    slug: string | null;
+    provisionedAt: Date | null;
+  };
+}
+
+/**
+ * Everything that would stop a build, gathered in one pass.
+ *
+ * Deliberately returns all of them rather than the first: an administrator
+ * fixing four things one refusal at a time is four round trips through a
+ * console they did not want to be in.
+ */
+export async function buildReadiness(orgId: string): Promise<BuildReadiness> {
+  const problems: string[] = [];
+
+  const org = await loadOrg(orgId);
+  if (!org) {
+    return {
+      ready: false,
+      problems: ['That organization no longer exists.'],
+      appVersion: '',
+      slug: '',
+      identity: null,
+      assets: [],
+      easConfigured: isEasConfigured(),
+      easProject: { connected: false, projectId: null, account: null, slug: null, provisionedAt: null },
+    };
+  }
+  if (String(org.status ?? '').toUpperCase() !== 'ACTIVE') {
+    problems.push(
+      `This organization is ${String(org.status ?? 'not active').toLowerCase()}. Only an active organization can be built.`,
+    );
+  }
+
+  // Before asking the validator, make the flag it reads true or false for the
+  // right reason — see `syncAssetsReady`.
+  await syncAssetsReady(orgId);
+
+  const view = await getMobileConfig(orgId, 'production');
+  for (const issue of view.issues ?? []) {
+    problems.push(issue.message ?? String(issue));
+  }
+
+  const assets = await nativeAssetState(orgId);
+  for (const asset of assets) {
+    if (!asset.present) {
+      problems.push(`Missing ${asset.label.toLowerCase()}: ${asset.filename}. Upload it under Native assets.`);
+    }
+  }
+
+  const easConfigured = isEasConfigured();
+  if (!easConfigured) {
+    problems.push(
+      'This server is not connected to Expo, so it cannot start a cloud build. A developer must set EXPO_TOKEN on the build host.',
+    );
+  }
+
+  // The EAS project is NOT a readiness problem.
+  //
+  // It used to be, and that was the wrong shape: it made an administrator
+  // responsible for a concept they should never meet. The first build now
+  // creates it (core/platform/easProvisioning.ts), so the console reports the
+  // state and says what will happen rather than refusing.
+  //
+  // What IS still a problem is having no account to create it under, because
+  // nothing can resolve that from the console.
+  const easProject = String(org.mobile?.easProjectId ?? '').trim();
+  if (!easProject && !String(process.env.EXPO_ACCOUNT ?? '').trim()) {
+    problems.push(
+      'This organization has no Expo project and this server has no Expo account configured to create one under. ' +
+        'A developer must set EXPO_ACCOUNT on the build host.',
+    );
+  }
+
+  const id = view.identity ?? ({} as Record<string, any>);
+  return {
+    ready: problems.length === 0,
+    problems,
+    appVersion: String(org.mobile?.version ?? '1.0.0'),
+    slug: String(id.slug ?? org.slug ?? ''),
+    identity: view.identity
+      ? {
+          orgId: String(id.orgId ?? ''),
+          appName: String(id.appName ?? ''),
+          androidPackage: String(id.androidPackage ?? ''),
+          iosBundleId: String(id.iosBundleId ?? ''),
+          scheme: String(id.scheme ?? ''),
+          apiBaseUrl: String(id.apiBaseUrl ?? ''),
+        }
+      : null,
+    assets,
+    easConfigured,
+    easProject: {
+      connected: Boolean(easProject),
+      projectId: easProject || null,
+      account: String(org.mobile?.easOwner ?? '') || null,
+      slug: String(org.mobile?.easProjectSlug ?? '') || null,
+      provisionedAt: org.mobile?.easProvisionedAt ?? null,
+    },
+  };
+}
+
+/** The email of the staff member who asked, for the history table. */
+async function staffEmail(platformUserId: string): Promise<string> {
+  if (!mongoose.Types.ObjectId.isValid(platformUserId)) return 'unknown';
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const PlatformUser = require('../../models/PlatformUser').default;
+  const staff = await withoutTenantScope('app-build:staff-email', async () =>
+    PlatformUser.findById(platformUserId).select('email').lean(),
+  );
+  return String((staff as { email?: string } | null)?.email ?? 'unknown');
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Creating a build
+   ══════════════════════════════════════════════════════════════════════════ */
+
+export interface StartBuildInput {
+  orgId: string;
+  platform: BuildPlatform;
+  artifactType: BuildArtifactType;
+  requestedBy: string;
+  /** Optional: resolved from the staff record when the caller does not have it. */
+  requestedByEmail?: string;
+  /** Supersede a live build of the same shape instead of returning it. */
+  force?: boolean;
+}
+
+export interface StartBuildResult {
+  build: IAppBuildJob;
+  /** False when an identical live build already existed and was returned. */
+  created: boolean;
+}
+
+/**
+ * The next `#n` for this organization.
+ *
+ * Read from the highest existing number rather than a counter document: the
+ * unique index below is what actually prevents a collision that matters, and a
+ * duplicate build NUMBER under a race is a cosmetic tie in a list, not a
+ * second build.
+ */
+async function nextBuildNumber(orgId: string): Promise<number> {
+  const latest = await withoutTenantScope('app-build:next-number', async () =>
+    AppBuildJob.findOne({ orgId }).sort({ buildNumber: -1 }).select('buildNumber').lean(),
+  );
+  return ((latest as { buildNumber?: number } | null)?.buildNumber ?? 0) + 1;
+}
+
+/**
+ * Create a build, or return the one already running.
+ *
+ * ── Why this is idempotent rather than guarded ──────────────────────────────
+ * Section 6 lists six ways a duplicate arrives — a double click, a browser
+ * retry, an API retry, two tabs, a worker retry, a dropped connection — and
+ * five of them happen after the frontend has done everything it can. A
+ * disabled button is a courtesy; the partial unique index on
+ * `(orgId, platform, artifactType)` over live statuses is the guarantee,
+ * because it is the database refusing to write the second row.
+ *
+ * The duplicate is not an error to the caller. Someone who clicked twice meant
+ * to start one build and should be shown that build, so the second call
+ * returns the first call's result with `created: false`.
+ */
+export async function startBuild(input: StartBuildInput): Promise<StartBuildResult> {
+  const readiness = await buildReadiness(input.orgId);
+  if (!readiness.ready) {
+    throw new BuildNotAllowed('This organization is not ready to build.', readiness.problems);
+  }
+
+  const org = await loadOrg(input.orgId);
+  const slug = readiness.slug;
+
+  const existing = await withoutTenantScope('app-build:find-live', async () =>
+    AppBuildJob.findOne({
+      orgId: input.orgId,
+      platform: input.platform,
+      artifactType: input.artifactType,
+      status: { $in: LIVE_BUILD_STATUSES },
+    }),
+  );
+
+  if (existing && !input.force) return { build: existing, created: false };
+
+  if (existing && input.force) {
+    // An explicit rebuild. The old row leaves the live set so the index frees
+    // up, and records what replaced it rather than vanishing from the history.
+    existing.status = 'cancelled';
+    existing.cancelledAt = new Date();
+    existing.statusMessage = 'Superseded by a newer build';
+    await withoutTenantScope('app-build:supersede', async () => existing.save());
+  }
+
+  const doc = {
+    buildNumber: await nextBuildNumber(input.orgId),
+    orgId: new mongoose.Types.ObjectId(input.orgId),
+    organizationSlug: slug,
+    platform: input.platform,
+    artifactType: input.artifactType,
+    buildProfile: profileNameFor(slug, input.artifactType),
+    appVersion: readiness.appVersion,
+    requestedBy: new mongoose.Types.ObjectId(input.requestedBy),
+    requestedByEmail: input.requestedByEmail || (await staffEmail(input.requestedBy)),
+    status: 'queued' as BuildStatus,
+    statusMessage: 'Waiting for a build worker',
+    progress: 5,
+    queuedAt: new Date(),
+    resolvedIdentity: readiness.identity ?? undefined,
+    easProjectId: org?.mobile?.easProjectId ? String(org.mobile.easProjectId) : undefined,
+  };
+
+  try {
+    const created = await withoutTenantScope('app-build:create', async () => AppBuildJob.create(doc));
+    if (input.force && existing) {
+      existing.supersededBy = created._id as mongoose.Types.ObjectId;
+      await withoutTenantScope('app-build:link-supersede', async () => existing.save());
+    }
+    return { build: created, created: true };
+  } catch (err) {
+    // The index fired: something else created the same live build between the
+    // lookup above and this insert. That is the race the index exists for, and
+    // the right answer is the build that won, not a failure.
+    if ((err as { code?: number }).code === 11000) {
+      const winner = await withoutTenantScope('app-build:find-winner', async () =>
+        AppBuildJob.findOne({
+          orgId: input.orgId,
+          platform: input.platform,
+          artifactType: input.artifactType,
+          status: { $in: LIVE_BUILD_STATUSES },
+        }),
+      );
+      if (winner) return { build: winner, created: false };
+    }
+    throw err;
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Reading
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * What a browser is allowed to see.
+ *
+ * `errorDetail` is the reason this function exists. A failed EAS build's
+ * output can run to thousands of lines and can contain the CLI's view of its
+ * own environment; it is kept for whoever debugs the build and is never put in
+ * a response body. Section 16 asks for a summary in the UI and the detail
+ * server-side, and this is where that split is enforced rather than remembered.
+ */
+export function publicBuildView(job: IAppBuildJob): Record<string, unknown> {
+  return {
+    id: String(job._id),
+    buildNumber: job.buildNumber,
+    orgId: String(job.orgId),
+    organizationSlug: job.organizationSlug,
+    platform: job.platform,
+    artifactType: job.artifactType,
+    buildProfile: job.buildProfile,
+    appVersion: job.appVersion,
+    requestedByEmail: job.requestedByEmail,
+    status: job.status,
+    statusMessage: job.statusMessage,
+    progress: job.progress,
+    easBuildId: job.easBuildId,
+    easBuildUrl: job.easBuildUrl,
+    artifactUrl: job.artifactUrl,
+    artifactFilename: job.artifactFilename,
+    errorCode: job.errorCode,
+    errorMessage: job.errorMessage,
+    resolvedIdentity: job.resolvedIdentity,
+    generatedConfigHash: job.generatedConfigHash,
+    queuedAt: job.queuedAt,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
+    failedAt: job.failedAt,
+    cancelledAt: job.cancelledAt,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+  };
+}
+
+export async function listBuilds(orgId: string, limit = 25): Promise<IAppBuildJob[]> {
+  return withoutTenantScope('app-build:list', async () =>
+    AppBuildJob.find({ orgId }).sort({ createdAt: -1 }).limit(Math.min(Math.max(limit, 1), 100)),
+  );
+}
+
+export async function getBuild(buildId: string): Promise<IAppBuildJob> {
+  if (!mongoose.Types.ObjectId.isValid(buildId)) throw new BuildNotFound();
+  const found = await withoutTenantScope('app-build:get', async () => AppBuildJob.findById(buildId));
+  if (!found) throw new BuildNotFound();
+  return found;
+}
+
+/** The most recent build of any shape, for the console's "Latest build" card. */
+export async function latestBuild(orgId: string): Promise<IAppBuildJob | null> {
+  return withoutTenantScope('app-build:latest', async () =>
+    AppBuildJob.findOne({ orgId }).sort({ createdAt: -1 }),
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Transitions — the worker's vocabulary
+   ══════════════════════════════════════════════════════════════════════════ */
+
+export async function markProgress(
+  buildId: string,
+  patch: { status?: BuildStatus; statusMessage?: string; progress?: number } & Record<string, unknown>,
+): Promise<void> {
+  await withoutTenantScope('app-build:progress', async () =>
+    AppBuildJob.updateOne({ _id: buildId }, { $set: patch }),
+  );
+}
+
+export async function markFailed(
+  buildId: string,
+  input: { errorCode: string; errorMessage: string; errorDetail?: string },
+): Promise<void> {
+  await withoutTenantScope('app-build:failed', async () =>
+    AppBuildJob.updateOne(
+      { _id: buildId, status: { $in: LIVE_BUILD_STATUSES } },
+      {
+        $set: {
+          status: 'failed',
+          failedAt: new Date(),
+          progress: 100,
+          statusMessage: input.errorMessage,
+          errorCode: input.errorCode,
+          errorMessage: input.errorMessage,
+          errorDetail: input.errorDetail,
+        },
+      },
+    ),
+  );
+}
+
+export async function markCompleted(
+  buildId: string,
+  input: { artifactUrl: string; artifactFilename: string },
+): Promise<void> {
+  await withoutTenantScope('app-build:completed', async () =>
+    AppBuildJob.updateOne(
+      { _id: buildId },
+      {
+        $set: {
+          status: 'completed',
+          completedAt: new Date(),
+          progress: 100,
+          statusMessage: 'Build completed',
+          artifactUrl: input.artifactUrl,
+          artifactFilename: input.artifactFilename,
+        },
+      },
+    ),
+  );
+}
+
+/**
+ * Put back on the queue any build that is waiting for a worker that will never
+ * come.
+ *
+ * ── The state this repairs ──────────────────────────────────────────────────
+ * A BuildJob and its queue entry are written by two different systems, and the
+ * document is the one that survives. Redis can be flushed, a job can be
+ * dropped, and — the case that actually happened — a server can accept builds
+ * for an hour before anybody notices the worker was never started. All of
+ * those leave a row reading "queued / Waiting for a build worker" that nothing
+ * will ever pick up, and no error anywhere, because nothing went wrong: the
+ * work simply was not requested of anyone.
+ *
+ * ── Why this cannot double-build ────────────────────────────────────────────
+ * The queue id is derived from the BuildJob id, so re-enqueueing a build that
+ * IS queued collapses onto the existing entry. And a build that already
+ * carries an `easBuildId` is on EAS right now — re-preparing it would start a
+ * SECOND cloud build for one click, so it gets a poll instead.
+ */
+export async function reconcileOrphanedBuilds(): Promise<{ requeued: number; alreadyQueued: number }> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { appBuildQueue, buildJobId, enqueuePrepare, enqueuePoll } = require('../../queues/appBuildQueue');
+
+  const live = await withoutTenantScope('app-build:reconcile', async () =>
+    AppBuildJob.find({ status: { $in: LIVE_BUILD_STATUSES } }),
+  );
+
+  let requeued = 0;
+  let alreadyQueued = 0;
+
+  for (const job of live) {
+    const id = String(job._id);
+
+    if (job.easBuildId) {
+      // Already building on EAS. Only the poll may be missing.
+      const pollExists = await appBuildQueue
+        .getJob(`poll-${id}-0`)
+        .catch(() => null);
+      if (pollExists) {
+        alreadyQueued++;
+        continue;
+      }
+      await enqueuePoll(
+        {
+          buildId: id,
+          orgId: String(job.orgId),
+          platform: job.platform,
+          artifactType: job.artifactType,
+          easBuildId: job.easBuildId,
+          pollCount: 0,
+        },
+        5_000,
+      );
+      requeued++;
+      console.log(`[appBuilds] re-queued a status poll for build ${id} (already on EAS)`);
+      continue;
+    }
+
+    const existing = await appBuildQueue.getJob(buildJobId(id)).catch(() => null);
+    if (existing) {
+      const state = await existing.getState().catch(() => null);
+      if (state && state !== 'completed' && state !== 'failed') {
+        alreadyQueued++;
+        continue;
+      }
+    }
+
+    await enqueuePrepare({
+      buildId: id,
+      orgId: String(job.orgId),
+      platform: job.platform,
+      artifactType: job.artifactType,
+    });
+    requeued++;
+    console.log(`[appBuilds] re-queued build ${id} — it had no queue entry`);
+  }
+
+  return { requeued, alreadyQueued };
+}
+
+/**
+ * Stop a build, if it can honestly be stopped.
+ *
+ * ── Why this refuses rather than always succeeding ──────────────────────────
+ * Section 17 is explicit, and it is the right rule: a row that says
+ * "cancelled" while Expo keeps compiling and later publishes an artifact is
+ * two systems disagreeing about what happened. Whoever reads the console then
+ * believes something false, and the artifact that appears belongs to a build
+ * the record says never finished.
+ *
+ * So a build that has already reached EAS is only marked cancelled when EAS
+ * accepts the cancellation. If it does not — the build is already finishing,
+ * the CLI is unreachable — the record is left alone and the caller is told, and
+ * the next poll will record whatever actually happened.
+ */
+export async function cancelBuild(buildId: string): Promise<{ cancelled: boolean; reason?: string }> {
+  const job = await getBuild(buildId);
+  if (!LIVE_BUILD_STATUSES.includes(job.status)) {
+    return { cancelled: false, reason: `This build is already ${job.status}.` };
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { removeQueuedBuild } = require('../../queues/appBuildQueue');
+  await removeQueuedBuild(buildId).catch(() => {});
+
+  if (job.easBuildId) {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { cancelEasBuild } = require('./easClient');
+    const cwd = String(process.env.CLIENT_APP_PATH || process.cwd());
+    const accepted = await cancelEasBuild(job.easBuildId, cwd).catch(() => false);
+    if (!accepted) {
+      return {
+        cancelled: false,
+        reason:
+          'EAS would not stop this build — it is probably too far along. It will finish on its own, and the result will appear here.',
+      };
+    }
+  }
+
+  job.status = 'cancelled';
+  job.cancelledAt = new Date();
+  job.progress = 100;
+  job.statusMessage = 'Cancelled';
+  await withoutTenantScope('app-build:cancel', async () => job.save());
+  return { cancelled: true };
+}
+
+/**
+ * The file name the console offers, derived from what the build actually is.
+ *
+ * The extension follows the artifact type and nothing else — an AAB named
+ * `.apk` is a file that installs nowhere and is rejected by Play, and it is
+ * exactly the kind of mistake that survives until somebody needs it.
+ */
+export function artifactFilenameFor(job: {
+  organizationSlug: string;
+  appVersion: string;
+  artifactType: BuildArtifactType;
+  buildNumber: number;
+}): string {
+  const ext = job.artifactType === 'apk' ? 'apk' : 'aab';
+  return `${job.organizationSlug}-${job.appVersion}-build${job.buildNumber}.${ext}`;
+}

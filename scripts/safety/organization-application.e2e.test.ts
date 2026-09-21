@@ -55,11 +55,11 @@ function check(label: string, ok: boolean, detail = '') {
   }
 }
 
-interface Res { status: number; json: any; raw: string }
+interface Res { status: number; json: any; raw: string; headers: http.IncomingHttpHeaders }
 
 function request(
   port: number, method: string, path: string,
-  opts: { token?: string; draftToken?: string; body?: unknown } = {},
+  opts: { token?: string; draftToken?: string; body?: unknown; headers?: Record<string, string> } = {},
 ): Promise<Res> {
   return new Promise((resolve, reject) => {
     const payload = opts.body !== undefined ? JSON.stringify(opts.body) : null;
@@ -70,6 +70,7 @@ function request(
           ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
           ...(opts.draftToken ? { 'X-Application-Token': opts.draftToken } : {}),
           ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
+          ...(opts.headers ?? {}),
         },
       },
       (res) => {
@@ -78,7 +79,7 @@ function request(
         res.on('end', () => {
           let parsed: any = null;
           try { parsed = raw ? JSON.parse(raw) : null; } catch { /* non-JSON */ }
-          resolve({ status: res.statusCode ?? 0, json: parsed, raw });
+          resolve({ status: res.statusCode ?? 0, json: parsed, raw, headers: res.headers });
         });
       },
     );
@@ -293,6 +294,23 @@ async function main() {
     const saved = await request(port, 'PATCH', `/api/public/organization-applications/${draftId}`, {
       draftToken, body: { application: APPLICATION },
     });
+    // ── The preflight, which is the part a browser does and curl does not ──
+    // Every call after the first carries `X-Application-Token`. A header that
+    // is not on the CORS allow-list fails the preflight, and a failed
+    // preflight surfaces in the form as "cannot reach server" — indis-
+    // tinguishable, to the applicant, from a backend that is down.
+    const preflight = await request(port, 'OPTIONS', `/api/public/organization-applications/${draftId}`, {
+      headers: {
+        Origin: 'http://localhost:5173',
+        'Access-Control-Request-Method': 'PATCH',
+        'Access-Control-Request-Headers': 'content-type,x-application-token',
+      },
+    });
+    const allowHeaders = String(preflight.headers['access-control-allow-headers'] ?? '');
+    check('the browser preflight for a draft save passes', preflight.status < 300, `got ${preflight.status}`);
+    check('...and the draft token header is allowed', /x-application-token/i.test(allowHeaders),
+      `allow-headers: ${allowHeaders}`);
+
     check('every section saves', saved.status === 200, `got ${saved.status} ${saved.raw.slice(0, 200)}`);
     check('and reads back', saved.json?.draft?.application?.branding?.appName === 'Lakeside Academy');
     check('the applicant never sees staff-only fields',
@@ -301,8 +319,36 @@ async function main() {
     const resumed = await request(port, 'GET', `/api/public/organization-applications/${draftId}`, { draftToken });
     check('a draft can be resumed later', resumed.json?.draft?.application?.academic?.subjects?.length === 3);
 
+    // The applicant has to be able to SEE the logo they uploaded, and the
+    // stored object is private — so the resume response carries a signed view
+    // of each asset beside the draft. With nothing uploaded it is empty, not
+    // missing: the form reads it unconditionally.
+    check('resuming returns an assets list', Array.isArray(resumed.json?.assets),
+      `got ${JSON.stringify(resumed.json?.assets)}`);
+    check('...empty when nothing has been uploaded', resumed.json?.assets?.length === 0);
+    check('the storage path is never handed to the applicant',
+      !/storagePath|applications\//.test(resumed.raw), resumed.raw.slice(0, 200));
+
     /* ══ 4. Asset validation ════════════════════════════════════════════ */
     console.log('\nasset validation (rejections only — storage is production)');
+
+    // ── The middleware gate, ahead of the service's own rules ─────────────
+    // The route used to sit behind the shared `upload` middleware, whose
+    // fileFilter accepts PDF and raster images and NOT image/svg+xml — while
+    // this service's ALLOWED_MIME does accept SVG and the onboarding form
+    // tells applicants an SVG is the best thing to send. The recommended file
+    // was refused with a 500 before the service that allows it ever ran.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { acceptsBrandAssetFile } = require('../../src/middlewares/uploadBrandAsset');
+    check('an SVG logo reaches the service', acceptsBrandAssetFile('logo.svg', 'image/svg+xml'));
+    check('...even when the client mislabels its type',
+      acceptsBrandAssetFile('logo.svg', 'application/octet-stream'));
+    check('a PNG logo reaches the service', acceptsBrandAssetFile('logo.png', 'image/png'));
+    check('a JPEG logo reaches the service', acceptsBrandAssetFile('logo.jpg', 'image/jpeg'));
+    check('a WebP logo reaches the service', acceptsBrandAssetFile('logo.webp', 'image/webp'));
+    check('a document is refused at the door', !acceptsBrandAssetFile('brochure.docx',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'));
+    check('...and so is a PDF, which is not a logo', !acceptsBrandAssetFile('logo.pdf', 'application/pdf'));
 
     // Multipart through a plain http client is awkward; the service-level
     // checks are exercised directly, which is where the rules actually live.

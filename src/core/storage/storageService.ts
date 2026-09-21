@@ -355,6 +355,61 @@ export async function putApplicationAsset(input: {
 }
 
 /**
+ * One of an organization's five NATIVE assets — the images a mobile build
+ * compiles in.
+ *
+ * ── Why these are not `putTenantFile` ───────────────────────────────────────
+ * They are uploaded by platform staff from the console, which runs with no
+ * tenant context of its own, and they are consumed by a build worker that is
+ * likewise not serving a tenant. `putTenantFile` would fail closed on both
+ * counts, correctly — so these live in their own prefix keyed by organization
+ * id, exactly as application assets do, and are PRIVATE.
+ *
+ * ── Why the server holds them at all ────────────────────────────────────────
+ * Until now the five images lived only in the app repository, and whether they
+ * existed was a checkbox a human ticked. A build worker cannot see a developer's
+ * checkout, so an automated build needs the bytes somewhere it can reach. This
+ * is that somewhere.
+ */
+export async function putOrgNativeAsset(input: {
+  buffer: Buffer;
+  orgId: string;
+  fileName: string;
+  contentType: string;
+  kind: string;
+}): Promise<StoredFile> {
+  const fileId = newFileId();
+  const safeOrg = sanitizeSegment(input.orgId);
+  const safeKind = sanitizeSegment(input.kind);
+  const safeName = sanitizeSegment(input.fileName);
+  const storagePath = `organizations/${safeOrg}/native/${safeKind}/${fileId}_${safeName}`;
+
+  const file = getBucket().file(storagePath);
+  await file.save(input.buffer, {
+    contentType: input.contentType,
+    metadata: {
+      contentType: input.contentType,
+      metadata: { orgId: safeOrg, kind: safeKind, originalName: safeName },
+    },
+  });
+
+  return {
+    storagePath,
+    fileId,
+    fileName: input.fileName,
+    contentType: input.contentType,
+    size: input.buffer.length,
+    orgId: safeOrg,
+  };
+}
+
+/** Read one stored object back as bytes. The build worker's only download path. */
+export async function downloadUnchecked(storagePath: string): Promise<Buffer> {
+  const [contents] = await getBucket().file(storagePath).download();
+  return contents;
+}
+
+/**
  * Sign without an ownership check.
  *
  * For callers that have ALREADY authorized the file by another route — a
