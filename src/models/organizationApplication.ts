@@ -85,6 +85,17 @@ export interface IApplicationBranding {
   faviconAssetId?: string;
 }
 
+/**
+ * What the institute chose about its app beyond its name and colours.
+ *
+ * Mixed rather than declared field by field, for the same reason the list
+ * sections below are: the shape is owned by `resolveBrandConfig` in
+ * core/platform/mobileBuildRules.ts, which validates, caps and defaults every
+ * value on its way into a build. Re-declaring it here would be a second
+ * definition to keep in step with that one, and the one that drifted would be
+ * this one — it is only ever written through, never read to decide anything.
+ */
+
 /** Mirrors `ConfigInput`, field for field, so approval is a direct mapping. */
 export interface IApplicationAcademic {
   classLevels?: { key: string; label: string; aliases?: string[]; order?: number; isActive?: boolean }[];
@@ -204,6 +215,8 @@ export interface IOrganizationApplicationAsset {
 export interface IOrganizationApplication {
   organization?: IApplicationOrganization;
   branding?: IApplicationBranding;
+  /** See the note above `IApplicationAcademic`. Shaped by resolveBrandConfig. */
+  appExperience?: Record<string, unknown>;
   academic?: IApplicationAcademic;
   policy?: IApplicationPolicy;
   modules?: IApplicationModules;
@@ -277,6 +290,8 @@ export const organizationApplicationSchema = new Schema<IOrganizationApplication
       required: false,
       _id: false,
     },
+
+    appExperience: { type: Schema.Types.Mixed, default: undefined },
 
     // Mixed for the list sections: they are shaped by `ConfigInput`, validated
     // in the service before anything is written, and re-declaring the shape

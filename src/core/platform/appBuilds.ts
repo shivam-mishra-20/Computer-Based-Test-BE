@@ -31,6 +31,13 @@ import { getMobileConfig } from './mobileBuild';
 import { nativeAssetState, syncAssetsReady } from './mobileAssets';
 import { isEasConfigured } from './easClient';
 import { profileNameFor } from './appBuildWorkspace';
+import type { SelectableBuildProfile } from './mobileBuildRules';
+import {
+  DEFAULT_BUILD_MS,
+  describeBuildProgress,
+  expectedDurationFrom,
+  type BuildProgressView,
+} from './buildProgress';
 
 export class BuildNotAllowed extends Error {
   readonly code = 'BUILD_NOT_ALLOWED';
@@ -64,6 +71,14 @@ async function loadOrg(orgId: string): Promise<Record<string, any> | null> {
 
 export interface BuildReadiness {
   ready: boolean;
+  /**
+   * The profile these answers are about.
+   *
+   * Echoed back because the console asks for one and renders the result; a
+   * panel that says "not ready" without saying what it was judged against is
+   * the disagreement this field exists to make impossible.
+   */
+  profile: SelectableBuildProfile;
   /** Sentences an administrator can act on. Never a stack trace. */
   problems: string[];
   appVersion: string;
@@ -101,13 +116,17 @@ export interface BuildReadiness {
  * fixing four things one refusal at a time is four round trips through a
  * console they did not want to be in.
  */
-export async function buildReadiness(orgId: string): Promise<BuildReadiness> {
+export async function buildReadiness(
+  orgId: string,
+  profile: SelectableBuildProfile = 'production',
+): Promise<BuildReadiness> {
   const problems: string[] = [];
 
   const org = await loadOrg(orgId);
   if (!org) {
     return {
       ready: false,
+      profile,
       problems: ['That organization no longer exists.'],
       appVersion: '',
       slug: '',
@@ -127,7 +146,7 @@ export async function buildReadiness(orgId: string): Promise<BuildReadiness> {
   // right reason — see `syncAssetsReady`.
   await syncAssetsReady(orgId);
 
-  const view = await getMobileConfig(orgId, 'production');
+  const view = await getMobileConfig(orgId, profile);
   for (const issue of view.issues ?? []) {
     problems.push(issue.message ?? String(issue));
   }
@@ -166,6 +185,7 @@ export async function buildReadiness(orgId: string): Promise<BuildReadiness> {
   const id = view.identity ?? ({} as Record<string, any>);
   return {
     ready: problems.length === 0,
+    profile,
     problems,
     appVersion: String(org.mobile?.version ?? '1.0.0'),
     slug: String(id.slug ?? org.slug ?? ''),
@@ -215,6 +235,13 @@ export interface StartBuildInput {
   requestedByEmail?: string;
   /** Supersede a live build of the same shape instead of returning it. */
   force?: boolean;
+  /**
+   * What the artifact is for, which is the only thing that varies the rules.
+   *
+   * Defaults to `production`, so a caller that does not know about this — an
+   * older console, a script — gets the strict answer it used to get.
+   */
+  appProfile?: SelectableBuildProfile;
 }
 
 export interface StartBuildResult {
@@ -254,7 +281,12 @@ async function nextBuildNumber(orgId: string): Promise<number> {
  * returns the first call's result with `created: false`.
  */
 export async function startBuild(input: StartBuildInput): Promise<StartBuildResult> {
-  const readiness = await buildReadiness(input.orgId);
+  const appProfile = input.appProfile ?? 'production';
+  // Re-validated here rather than trusted from the readiness call the console
+  // made: the browser could have asked about `preview`, been told it was
+  // ready, and then posted a build. Whatever profile the build runs under is
+  // the profile it is judged against, in the same request that creates it.
+  const readiness = await buildReadiness(input.orgId, appProfile);
   if (!readiness.ready) {
     throw new BuildNotAllowed('This organization is not ready to build.', readiness.problems);
   }
@@ -289,6 +321,10 @@ export async function startBuild(input: StartBuildInput): Promise<StartBuildResu
     platform: input.platform,
     artifactType: input.artifactType,
     buildProfile: profileNameFor(slug, input.artifactType),
+    // What the workspace will judge the configuration against, recorded on the
+    // job so the worker cannot pick a different one later and so the history
+    // shows which builds were internal.
+    appProfile,
     appVersion: readiness.appVersion,
     requestedBy: new mongoose.Types.ObjectId(input.requestedBy),
     requestedByEmail: input.requestedByEmail || (await staffEmail(input.requestedBy)),
@@ -339,8 +375,140 @@ export async function startBuild(input: StartBuildInput): Promise<StartBuildResu
  * a response body. Section 16 asks for a summary in the UI and the detail
  * server-side, and this is where that split is enforced rather than remembered.
  */
-export function publicBuildView(job: IAppBuildJob): Record<string, unknown> {
+/* ══════════════════════════════════════════════════════════════════════════
+   How long builds take
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * Remembered for a few minutes, per organization and artifact.
+ *
+ * The console polls a running build every four seconds, and each poll wants
+ * an expected duration. The answer only changes when a build finishes, which
+ * happens a handful of times a day — so recomputing a median from the job
+ * history on every poll would be a query per request for a number that is the
+ * same as last time.
+ */
+const EXPECTED_TTL_MS = 5 * 60_000;
+const expectedCache = new Map<string, { at: number; value: number }>();
+
+async function recentDurations(filter: Record<string, unknown>, limit: number): Promise<number[]> {
+  const rows = await withoutTenantScope('app-build:durations', async () =>
+    AppBuildJob.find({ ...filter, status: 'completed', buildDurationMs: { $gt: 0 } })
+      .sort({ completedAt: -1 })
+      .limit(limit)
+      .select('buildDurationMs')
+      .lean(),
+  );
+  return (rows as { buildDurationMs?: number }[])
+    .map((r) => Number(r.buildDurationMs))
+    .filter((n) => Number.isFinite(n) && n > 0);
+}
+
+/**
+ * How long a compile like this one usually takes.
+ *
+ * Reads only durations — numbers, never another organization's identity — so
+ * the platform-wide fallback leaks nothing. See `expectedDurationFrom` for the
+ * order in which the history is trusted.
+ */
+export async function expectedBuildDuration(
+  orgId: string,
+  artifactType: BuildArtifactType,
+): Promise<number> {
+  const key = `${orgId}:${artifactType}`;
+  const cached = expectedCache.get(key);
+  if (cached && Date.now() - cached.at < EXPECTED_TTL_MS) return cached.value;
+
+  try {
+    const [own, platform] = await Promise.all([
+      recentDurations({ orgId: new mongoose.Types.ObjectId(orgId), artifactType }, 10),
+      recentDurations({ artifactType }, 30),
+    ]);
+    const value = expectedDurationFrom(own, platform, artifactType);
+    expectedCache.set(key, { at: Date.now(), value });
+    return value;
+  } catch {
+    // An estimate is a courtesy. A failed lookup must never fail the request
+    // that asked for a build's status.
+    return DEFAULT_BUILD_MS[artifactType];
+  }
+}
+
+/**
+ * Where a build is, for the console's progress bar.
+ *
+ * Computed at READ time, from timestamps, rather than stored. The worker only
+ * writes when something happens, which during a compile is once a minute at
+ * best; the console reads every four seconds. Deriving the view per read is
+ * what lets the bar move between the worker's writes without anyone storing a
+ * number that is a guess.
+ */
+export function progressViewOf(
+  job: IAppBuildJob,
+  expectedBuildMs: number,
+  now = Date.now(),
+): BuildProgressView {
+  return describeBuildProgress({
+    status: job.status,
+    storedProgress: job.progress,
+    easStatus: job.easStatus,
+    queuedAt: job.queuedAt,
+    startedAt: job.startedAt,
+    stepStartedAt: job.updatedAt,
+    easSubmittedAt: job.easSubmittedAt,
+    buildingStartedAt: job.buildingStartedAt,
+    completedAt: job.completedAt,
+    failedAt: job.failedAt,
+    cancelledAt: job.cancelledAt,
+    queuePosition: job.queuePosition,
+    initialQueuePosition: job.initialQueuePosition,
+    estimatedWaitSeconds: job.estimatedWaitSeconds,
+    expectedBuildMs,
+    now,
+  });
+}
+
+/**
+ * Builds as the console receives them, each with its progress view.
+ *
+ * One expected-duration lookup per organization and artifact type in the set,
+ * not one per build — a history page of twenty-five builds is still at most a
+ * couple of cached lookups.
+ */
+export async function publicBuildViews(jobs: IAppBuildJob[]): Promise<Record<string, unknown>[]> {
+  const now = Date.now();
+  const expected = new Map<string, number>();
+  for (const job of jobs) {
+    const key = `${String(job.orgId)}:${job.artifactType}`;
+    if (!expected.has(key)) {
+      expected.set(key, await expectedBuildDuration(String(job.orgId), job.artifactType));
+    }
+  }
+  return jobs.map((job) =>
+    publicBuildView(job, {
+      expectedBuildMs: expected.get(`${String(job.orgId)}:${job.artifactType}`),
+      now,
+    }),
+  );
+}
+
+export async function publicBuildViewOf(job: IAppBuildJob): Promise<Record<string, unknown>> {
+  const [view] = await publicBuildViews([job]);
+  return view;
+}
+
+export function publicBuildView(
+  job: IAppBuildJob,
+  context: { expectedBuildMs?: number; now?: number } = {},
+): Record<string, unknown> {
+  const expectedBuildMs = context.expectedBuildMs ?? DEFAULT_BUILD_MS[job.artifactType];
   return {
+    progressView: progressViewOf(job, expectedBuildMs, context.now),
+    // Timestamps the console formats itself ("Running 6m 12s"), exposed
+    // because they are facts about the build rather than about anyone.
+    easSubmittedAt: job.easSubmittedAt,
+    buildingStartedAt: job.buildingStartedAt,
+    buildDurationMs: job.buildDurationMs,
     id: String(job._id),
     buildNumber: job.buildNumber,
     orgId: String(job.orgId),
@@ -348,6 +516,7 @@ export function publicBuildView(job: IAppBuildJob): Record<string, unknown> {
     platform: job.platform,
     artifactType: job.artifactType,
     buildProfile: job.buildProfile,
+    appProfile: job.appProfile,
     appVersion: job.appVersion,
     requestedByEmail: job.requestedByEmail,
     status: job.status,

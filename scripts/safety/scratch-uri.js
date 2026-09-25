@@ -35,10 +35,17 @@ if (!match) {
 }
 
 const productionDb = match[2];
-if (target === productionDb) {
+// Production is `abhigyangurukul`; `abhigyangurukul_console` is the main
+// database .env points at. This used to refuse only the .env database, so it
+// would print a working URI for production itself. Now it applies the same
+// rule as assertNotProduction: protected names never, and nothing without a
+// scratch marker.
+const PROTECTED = new Set(['abhigyangurukul', 'abhigyangurukul_console', String(productionDb).toLowerCase()]);
+const isScratch = /(^|[_-])(scratch|restore|rehearsal|verify)([_-]|$)/i.test(target);
+if (PROTECTED.has(String(target).toLowerCase()) || !isScratch) {
   console.error(
-    `Refusing to print a URI for "${target}" — that is the production database.\n` +
-      'Name a scratch database instead.',
+    `Refusing to print a URI for "${target}". Only a scratch database (_scratch, _restore, _rehearsal,\n` +
+      '_verify) — never the production or main database.',
   );
   process.exit(2);
 }

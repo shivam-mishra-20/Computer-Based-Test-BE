@@ -198,6 +198,20 @@ export interface EasBuild {
   errorCode?: string;
   errorMessage?: string;
   platform?: string;
+  /**
+   * Queue and timing, straight from `build:view --json`. The CLI's
+   * BuildFragment has carried these all along; they were simply not read.
+   */
+  queuePosition?: number;
+  initialQueuePosition?: number;
+  estimatedWaitTimeLeftSeconds?: number;
+  /** Unit undocumented — see normaliseEasDuration before using it. */
+  buildDuration?: number;
+}
+
+function numberOrUndefined(value: unknown): number | undefined {
+  const n = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(n) ? n : undefined;
 }
 
 function normalizeBuild(raw: Record<string, any>): EasBuild {
@@ -210,6 +224,10 @@ function normalizeBuild(raw: Record<string, any>): EasBuild {
     errorCode: raw.error?.errorCode ?? undefined,
     errorMessage: raw.error?.message ?? undefined,
     platform: raw.platform ? String(raw.platform).toLowerCase() : undefined,
+    queuePosition: numberOrUndefined(raw.queuePosition),
+    initialQueuePosition: numberOrUndefined(raw.initialQueuePosition),
+    estimatedWaitTimeLeftSeconds: numberOrUndefined(raw.estimatedWaitTimeLeftSeconds),
+    buildDuration: numberOrUndefined(raw.metrics?.buildDuration),
   };
 }
 
@@ -408,6 +426,58 @@ export async function getEasBuild(buildId: string, cwd: string): Promise<EasBuil
   const parsed = parseJson(stdout);
   const first = Array.isArray(parsed) ? parsed[0] : parsed;
   return normalizeBuild((first ?? {}) as Record<string, any>);
+}
+
+export type EasProjectDeletion =
+  | { deleted: true; alreadyGone: boolean }
+  | { deleted: false; reason: string };
+
+/**
+ * Permanently delete an organization's EAS project — its builds, artifacts
+ * and environment variables go with it.
+ *
+ * `--dangerously-confirm-deletion` carries the full name the caller EXPECTS
+ * (`@owner/<organization slug>`), and the CLI refuses unless the project with
+ * this id really has that name. That is the safety net against deleting a
+ * project that merely happens to be referenced — for instance one created under
+ * the generic app's name before `initEasProject` set ORG_ID.
+ *
+ * A project that no longer exists counts as deleted, but only when Expo's
+ * answer names THIS id: "not found" alone could be the CLI itself missing.
+ *
+ * Expo may demand "sudo mode" (the owner re-entering a password) for this,
+ * which a server token cannot give. That is reported, never papered over —
+ * the caller keeps the organization's deletion incomplete.
+ */
+export async function deleteEasProject(input: { id: string; fullName: string; cwd: string }): Promise<EasProjectDeletion> {
+  requireExpoToken();
+  const { stdout, stderr, exitCode } = await runEas(
+    ['project:delete', input.id, '--dangerously-confirm-deletion', input.fullName, '--non-interactive', '--json'],
+    input.cwd,
+    5 * 60 * 1000,
+  );
+  if (exitCode === 0) return { deleted: true, alreadyGone: false };
+
+  const text = redactSecrets(`${stderr}\n${stdout}`);
+  const escapedId = input.id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (new RegExp(`${escapedId}[^\\n]*(does not exist|not found|could not be found)`, 'i').test(text)) {
+    return { deleted: true, alreadyGone: true };
+  }
+  if (/sudo mode/i.test(text)) {
+    return {
+      deleted: false,
+      reason:
+        'Expo only deletes a project after its owner re-enters their password ("sudo mode"), which a server token cannot do.',
+    };
+  }
+  if (/did not match the project's full name/i.test(text)) {
+    return {
+      deleted: false,
+      reason: `The Expo project with this id is not named ${input.fullName}, so it may not belong to this organization alone. It was not deleted.`,
+    };
+  }
+  const firstLine = text.split('\n').map((l) => l.trim()).find(Boolean) ?? '';
+  return { deleted: false, reason: `Expo did not delete the project${firstLine ? `: ${firstLine.slice(0, 200)}` : '.'}` };
 }
 
 /**

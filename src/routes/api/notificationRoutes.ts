@@ -1,5 +1,6 @@
+import { requireStaffPermission } from '../../middlewares/requirePermission';
 import { Router } from 'express';
-import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
+import { authMiddleware} from '../../middlewares/authMiddleware';
 import {
   getUserNotifications,
   markNotificationAsRead,
@@ -32,7 +33,7 @@ router.post('/test-push', authMiddleware, sendTestPush);
 router.delete('/:id', authMiddleware, deleteNotification);
 
 // Admin/System endpoints for creating notifications
-router.post('/', authMiddleware, requireRole('admin'), createNotification);
-router.post('/bulk', authMiddleware, requireRole('admin'), createBulkNotifications);
+router.post('/', authMiddleware, requireStaffPermission('notifications.send'), createNotification);
+router.post('/bulk', authMiddleware, requireStaffPermission('notifications.send'), createBulkNotifications);
 
 export default router;

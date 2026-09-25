@@ -5,7 +5,14 @@ import { uploadToFirebase } from '../services/firebaseService';
 import { normalizeClassValue, toClassLabel } from '../config/studentBatchConfig';
 import { getStudentBatchConfigFromDatabase, matchBatchName } from '../services/batchConfigService';
 import { putPublicTenantAsset } from '../core/storage/storageService';
-import { signSessionToken } from '../core/auth/tokens';
+import { signSessionToken, signSessionPair } from '../core/auth/tokens';
+import { currentOrgId } from '../core/tenancy/context';
+import { logAudit } from '../utils/logger';
+import {
+  RegistrationRefused,
+  registerPublicly,
+  registrationPolicyFor,
+} from '../core/registration/publicRegistration';
 
 const normalizeRegistrationSource = (value: unknown): 'website' | 'app' | 'unknown' => {
   const source = typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -169,39 +176,90 @@ export const publicTeacherRegister = async (req: Request, res: Response) => {
   }
 };
 
+/**
+ * Public registration, per application.
+ *
+ * The whole decision — deployment gate, the organization's own policy, the
+ * role, the details, duplicates, and WHERE the registration is stored — lives in
+ * core/registration/publicRegistration.ts, so this handler only translates
+ * between HTTP and that service. Nothing here reads an organization, a role or
+ * a collection from the body: the organization comes from the tenancy
+ * middleware's context (resolved from the app's routing hint), and the declared
+ * application from `X-App-Id`, which is checked against it, never used to pick.
+ */
 export const register = async (req: Request, res: Response) => {
-  // By default, public self-registration is disabled.
-  if (process.env.ALLOW_PUBLIC_REGISTER !== 'true') {
-    return res.status(405).json({
-      message: 'Public registration is disabled. Ask an administrator to create your account.',
-    });
-  }
-
-  const { name, email, password, phone, registrationSource } = req.body;
-  const lcEmail = typeof email === 'string' ? email.toLowerCase() : email;
   try {
-    if (!name || !email || !password || !phone) {
-      return res.status(400).json({ message: 'Name, email, password and phone are required' });
+    const result = await registerPublicly({
+      orgId: currentOrgId(),
+      declaredApplication: req.header('X-App-Id') ?? null,
+      body: (req.body ?? {}) as Record<string, unknown>,
+      source: normalizeRegistrationSource(req.body?.registrationSource),
+      ip: req.ip,
+    });
+
+    // Recorded against the account it created; stamped with the organization
+    // by the tenancy layer, because this runs inside that organization's
+    // request context.
+    await logAudit(result.userId, 'auth.public-registration', result.registrationId, {
+      role: result.role,
+      status: result.status,
+      application: req.header('X-App-Id') || null,
+    });
+
+    if (result.status === 'pending') {
+      // No token. The account exists and cannot be used until someone at the
+      // institute approves it; the app sends the person to the waiting screen.
+      return res.status(201).json({
+        status: 'pending',
+        role: result.role,
+        message:
+          result.role === 'teacher'
+            ? 'Your teaching account has been created and is waiting for your institute to approve it.'
+            : result.role === 'parent'
+              ? 'Your parent account has been created. Your institute will confirm your link to your ward before you can sign in.'
+              : 'Your account has been created and is waiting for your institute to approve it.',
+      });
     }
 
-    const existing = await User.findOne({ email: lcEmail });
-    if (existing) return res.status(400).json({ message: 'User already exists' });
-
-  const user = new User({
-    name,
-    email: lcEmail,
-    password,
-    phone,
-    role: 'student',
-    status: 'approved',
-    registrationSource: normalizeRegistrationSource(registrationSource),
-  });
-    await user.save();
-
-  const token = signSessionToken({ id: String(user._id), role: user.role, orgId: (user as any).orgId });
-  res.status(201).json({ token, user: { id: user._id, name: user.name, email: user.email, role: user.role } });
+    const user = await User.findById(result.userId).select('name email role');
+    // A brand-new account: tokenVersion 0, so the token is revocable from day one.
+    const token = signSessionToken({ id: result.userId, role: result.role, orgId: result.orgId, tokenVersion: 0 });
+    return res.status(201).json({
+      status: 'approved',
+      token,
+      user: { id: result.userId, name: user?.name, email: user?.email, role: result.role },
+    });
   } catch (err) {
-    res.status(500).json({ message: 'Server error' });
+    if (err instanceof RegistrationRefused) {
+      return res.status(err.httpStatus).json({
+        message: err.message,
+        code: err.code,
+        ...(err.fields ? { fields: err.fields } : {}),
+      });
+    }
+    console.error('[register] failed:', (err as Error)?.message);
+    return res.status(500).json({ message: 'Registration could not be completed. Please try again shortly.' });
+  }
+};
+
+/**
+ * What the register screen should show, for this app, right now.
+ *
+ * Read live rather than trusted from the build: an institute that switches
+ * registration on does not have to ship a new APK for its students to see the
+ * form, and one that switches it off is not still showing a form the server
+ * will refuse.
+ */
+export const registrationPolicy = async (_req: Request, res: Response) => {
+  try {
+    const view = await registrationPolicyFor(currentOrgId());
+    // Short, because an institute that has just opened registration should not
+    // have to wait long for its app to notice.
+    res.setHeader('Cache-Control', 'private, max-age=30');
+    return res.json(view);
+  } catch (err) {
+    console.error('[registration-policy] failed:', (err as Error)?.message);
+    return res.status(500).json({ message: 'Could not load registration settings.' });
   }
 };
 
@@ -244,10 +302,35 @@ export const login = async (req: Request, res: Response) => {
     // Carries `orgId` so a claim-mode deployment knows which organization this
     // session belongs to. Same shape and same expiry as before otherwise — see
     // core/auth/tokens.ts for why this is not a `tenant`-audience token.
+    // Revocable (`tv`), and refreshable when the client can refresh. A client
+    // that does not ask gets the legacy shape — see core/auth/tokens.
+    const tokenVersion = Number((user as any).tokenVersion ?? 0) || 0;
+    if (req.body?.session === 'refresh') {
+      const pair = signSessionPair({
+        id: String(user._id),
+        role: user.role,
+        orgId: (user as any).orgId,
+        tokenVersion,
+      });
+      return res.json({
+        ...pair,
+        user: {
+          _id: user._id,
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          status: user.status,
+          classLevel: (user as any).classLevel,
+          batch: (user as any).batch,
+        },
+      });
+    }
     const token = signSessionToken({
       id: String(user._id),
       role: user.role,
       orgId: (user as any).orgId,
+      tokenVersion,
     });
     console.log(`Login debug: mongodb-local auth succeeded for ${lcEmail}`);
     return res.json({
@@ -344,8 +427,8 @@ export const changePassword = async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'Current password and new password are required' });
     }
     
-    if (newPassword.length < 6) {
-      return res.status(400).json({ message: 'New password must be at least 6 characters' });
+    if (String(newPassword).length < 8) {
+      return res.status(400).json({ message: 'New password must be at least 8 characters' });
     }
 
     const user = await User.findById(current.id);
@@ -357,11 +440,19 @@ export const changePassword = async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'Current password is incorrect' });
     }
 
-    // Update password (will be hashed by pre-save hook)
+    // Update password (will be hashed by pre-save hook). Every other session
+    // is signed out; this one gets a fresh token so it carries on.
     user.password = newPassword;
+    user.tokenVersion = (Number(user.tokenVersion) || 0) + 1;
     await user.save();
 
-    res.json({ message: 'Password changed successfully' });
+    const token = signSessionToken({
+      id: String(user._id),
+      role: user.role,
+      orgId: (user as any).orgId,
+      tokenVersion: user.tokenVersion,
+    });
+    res.json({ message: 'Password changed successfully', token });
   } catch (err) {
     console.error('Change password error:', err);
     res.status(500).json({ message: 'Server error while changing password' });

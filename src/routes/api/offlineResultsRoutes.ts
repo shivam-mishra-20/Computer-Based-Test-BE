@@ -1,3 +1,4 @@
+import { staffHolds } from '../../middlewares/requirePermission';
 import { Router, Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { authMiddleware } from '../../middlewares/authMiddleware';
@@ -228,7 +229,7 @@ router.get('/all', authMiddleware, async (req: Request, res: Response) => {
     const authUser = (req as any).user;
     const user = await User.findById(authUser.id);
     
-    if (!user || user.role !== 'admin') {
+    if (!user || !(await staffHolds(req, 'results.read', 'org.read'))) {
       return res.status(403).json({ error: 'Admin access required' });
     }
 

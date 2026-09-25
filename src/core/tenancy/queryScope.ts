@@ -1,77 +1,68 @@
 /**
  * Explicit organization scoping for individual queries.
  *
- * ── The gap this fills, and the trap it avoids ──────────────────────────────
- * The global plugin filters reads only under `TENANT_ENFORCEMENT=enforce`.
- * Production runs under `warn`, where the plugin stamps writes and leaves reads
- * completely alone — deliberately, because `orgId` is not backfilled and
- * filtering on a field almost no document carries would return nothing.
+ * ── Why explicit conditions still exist beside the plugin ───────────────────
+ * The global plugin narrows every Mongoose read for a known tenant (see
+ * `config.readFilterFor`). Handlers that serve tenant administrators ALSO say
+ * so themselves, for three reasons the plugin cannot cover:
  *
- * That is correct for the migration and insufficient for a claim-mode
- * deployment serving several institutes at once, where an unscoped
- * `Batch.find({})` hands every organization's batches to every organization.
- * The P6 end-to-end suite caught exactly that: Abhigyan's schedule form
- * offering ABC Coaching's "NEET", and ABC's teacher picker offering Abhigyan's
- * staff by name.
+ *   · raw driver calls and `$lookup` joins never pass through it;
+ *   · a reviewer reading a handler should see the scope, not infer it from a
+ *     global hook three directories away;
+ *   · a future change to the plugin must not silently widen an admin screen.
  *
- * The obvious fix — add `{ orgId }` to those queries — walks straight into the
- * trap this programme has now hit five times:
- *
- *     A safe default for TENANCY is not a safe default for BEHAVIOUR.
- *
- * On api-legacy, pinned to ORG_001 but with the backfill not yet run, no user
- * and no batch carries an `orgId`. An unconditional `{ orgId }` there does not
- * isolate anything; it empties every picker in production.
- *
- * ── The condition, and why it is the right one ──────────────────────────────
- * Scope when the data is known to carry `orgId`, and only then:
- *
- *   claim mode    Every organization on a claim-mode deployment was created
- *                 through onboarding, which stamps `orgId` on everything it
- *                 writes. There is no un-backfilled data to lose, and it is
- *                 the only mode where more than one tenant shares a process —
- *                 so it is both safe and necessary here.
- *
- *   enforce       Enforcement is only turned on after the backfill has run and
- *                 been verified; that is what the flip means. The plugin is
- *                 already filtering reads at this point, so this is belt and
- *                 braces rather than the mechanism.
- *
- *   otherwise     No scope, and therefore no behaviour change. Today's
- *                 production — no TENANT_* variables, no context at all —
- *                 lands here, as does a pinned api-legacy before its backfill.
- *
- * This is a stopgap with a known end date. The general answer is the enforce
- * flip, which filters every read rather than the handful named by callers of
- * this helper. It exists so the surfaces P6 is responsible for are correct
- * before that flip, not as a substitute for it.
+ * ── The filter ──────────────────────────────────────────────────────────────
+ * Exactly the plugin's: `{ orgId }` for every organization, and
+ * `{ orgId: { $in: [orgId, null] } }` for the legacy data owner until enforce,
+ * so its un-backfilled rows stay visible to it and to nobody else. With no
+ * tenant context at all — today's pre-migration production, or an explicit
+ * `withoutTenantScope` — it is `{}`, i.e. the pre-tenancy behaviour.
  */
 
 import { getTenantContext } from './context';
-import { tenantEnforcement } from './config';
+import { readFilterFor, tenancyConfigured, tenantMode } from './config';
+import { TenantContextMissing } from './errors';
+
+export type TenantFilter = Record<string, never> | { orgId: unknown };
 
 /**
- * `{ orgId }` when scoping is both safe and required, `{}` otherwise.
+ * The current tenant's filter, or `{}` where there is no tenant.
  *
  * Spread into a query:
  *   Batch.find({ ...tenantScope(), classLevels: '11' })
  */
-export function tenantScope(): Record<string, never> | { orgId: string } {
+export function tenantScope(): TenantFilter {
   const context = getTenantContext();
   if (!context?.orgId) return {};
-
-  // `session` is claim's twin — the organization came from the authenticated
-  // user's record instead of from a claim in their token. Same trust, same
-  // scoping; see the note on TenantContext.source.
-  if (context.source === 'claim' || context.source === 'session') {
-    return { orgId: context.orgId };
-  }
-  if (tenantEnforcement() === 'enforce') return { orgId: context.orgId };
-
-  return {};
+  return (readFilterFor(context.orgId) as TenantFilter | null) ?? {};
 }
 
 /** True when `tenantScope()` would actually narrow. Useful for logging and tests. */
 export function tenantScopeActive(): boolean {
   return 'orgId' in tenantScope();
+}
+
+/**
+ * `tenantScope()` for handlers that must never run unscoped.
+ *
+ * On a deployment that has adopted tenancy in claim mode there is no legitimate
+ * way for an authenticated tenant request to arrive here without a tenant —
+ * `authMiddleware` either establishes one or refuses — so its absence is a bug,
+ * and this fails closed instead of returning everyone's rows. Pre-migration
+ * production (no TENANT_* variables) and pinned mode keep today's behaviour.
+ */
+export function requireTenantScope(what = 'tenant-scoped query'): TenantFilter {
+  const context = getTenantContext();
+  if (!context?.orgId) {
+    if (tenancyConfigured() && tenantMode() === 'claim') {
+      throw new TenantContextMissing(what, 'read');
+    }
+    return {};
+  }
+  return (readFilterFor(context.orgId) as TenantFilter | null) ?? {};
+}
+
+/** The organization a tenant-scoped handler is acting for, or null when there is none. */
+export function currentTenantOrgId(): string | null {
+  return getTenantContext()?.orgId ?? null;
 }

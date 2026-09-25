@@ -1,10 +1,11 @@
+import { requireStaffPermission } from '../../middlewares/requirePermission';
 import { Router, Request, Response } from 'express';
 import User, { IUser } from '../../models/User';
 import Exam from '../../models/Exam';
 import Attempt from '../../models/Attempt';
 import Doubt from '../../models/Doubt';
 import Lecture from '../../models/Lecture';
-import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
+import { authMiddleware } from '../../middlewares/authMiddleware';
 import { uploadAiContent } from '../../middlewares/uploadAiContent';
 import { aiLimiter } from '../../middlewares/rateLimiter';
 import { buildClassVariants } from '../../utils/audienceTargeting';
@@ -34,7 +35,7 @@ const router = Router();
 // ── AI Content Generator (PPT / Question Paper / future tools) ──────────────
 // Unified endpoint; an optional uploaded file (PDF/PPTX/DOCX/image) routes
 // through the Vision/extraction pipeline. Teachers & admins only.
-const aiGuards = [authMiddleware, requireRole('teacher', 'admin'), aiLimiter];
+const aiGuards = [authMiddleware, requireStaffPermission('ai.generate'), aiLimiter];
 // Multer errors (unsupported type, >25MB) otherwise fall through to Express's
 // default HTML error page — the app can't parse that. Convert to clean 400 JSON
 // so the teacher sees the actual reason instead of a generic "Generation failed".
@@ -47,19 +48,19 @@ const aiUpload = (req: Request, res: Response, next: (err?: any) => void) => {
   });
 };
 router.post('/ai/generate', ...aiGuards, aiUpload, aiContentGenerate);
-router.get('/ai/history', authMiddleware, requireRole('teacher', 'admin'), aiContentListHistory);
-router.get('/ai/history/:id', authMiddleware, requireRole('teacher', 'admin'), aiContentGetHistory);
-router.delete('/ai/history/:id', authMiddleware, requireRole('teacher', 'admin'), aiContentDeleteHistory);
+router.get('/ai/history', authMiddleware, requireStaffPermission('ai.read'), aiContentListHistory);
+router.get('/ai/history/:id', authMiddleware, requireStaffPermission('ai.read'), aiContentGetHistory);
+router.delete('/ai/history/:id', authMiddleware, requireStaffPermission('ai.generate'), aiContentDeleteHistory);
 router.post('/ai/history/:id/regenerate', ...aiGuards, aiContentRegenerate);
-router.post('/ai/history/:id/cancel', authMiddleware, requireRole('teacher', 'admin'), aiContentCancel);
-router.post('/ai/history/:id/export-pdf', authMiddleware, requireRole('teacher', 'admin'), aiContentExportPdf);
+router.post('/ai/history/:id/cancel', authMiddleware, requireStaffPermission('ai.generate'), aiContentCancel);
+router.post('/ai/history/:id/export-pdf', authMiddleware, requireStaffPermission('ai.read'), aiContentExportPdf);
 // Two-phase ppt: approve the (edited) Lecture Blueprint → phase-2 generation.
 // NOT behind aiLimiter — approving doesn't start a fresh AI planning run.
-router.post('/ai/history/:id/blueprint/approve', authMiddleware, requireRole('teacher', 'admin'), aiContentApproveBlueprint);
+router.post('/ai/history/:id/blueprint/approve', authMiddleware, requireStaffPermission('ai.generate'), aiContentApproveBlueprint);
 // Reusable lecture-structure templates.
-router.get('/ai/blueprint-templates', authMiddleware, requireRole('teacher', 'admin'), aiListBlueprintTemplates);
-router.post('/ai/blueprint-templates', authMiddleware, requireRole('teacher', 'admin'), aiSaveBlueprintTemplate);
-router.delete('/ai/blueprint-templates/:id', authMiddleware, requireRole('teacher', 'admin'), aiDeleteBlueprintTemplate);
+router.get('/ai/blueprint-templates', authMiddleware, requireStaffPermission('exams.read'), aiListBlueprintTemplates);
+router.post('/ai/blueprint-templates', authMiddleware, requireStaffPermission('exams.create'), aiSaveBlueprintTemplate);
+router.delete('/ai/blueprint-templates/:id', authMiddleware, requireStaffPermission('exams.delete'), aiDeleteBlueprintTemplate);
 
 // GET - Teacher profile (read-only)
 router.get('/profile', authMiddleware, async (req: AuthRequest, res: Response) => {

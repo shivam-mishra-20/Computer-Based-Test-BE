@@ -1,8 +1,8 @@
 import { Router } from 'express';
-import { register, login, me, publicRegister, publicTeacherRegister, changePassword, updateProfile, uploadProfileImage, publicUploadProfileImage, publicStudentBatchConfig, deleteAccount } from '../../controllers/authController';
+import { register, registrationPolicy, login, me, publicRegister, publicTeacherRegister, changePassword, updateProfile, uploadProfileImage, publicUploadProfileImage, publicStudentBatchConfig, deleteAccount } from '../../controllers/authController';
 import { learnerRegister } from '../../controllers/learnerController';
 import { authMiddleware } from '../../middlewares/authMiddleware';
-import { authLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
+import { authLimiter, guardianVerifyLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
 import multer from 'multer';
 import { preservingTenantContextOn } from '../../core/tenancy/requestContext';
 
@@ -28,7 +28,10 @@ const upload = preservingTenantContextOn(multer({
 }));
 
 // POST endpoints used by clients (with rate limiting)
-router.post('/register', authLimiter, register);
+router.post('/register', authLimiter, guardianVerifyLimiter, register);
+// What this app's register screen should offer right now. Pre-authentication,
+// per organization, and it never names where anything is stored.
+router.get('/registration-policy', registrationPolicy);
 router.post('/public-register', authLimiter, publicRegister);
 router.post('/public-register-teacher', authLimiter, publicTeacherRegister);
 // Public Learner self-registration. Separate from /public-register (institute)

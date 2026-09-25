@@ -1,5 +1,7 @@
 import { Router } from 'express';
-import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
+import { authMiddleware } from '../../middlewares/authMiddleware';
+import { requireStaffAnyPermission } from '../../middlewares/requirePermission';
+import { requirePlatformOwnedOrg } from '../../middlewares/orgScopeGates';
 import {
   adminCreateSeries,
   adminCreateTest,
@@ -18,8 +20,11 @@ import {
 /**
  * Authoring routes for the public assessment catalogue.
  *
- * Guarded at the ROUTER level with `requireRole('admin', 'teacher')`, so no
- * handler can be reached without a staff role even if one forgot to check.
+ * Guarded at the ROUTER level — staff with the right to author or publish
+ * exams, in one of the PLATFORM'S OWN organizations — so no handler can be
+ * reached otherwise even if one forgot to check. These tests are published to
+ * the open internet under the platform's name; an institute that happens to
+ * have a teacher does not author the platform's catalogue.
  * Learners and guests have no path into this router at all — their surfaces are
  * /api/public (read) and /api/learner (own attempts).
  *
@@ -31,7 +36,7 @@ import {
  */
 const router = Router();
 
-router.use(authMiddleware, requireRole('admin', 'teacher'));
+router.use(authMiddleware, requireStaffAnyPermission('exams.create', 'exams.publish'), requirePlatformOwnedOrg('Public assessments'));
 
 // Promotion is declared before /:id so "promote" is never read as an id.
 router.post('/public-tests/promote', adminPromoteExam);

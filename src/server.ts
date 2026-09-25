@@ -164,6 +164,18 @@ connectDB().then(async () => {
       `ℹ️ [Worker ${WORKER_ID}] Mobile app build worker is DISABLED here (APP_BUILD_WORKER_EMBEDDED=false) — run \`npm run start:worker:app-build\``,
     );
   }
+
+  // An organization deletion that was running when the previous process
+  // stopped carries on from its last saved step. Each one is claimed
+  // atomically, so several workers booting together run it once.
+  import('./core/platform/orgDeletion')
+    .then(({ resumeStalledDeletions }) => resumeStalledDeletions())
+    .then((n: number) => {
+      if (n > 0) console.log(`♻️ [Worker ${WORKER_ID}] Resumed ${n} organization deletion(s)`);
+    })
+    .catch((err: unknown) => {
+      console.error(`⚠️ [Worker ${WORKER_ID}] Could not resume organization deletions:`, (err as Error)?.message);
+    });
 }).catch((err: any) => {
   console.error('Database connection failed at startup:', err);
 });

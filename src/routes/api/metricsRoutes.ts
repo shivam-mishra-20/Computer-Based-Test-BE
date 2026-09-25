@@ -1,13 +1,14 @@
 // Metrics routes for observability
+import { requireLegacyDataOwner } from '../../middlewares/orgScopeGates';
+import { requireStaffPermission } from '../../middlewares/requirePermission';
 import { Router, Request, Response } from 'express';
 import { getQueueMetrics, getRecentJobs } from '../../services/jobQueue';
 import { authMiddleware } from '../../middlewares/authMiddleware';
-import { requireRole } from '../../middlewares/authMiddleware';
 
 const router = Router();
 
 // Get queue metrics (admin only)
-router.get('/queue', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
+router.get('/queue', authMiddleware, requireStaffPermission('org.settings'), requireLegacyDataOwner('Queue metrics'), async (req: Request, res: Response) => {
   try {
     const metrics = getQueueMetrics();
     const recentJobs = getRecentJobs(10);

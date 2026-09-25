@@ -1,3 +1,4 @@
+import { requireStaffPermission } from '../../middlewares/requirePermission';
 import { Router } from 'express';
 import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
 import { studentProgressOverTime, examInsights, getStudentAnalytics } from '../../services/analyticsService';
@@ -16,7 +17,7 @@ router.get('/me/progress', authMiddleware, requireRole('student'), async (req, r
 });
 
 // Teacher/Admin can view exam insights
-router.get('/exams/:examId/insights', authMiddleware, requireRole('teacher', 'admin'), async (req, res) => {
+router.get('/exams/:examId/insights', authMiddleware, requireStaffPermission('analytics.read'), async (req, res) => {
   try {
     const data = await examInsights(req.params.examId);
     res.json(data);

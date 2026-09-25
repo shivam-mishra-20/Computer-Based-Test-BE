@@ -80,10 +80,14 @@ export function cacheMiddleware(options: CacheOptions = {}) {
 
       // Override json method to cache response
       res.json = function(data: any) {
-        // Cache the response
-        cacheService.set(cacheKey, data, ttl).catch(err => {
-          console.error('[Cache] Failed to cache response:', err);
-        });
+        // Cache successes only. A hit is replayed with res.json, i.e. as a 200,
+        // so a cached "not found" or "forbidden" came back as a 200 carrying an
+        // error body for the whole TTL.
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          cacheService.set(cacheKey, data, ttl).catch(err => {
+            console.error('[Cache] Failed to cache response:', err);
+          });
+        }
 
         // Call original json method
         return originalJson(data);

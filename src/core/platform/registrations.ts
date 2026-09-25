@@ -454,6 +454,11 @@ export async function approveRegistration(
   const onboarding = await onboardOrganization({
     organization: base.organization,
     branding: { ...(base.branding ?? {}), ...(input.branding ?? {}) },
+    // The third place the App Experience was dropped: this call re-lists the
+    // mapped input field by field, and it was not in the list. From the
+    // application only — there is no staff override for it at approval; an
+    // operator changes it afterwards on the organization's Registration tab.
+    appExperience: base.appExperience,
     locale: { ...(base.locale ?? {}), ...(input.locale ?? {}) },
     configuration: (input.configuration ?? base.configuration) as never,
     policy: { ...(base.policy ?? {}), ...(input.policy ?? {}) },

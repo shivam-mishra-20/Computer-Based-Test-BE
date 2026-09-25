@@ -70,16 +70,84 @@ export function pinnedOrgId(): string | null {
 }
 
 /**
- * Reads are filtered ONLY under enforce.
+ * The organization that owns data written before organizations existed.
  *
- * This is the single most important line in the migration. During the warn
- * period `orgId` has not been backfilled yet, so most documents do not carry
- * the field. Adding `{ orgId: X }` to a read at that point matches nothing and
- * every screen in production goes blank — the exact catastrophe warn mode
- * exists to avoid. Observation must not change results.
+ * Every document written before tenancy carries no `orgId`, and every one of
+ * them belongs to the institute the platform grew out of — there was no other.
+ * That is what makes `{ orgId: X }` unsafe as a blanket read filter during the
+ * migration (it would hide those rows from their owner) and what makes it SAFE
+ * for everyone else: no other organization has any un-attributed data to lose.
+ *
+ *   LEGACY_DATA_ORG_ID   explicit, for a claim-mode deployment that still serves
+ *                        the legacy institute's un-backfilled users.
+ *   pinned mode          the pinned organization — api-legacy IS that institute.
+ *   otherwise            none: un-attributed rows are visible to nobody.
+ */
+export function legacyDataOrgId(): string | null {
+  const explicit = (process.env.LEGACY_DATA_ORG_ID || '').trim();
+  if (explicit) return explicit;
+  return tenantMode() === 'pinned' ? pinnedOrgId() : null;
+}
+
+export type ReadScope = 'none' | 'strict' | 'legacy-inclusive';
+
+/**
+ * How reads are narrowed for a request scoped to `orgId`.
+ *
+ * ── Why this no longer waits for `enforce` ──────────────────────────────────
+ * It used to: reads were filtered ONLY under enforce, and under warn the plugin
+ * observed and changed nothing. That protected the legacy institute's
+ * un-backfilled rows, and it also meant that on a multi-tenant deployment one
+ * organization's administrator could list — and approve — another
+ * organization's users. Measured, not theorised: 11 of 17 admin endpoints
+ * leaked, and a cross-tenant approval succeeded.
+ *
+ * Both concerns are answered by scoping the filter to WHO is asking:
+ *
+ *   strict            `{ orgId: X }`. Every organization except the legacy
+ *                     owner — they were created through onboarding, which stamps
+ *                     everything, so there is nothing un-attributed to lose.
+ *   legacy-inclusive  `{ orgId: X or none }`. The legacy owner only, and only
+ *                     until enforce: its own rows plus the un-attributed ones
+ *                     (which are, by construction, its own), and never another
+ *                     organization's.
+ *   none              No tenant (pre-migration production, an explicit
+ *                     `withoutTenantScope`) or `TENANT_ENFORCEMENT=off`, the
+ *                     documented emergency escape hatch.
+ *
+ * `warn` therefore still means "do not throw on a missing context" and "the
+ * backfill has not run" — it no longer means "a known tenant may read other
+ * tenants' data". No tenant-facing request depends on `enforce` for isolation.
+ */
+export function readScopeFor(orgId: string | null | undefined): ReadScope {
+  if (!orgId) return 'none';
+  const enforcement = tenantEnforcement();
+  if (enforcement === 'off') return 'none';
+  if (enforcement === 'enforce') return 'strict';
+  return orgId === legacyDataOrgId() ? 'legacy-inclusive' : 'strict';
+}
+
+/** The filter `readScopeFor` describes, ready to merge into a query; null for none. */
+export function readFilterFor(orgId: string | null | undefined): Record<string, unknown> | null {
+  switch (readScopeFor(orgId)) {
+    case 'strict':
+      return { orgId };
+    case 'legacy-inclusive':
+      // `$in` with null matches a missing field as well as an explicit null.
+      return { orgId: { $in: [orgId, null] } };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Are reads for a known tenant filtered at all? True in every mode but `off`.
+ *
+ * Kept for callers that only need the yes/no; the shape of the filter comes
+ * from `readFilterFor`, because it differs for the legacy owner.
  */
 export function shouldFilterReads(): boolean {
-  return tenantEnforcement() === 'enforce';
+  return tenantEnforcement() !== 'off';
 }
 
 /**

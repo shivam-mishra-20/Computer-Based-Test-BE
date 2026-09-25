@@ -570,3 +570,65 @@ export async function putPublicTenantAsset(input: PutTenantFileInput): Promise<S
     url: `https://storage.googleapis.com/${bucket.name}/${storagePath}`,
   };
 }
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Whole-prefix removal — organization deletion only
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The only prefixes a bulk delete may ever name.
+ *
+ * `organizations/<orgId>/` holds every tenant file, public tenant asset and
+ * native build asset; `applications/<registrationId>/` holds an onboarding
+ * application's uploads. Both ids are 24-hex ObjectIds, and the trailing slash
+ * is required — without it `organizations/abc` would also match
+ * `organizations/abcdef…`, another organization's files. Anything else — a
+ * legacy path, the bucket root, a `..` — is refused before the bucket is
+ * touched.
+ */
+const DELETABLE_PREFIX = /^(organizations|applications)\/[a-f0-9]{24}\/$/;
+
+export class StoragePrefixRefused extends Error {
+  constructor(prefix: string) {
+    super(`Refusing to touch storage prefix "${prefix}".`);
+    this.name = 'StoragePrefixRefused';
+  }
+}
+
+function assertDeletablePrefix(prefix: string): void {
+  if (!DELETABLE_PREFIX.test(prefix)) throw new StoragePrefixRefused(prefix);
+}
+
+/** How many objects live under one organization- or application-owned prefix. */
+export async function countStoragePrefix(prefix: string): Promise<number> {
+  assertDeletablePrefix(prefix);
+  const [files] = await getBucket().getFiles({ prefix, autoPaginate: true });
+  return files.length;
+}
+
+/**
+ * Delete every object under one organization- or application-owned prefix.
+ *
+ * Paged, and idempotent: a retry after a partial run finds fewer objects and
+ * deletes those. Returns how many it removed this call.
+ */
+export async function deleteStoragePrefix(prefix: string): Promise<number> {
+  assertDeletablePrefix(prefix);
+  let removed = 0;
+  for (;;) {
+    const [files] = await getBucket().getFiles({ prefix, maxResults: 200, autoPaginate: false });
+    if (!files.length) return removed;
+    let thisPage = 0;
+    for (const file of files as { name: string; delete: (o: unknown) => Promise<unknown> }[]) {
+      // Belt and braces: the listing is by prefix, but each name is checked
+      // again before deletion so a bucket quirk can never widen the scope.
+      if (!file.name.startsWith(prefix)) continue;
+      await file.delete({ ignoreNotFound: true });
+      thisPage++;
+    }
+    removed += thisPage;
+    // A page that yielded nothing deletable would come back identical for
+    // ever. Stop; the caller's verification reports what is left.
+    if (!thisPage) return removed;
+  }
+}

@@ -512,11 +512,20 @@ async function main() {
 
       /* ══ 10. APK vs AAB are different EAS configurations ══════════════ */
       console.log('\nartifact configuration');
-      const apkJson = JSON.parse(easJsonFor({ profileName: 'p-apk', slug: 's', artifactType: 'apk', apiBaseUrl: 'https://x/api' }));
-      const aabJson = JSON.parse(easJsonFor({ profileName: 'p-aab', slug: 's', artifactType: 'aab', apiBaseUrl: 'https://x/api' }));
+      const apkJson = JSON.parse(easJsonFor({ profileName: 'p-apk', slug: 's', artifactType: 'apk', apiBaseUrl: 'https://x/api', appProfile: 'production' }));
+      const aabJson = JSON.parse(easJsonFor({ profileName: 'p-aab', slug: 's', artifactType: 'aab', apiBaseUrl: 'https://x/api', appProfile: 'production' }));
+      const previewJson = JSON.parse(easJsonFor({ profileName: 'p-prev', slug: 's', artifactType: 'apk', apiBaseUrl: 'http://192.168.1.9:5000/api', appProfile: 'preview' }));
       check('APK builds with android.buildType = apk', apkJson.build['p-apk'].android.buildType === 'apk');
       check('AAB builds with android.buildType = app-bundle', aabJson.build['p-aab'].android.buildType === 'app-bundle');
       check('the organization is injected as ORG_ID', apkJson.build['p-apk'].env.ORG_ID === 's');
+
+      // Without APP_PROFILE the app's own validator falls back to
+      // 'development' — EAS_BUILD_PROFILE is the profile NAME, which is not one
+      // of the three it accepts. The console would gate on production while the
+      // build judged itself by the loosest rules there are.
+      check('the build is told which profile it is', apkJson.build['p-apk'].env.APP_PROFILE === 'production');
+      check('...and an internal build says so rather than inheriting it', previewJson.build['p-prev'].env.APP_PROFILE === 'preview');
+      check('an internal build may carry a plaintext address', previewJson.build['p-prev'].env.EXPO_PUBLIC_API_BASE_URL === 'http://192.168.1.9:5000/api');
 
       /* ══ 11. Following the build ══════════════════════════════════════ */
       console.log('\nfollowing the build');

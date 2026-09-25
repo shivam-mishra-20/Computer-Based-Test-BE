@@ -1,5 +1,6 @@
 import { Router } from 'express';
-import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
+import { authMiddleware } from '../../middlewares/authMiddleware';
+import { requireStaffAnyPermission, requireStaffPermission } from '../../middlewares/requirePermission';
 import { invalidateCacheOn } from '../../utils/cacheHelpers';
 import {
   listReviewTestsCtrl,
@@ -25,7 +26,13 @@ import {
 const router = Router();
 
 // All review endpoints are teacher/admin only.
-router.use(authMiddleware, requireRole('teacher', 'admin'));
+router.use(authMiddleware, requireStaffAnyPermission('attempts.grade', 'results.publish'));
+
+const grade = requireStaffPermission('attempts.grade');
+const publish = requireStaffPermission('results.publish');
+const override = requireStaffPermission('results.override');
+const editExam = requireStaffPermission('exams.update');
+const maintenance = requireStaffPermission('org.settings');
 
 // Publishing/recomputing changes what students see — clear the per-user
 // assigned-exams and attempts caches so newly published results (or score
@@ -34,24 +41,24 @@ const invalidateStudentResultCaches = invalidateCacheOn({ patterns: ['assigned-e
 
 // Specific routes first so they aren't shadowed by the `/:examId` patterns.
 router.get('/tests', listReviewTestsCtrl);
-router.post('/bulk/publish', invalidateStudentResultCaches, bulkPublishCtrl);
-router.post('/bulk/recompute', bulkRecomputeCtrl);
-router.post('/backfill', requireRole('admin'), backfillCtrl);
-router.post('/cleanup-duplicates', requireRole('admin'), cleanupDuplicatesCtrl);
-router.patch('/attempts/:attemptId/score', adjustSubjectiveCtrl);
-router.patch('/attempts/:attemptId/manual-score', setManualScoreCtrl);
-router.delete('/attempts/:attemptId', deleteAttemptCtrl);
+router.post('/bulk/publish', publish, invalidateStudentResultCaches, bulkPublishCtrl);
+router.post('/bulk/recompute', override, bulkRecomputeCtrl);
+router.post('/backfill', maintenance, backfillCtrl);
+router.post('/cleanup-duplicates', maintenance, cleanupDuplicatesCtrl);
+router.patch('/attempts/:attemptId/score', grade, adjustSubjectiveCtrl);
+router.patch('/attempts/:attemptId/manual-score', grade, setManualScoreCtrl);
+router.delete('/attempts/:attemptId', override, deleteAttemptCtrl);
 
 // Test-level routes.
 router.get('/:examId/summary', reviewSummaryCtrl);
 router.get('/:examId/history', reviewHistoryCtrl);
-router.patch('/:examId/total-marks', setTotalMarksCtrl);
-router.patch('/:examId/marking-scheme', setMarkingSchemeCtrl);
-router.patch('/:examId/question-marks', setQuestionMarksCtrl);
-router.patch('/:examId/answer-key', setAnswerKeyCtrl);
-router.post('/:examId/state', invalidateStudentResultCaches, transitionStateCtrl);
-router.post('/:examId/recompute', invalidateStudentResultCaches, recomputeCtrl);
-router.post('/:examId/approve-subjective', approveSubjectiveCtrl);
-router.post('/:examId/dedupe', dedupeCtrl);
+router.patch('/:examId/total-marks', editExam, setTotalMarksCtrl);
+router.patch('/:examId/marking-scheme', editExam, setMarkingSchemeCtrl);
+router.patch('/:examId/question-marks', editExam, setQuestionMarksCtrl);
+router.patch('/:examId/answer-key', editExam, setAnswerKeyCtrl);
+router.post('/:examId/state', publish, invalidateStudentResultCaches, transitionStateCtrl);
+router.post('/:examId/recompute', override, invalidateStudentResultCaches, recomputeCtrl);
+router.post('/:examId/approve-subjective', grade, approveSubjectiveCtrl);
+router.post('/:examId/dedupe', override, dedupeCtrl);
 
 export default router;

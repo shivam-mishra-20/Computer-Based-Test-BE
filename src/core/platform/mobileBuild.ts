@@ -35,8 +35,10 @@
 import {
   mobileBuildStatus,
   reconcileMobileBuild,
+  resolveBrandConfig,
   slugifyOrgName,
   validateMobileIdentity,
+  type BrandInput,
   type MobileBuildIdentity,
   type MobileBuildIssue,
   type MobileBuildMismatch,
@@ -266,6 +268,22 @@ function js(value: string): string {
   return `'${String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 }
 
+/**
+ * A nested object, as reviewable JavaScript source.
+ *
+ * `JSON.stringify` with two-space indent, then re-indented so the block sits
+ * correctly inside the generated module. Quoted keys are left as JSON emits
+ * them: this file is read by people and by Node, and hand-unquoting them is a
+ * chance to produce something that parses differently from how it reads.
+ */
+function jsObject(value: unknown, indent: number): string {
+  const pad = ' '.repeat(indent);
+  return JSON.stringify(value, null, 2)
+    .split('\n')
+    .map((l, i) => (i === 0 ? l : pad + l))
+    .join('\n');
+}
+
 /** camelCase constant name for the generated module, e.g. `abcInstitute`. */
 function constantName(slug: string): string {
   return slug.replace(/-([a-z0-9])/g, (_, c) => c.toUpperCase());
@@ -294,6 +312,29 @@ export async function generateBuildConfig(
   const name = constantName(slug);
   const org = await loadOrg(orgId);
   const mobile = (org?.mobile ?? {}) as Record<string, unknown>;
+  const experience = (org?.appExperience ?? {}) as BrandInput;
+
+  // The organization's own words and colours, completed with defaults. The
+  // admin preview calls the SAME function through /api/public/brand-preview,
+  // so what an administrator was shown is what gets built.
+  const brand = resolveBrandConfig({
+    appName: String(id.appName ?? ''),
+    shortName: experience.shortName,
+    tagline: String(id.tagline ?? ''),
+    palette: {
+      primaryColor: String(id.primaryColor ?? ''),
+      secondaryColor: String(id.secondaryColor ?? ''),
+      accentColor: String(id.accentColor ?? ''),
+      backgroundColor: String(id.backgroundColor ?? ''),
+      splashBackgroundColor: experience.palette?.splashBackgroundColor,
+      successColor: experience.palette?.successColor,
+      warningColor: experience.palette?.warningColor,
+      dangerColor: experience.palette?.dangerColor,
+    },
+    authCopy: experience.authCopy,
+    roles: experience.roles,
+    registrationPolicy: experience.registrationPolicy,
+  });
 
   const optionalNative: string[] = [];
   if (mobile.androidVersionCode) {
@@ -336,6 +377,14 @@ const ${name} = {
     name: ${js(String(id.appName))},
     tagline: ${js(String(id.tagline))},
   },
+
+  // Resolved on the server, written whole.
+  //
+  // The app could resolve it itself — it has the same mirrored function — but
+  // writing the ANSWER rather than the input is what makes a build reproducible
+  // and a generated file reviewable. Someone reading this file sees the copy
+  // their users will read, not a set of fields that might default to it.
+  brand: ${jsObject(brand, 2)},
 
   branding: {
     logo: './assets/${slug}/logo.png',

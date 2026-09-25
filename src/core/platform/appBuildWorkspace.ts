@@ -38,6 +38,7 @@ import { promises as fs } from 'fs';
 import { generateBuildConfig, type GeneratedBuildConfig } from './mobileBuild';
 import { materializeNativeAssets, appProjectPath } from './mobileAssets';
 import type { BuildArtifactType } from '../../models/AppBuildJob';
+import type { SelectableBuildProfile } from './mobileBuildRules';
 
 export class WorkspaceUnavailable extends Error {
   readonly code = 'WORKSPACE_UNAVAILABLE';
@@ -77,7 +78,16 @@ const COPIED_ENTRIES = [
 ];
 
 /** Copied from `config/` — everything EXCEPT other organizations. */
-const COPIED_CONFIG_ENTRIES = ['registry.d.ts', 'resolve.js', 'resolve.d.ts', 'types.d.ts'];
+const COPIED_CONFIG_ENTRIES = [
+  'registry.d.ts',
+  'resolve.js',
+  'resolve.d.ts',
+  'types.d.ts',
+  // A config plugin app.config.ts names by path. Left out, `expo prebuild`
+  // fails to resolve './config/withCleartextTraffic' and the whole build dies
+  // in the config phase — this list is not a convenience, it is the file set.
+  'withCleartextTraffic.js',
+];
 
 /**
  * The generic build's own config, which the registry's default key needs.
@@ -102,6 +112,7 @@ export interface PreparedWorkspace {
   root: string;
   slug: string;
   profileName: string;
+  appProfile: SelectableBuildProfile;
   generated: GeneratedBuildConfig;
   configHash: string;
   assets: { kind: string; source: string; bytes: number }[];
@@ -130,6 +141,7 @@ export function easJsonFor(input: {
   slug: string;
   artifactType: BuildArtifactType;
   apiBaseUrl: string;
+  appProfile: SelectableBuildProfile;
 }): string {
   const androidBuildType = input.artifactType === 'apk' ? 'apk' : 'app-bundle';
   const config = {
@@ -145,6 +157,15 @@ export function easJsonFor(input: {
         env: {
           ORG_ID: input.slug,
           EXPO_PUBLIC_API_BASE_URL: input.apiBaseUrl,
+          // -- Why this is set explicitly ---------------------------------
+          // config/resolve.js in the app reads APP_PROFILE, then falls back
+          // to EAS_BUILD_PROFILE, then to 'development'. EAS sets
+          // EAS_BUILD_PROFILE to the profile NAME — `org-test-apk` — which is
+          // not one of the three it accepts, so without this line every cloud
+          // build silently validated itself as 'development' while the console
+          // had gated it on 'production'. Two validators, two answers, and the
+          // console's was the one nobody could act on.
+          APP_PROFILE: input.appProfile,
         },
       },
     },
@@ -293,8 +314,11 @@ export async function prepareWorkspace(input: {
   orgId: string;
   buildId: string;
   artifactType: BuildArtifactType;
+  /** What the job recorded. Defaults to the strict profile. */
+  appProfile?: SelectableBuildProfile;
   onProgress?: (message: string) => Promise<void> | void;
 }): Promise<PreparedWorkspace> {
+  const appProfile = input.appProfile ?? 'production';
   const source = appProjectPath();
   if (!source) {
     throw new WorkspaceUnavailable(
@@ -311,7 +335,7 @@ export async function prepareWorkspace(input: {
   await input.onProgress?.('Generating configuration');
   // Throws BuildConfigIncomplete, naming the field, when the organization is
   // not ready. Deliberately before any file is written.
-  const generated = await generateBuildConfig(input.orgId, 'production');
+  const generated = await generateBuildConfig(input.orgId, appProfile);
   const slug = generated.slug;
   const profileName = profileNameFor(slug, input.artifactType);
 
@@ -371,6 +395,7 @@ export async function prepareWorkspace(input: {
       slug,
       artifactType: input.artifactType,
       apiBaseUrl: String(generated.identity.apiBaseUrl ?? ''),
+      appProfile,
     }),
     'utf8',
   );
@@ -385,7 +410,7 @@ export async function prepareWorkspace(input: {
     .digest('hex')
     .slice(0, 16);
 
-  return { root, slug, profileName, generated, configHash, assets };
+  return { root, slug, profileName, appProfile, generated, configHash, assets };
 }
 
 /**
@@ -401,7 +426,11 @@ export async function rewriteOrganizationConfig(
   workspace: PreparedWorkspace,
   orgId: string,
 ): Promise<void> {
-  const regenerated = await generateBuildConfig(orgId, 'production');
+  // The SAME profile the workspace was prepared under. Hardcoding 'production'
+  // here meant an internal-testing build passed preparation and then threw
+  // BuildConfigIncomplete the moment its EAS project was created — a build that
+  // failed halfway for a rule it had already been judged against.
+  const regenerated = await generateBuildConfig(orgId, workspace.appProfile);
   await fs.writeFile(
     path.join(workspace.root, 'config', 'organizations', `${workspace.slug}.js`),
     regenerated.organizationFile,

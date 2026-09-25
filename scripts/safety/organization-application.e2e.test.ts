@@ -115,6 +115,19 @@ const APPLICATION = {
     accentColor: '#042F2E',
     splashBackgroundColor: '#02201E',
   },
+  // The App Experience step, in the FLAT shape the onboarding form sends. Until
+  // 2026-09-23 this whole section was mapped and then dropped at approval, so
+  // it is asserted below by reading the organization back.
+  appExperience: {
+    registrationPolicy: 'approval',
+    roles: { student: true, teacher: true, parent: true },
+    welcomeTitle: 'Welcome to Lakeside',
+    registerMessage: 'Join Lakeside Academy.',
+    supportEmail: `${MARKER}-join@lakeside.test`,
+    successColor: '#15803D',
+    // Not a key Org.appExperience declares — must not reach the tenant record.
+    injected: 'should-not-persist',
+  },
   academic: {
     classLevels: [
       { key: '11', label: 'Class 11', aliases: ['11', 'XI'], order: 0 },
@@ -215,6 +228,10 @@ async function main() {
   const cleanup = async () => {
     await withoutTenantScope('app-e2e:clean', async () => {
       const o = await Org.findOne({ slug: SLUG });
+      const store = (o as any)?.registrationStore?.collection;
+      if (store && /^reg_/.test(store)) {
+        await mongoose.connection.db.dropCollection(store).catch(() => undefined);
+      }
       if (o) {
         for (const M of [User, Role, Entitlement, ClassLevel, Subject, OrgRoom, Batch, OrgPolicy]) {
           await M.deleteMany({ orgId: o._id });
@@ -485,6 +502,26 @@ async function main() {
       !applied.entitlement?.modules?.includes('not-a-real-module'));
     check('SYSTEM ROLES were provisioned', applied.roles > 0, `${applied.roles} roles`);
     check('the ADMINISTRATOR was created', applied.admin?.role === 'admin' && applied.admin?.status === 'approved');
+    // ── The App Experience, persisted ─────────────────────────────────────
+    const x = applied.org?.appExperience ?? {};
+    const storedDraft = await withoutTenantScope('app-e2e:dbg', async () => Reg.findById(draftId).lean());
+    check('APP EXPERIENCE was applied — the registration policy', x.registrationPolicy === 'approval',
+      `org=${JSON.stringify(x)} draft=${JSON.stringify((storedDraft as any)?.application?.appExperience)} steps=${JSON.stringify(approve.json?.onboarding?.steps)}`);
+    check('...the roles, including the requested-but-unsupported Parent',
+      x.roles?.teacher === true && x.roles?.parent === true);
+    check('...the sign-in copy, nested as the organization stores it',
+      x.authCopy?.welcomeTitle === 'Welcome to Lakeside' && x.authCopy?.registerMessage === 'Join Lakeside Academy.');
+    check('...and the status colour', x.palette?.successColor === '#15803D');
+    check('an undeclared key did NOT reach the organization', !('injected' in x),
+      'the application stores this section as Mixed; the organization must not');
+    const store = applied.org?.registrationStore?.collection;
+    check('opening registration provisioned the app’s own collection',
+      typeof store === 'string' && store.startsWith('reg_'), String(store));
+    const exists = store
+      ? (await mongoose.connection.db.listCollections({ name: store }, { nameOnly: true }).toArray()).length === 1
+      : false;
+    check('...and it exists in the database', exists);
+
     check('the registration is linked to the organization',
       String((await withoutTenantScope('app-e2e:link', async () => Reg.findById(draftId).lean()))?.orgId) === orgId);
 

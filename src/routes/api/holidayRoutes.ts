@@ -1,5 +1,7 @@
+import { requireTenantScope } from '../../core/tenancy';
+import { requireStaffPermission } from '../../middlewares/requirePermission';
 import { Router, Request, Response } from 'express';
-import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
+import { authMiddleware} from '../../middlewares/authMiddleware';
 import Holiday from '../../models/Holiday';
 
 const router = Router();
@@ -36,7 +38,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
       };
     }
     
-    const holidays = await Holiday.find(dateFilter)
+    const holidays = await Holiday.find({ ...dateFilter, ...requireTenantScope('holidays') })
       .sort({ date: 1 })
       .populate('createdBy', 'name');
     
@@ -63,7 +65,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
  * @desc    Create a new holiday
  * @access  Private (Admin)
  */
-router.post('/', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
+router.post('/', authMiddleware, requireStaffPermission('holidays.manage'), async (req: Request, res: Response) => {
   try {
     const { date, name, type, description } = req.body;
     const authUser = (req as any).user;
@@ -114,12 +116,12 @@ router.post('/', authMiddleware, requireRole('admin'), async (req: Request, res:
  * @desc    Update a holiday
  * @access  Private (Admin)
  */
-router.put('/:id', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
+router.put('/:id', authMiddleware, requireStaffPermission('holidays.manage'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     const { date, name, type, description } = req.body;
     
-    const holiday = await Holiday.findById(id);
+    const holiday = await Holiday.findOne({ _id: id, ...requireTenantScope('holidays') });
     
     if (!holiday) {
       return res.status(404).json({ success: false, error: 'Holiday not found' });
@@ -169,11 +171,11 @@ router.put('/:id', authMiddleware, requireRole('admin'), async (req: Request, re
  * @desc    Delete a holiday
  * @access  Private (Admin)
  */
-router.delete('/:id', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
+router.delete('/:id', authMiddleware, requireStaffPermission('holidays.manage'), async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
     
-    const holiday = await Holiday.findByIdAndDelete(id);
+    const holiday = await Holiday.findOneAndDelete({ _id: id, ...requireTenantScope('holidays') });
     
     if (!holiday) {
       return res.status(404).json({ success: false, error: 'Holiday not found' });

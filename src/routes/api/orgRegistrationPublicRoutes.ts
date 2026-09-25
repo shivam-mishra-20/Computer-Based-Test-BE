@@ -22,6 +22,7 @@
 
 import express, { Request, Response } from 'express';
 import { draftEditLimiter, publicFormLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
+import { resolveBrandConfig, SUPPORTED_AUTH_ROLES } from '../../core/platform/mobileBuildRules';
 import { uploadBrandAsset } from '../../middlewares/uploadBrandAsset';
 import {
   RegistrationValidationError,
@@ -159,6 +160,52 @@ function handleApplicationError(res: Response, err: unknown, what: string) {
   return res.status(500).json({ message: 'Something went wrong. Please try again shortly.' });
 }
 
+/**
+ * Resolve a draft brand into the configuration an app would be built with.
+ *
+ * ── Why the preview asks the server ─────────────────────────────────────────
+ * The onboarding form shows an administrator what their institute's app will
+ * look like. That promise is only worth making if the preview and the BUILD
+ * resolve the configuration the same way — same defaults, same caps, same
+ * answer about which roles actually work. The alternative is a preview that
+ * re-implements the rules in the browser and drifts from them quietly, which
+ * is the failure mode that makes a configuration screen untrustworthy.
+ *
+ * So the browser sends what has been typed and this returns what would be
+ * built, through the same `resolveBrandConfig` the generated organization file
+ * is written from.
+ *
+ * ── Why it is safe to be public ─────────────────────────────────────────────
+ * It is a pure function behind an HTTP call. It reads no database, resolves no
+ * organization, touches no tenant, and returns only a transformation of what
+ * the caller already sent. There is nothing here to leak and nothing to
+ * authorize against — the onboarding form has no account yet, which is the
+ * whole reason it is on this router. It is rate limited because it is public,
+ * not because it is sensitive.
+ */
+router.post('/brand-preview', publicFormLimiter, (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  try {
+    return res.json({
+      brand: resolveBrandConfig({
+        appName: body.appName as string,
+        shortName: body.shortName as string,
+        tagline: body.tagline as string,
+        palette: (body.palette ?? {}) as never,
+        authCopy: (body.authCopy ?? {}) as never,
+        roles: (body.roles ?? {}) as never,
+        registrationPolicy: body.registrationPolicy as never,
+      }),
+      // What the platform can authenticate today, so the editor can explain a
+      // role it will not switch on rather than silently dropping it.
+      supportedRoles: SUPPORTED_AUTH_ROLES,
+    });
+  } catch (err) {
+    console.error('[brand-preview] failed:', err);
+    return res.status(500).json({ message: 'Could not build the preview. Please try again.' });
+  }
+});
+
 /** Start an application. Returns the id and the only copy of the token. */
 router.post('/organization-applications', publicFormLimiter, async (req: Request, res: Response) => {
   try {
@@ -210,6 +257,10 @@ router.patch('/organization-applications/:id', draftEditLimiter, async (req: Req
       {
         organization: req.body?.application?.organization,
         branding: req.body?.application?.branding,
+        // Named here or it is dropped: this handler passes sections by name,
+        // and the App Experience step was missing from the list — so everything
+        // an institute set on it was discarded before the draft was saved.
+        appExperience: req.body?.application?.appExperience,
         academic: req.body?.application?.academic,
         policy: req.body?.application?.policy,
         modules: req.body?.application?.modules,

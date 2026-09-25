@@ -2,7 +2,8 @@ import { Request, Response } from 'express';
 import User, { IUser, UserRole } from '../models/User';
 import { logAudit } from '../utils/logger';
 import { INSTITUTE_ACCOUNT_CLAUSE, instituteStudentFilter } from '../utils/instituteAudience';
-import { tenantScope } from '../core/tenancy';
+import { requireTenantScope, tenantScope, withoutTenantScope } from '../core/tenancy';
+import { holdsAny } from '../middlewares/requirePermission';
 import { getOrgConfiguration, resolveClassKey } from '../core/config/orgConfig';
 import {
 	normalizeClassValue,
@@ -19,12 +20,54 @@ import {
 function escapeRegExp(value: string): string {
 	return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
+/**
+ * May the caller act on an account of this role?
+ *
+ * The route admits anyone holding ANY of the account permissions; this decides
+ * the case in hand. An ADMIN account is managed only by a full administrator
+ * (whose effective role is admin — every permission), because touching one is
+ * how a narrow role would otherwise promote itself.
+ */
+export async function mayActOn(
+	req: Request,
+	targetRole: string | undefined,
+	action: 'read' | 'create' | 'update' | 'delete',
+): Promise<boolean> {
+	if (targetRole === 'admin') {
+		if (action === 'read') return holdsAny(req, 'users.read');
+		return (req as any).user?.role === 'admin';
+	}
+	if (targetRole === 'teacher') return holdsAny(req, `users.${action}`, `teachers.${action}`);
+	return holdsAny(req, `users.${action}`, `students.${action}`);
+}
+
+/**
+ * Is this value already taken by ANY account on the platform?
+ *
+ * Email and empCode are unique across the whole platform (a global index), so
+ * the check has to look everywhere — and may then name the holder only when
+ * they are in the caller's own organization. Naming another organization's
+ * user would disclose them.
+ */
+async function takenAnywhere(
+	field: 'email' | 'empCode',
+	value: string,
+	exceptId?: string,
+): Promise<{ name?: string } | null> {
+	const found = (await withoutTenantScope(`users:unique-${field}`, async () =>
+		User.findOne({ [field]: value }).select('name orgId').lean(),
+	)) as { _id: unknown; name?: string; orgId?: string } | null;
+	if (!found || (exceptId && String(found._id) === exceptId)) return null;
+	const mine = await User.exists({ _id: found._id, ...tenantScope() });
+	return { name: mine ? found.name : undefined };
+}
+
 import {
 	getStudentBatchConfigFromDatabase,
 	matchBatchName,
 } from '../services/batchConfigService';
 
-async function resolveStudentClassAndBatch(classLevelInput?: string, batchInput?: string): Promise<{ classLevel: string; batch: string }> {
+export async function resolveStudentClassAndBatch(classLevelInput?: string, batchInput?: string): Promise<{ classLevel: string; batch: string }> {
 	const normalizedClass = normalizeClassValue(classLevelInput);
 	if (!normalizedClass) {
 		throw new Error('Student class must be between 7 and 12');
@@ -50,7 +93,10 @@ async function resolveStudentClassAndBatch(classLevelInput?: string, batchInput?
 // Admin-only: Get pending user registrations
 export const adminGetPendingUsers = async (req: Request, res: Response) => {
 	try {
-		const pendingUsers = await User.find({ status: 'pending' }).select('-password').sort({ createdAt: -1 });
+		// Parents are not approved here. A parent's account opens when an
+		// administrator confirms their link to a student (/api/guardian-links),
+		// which is the decision that actually matters — see core/guardians.
+		const pendingUsers = await User.find({ ...requireTenantScope('users:pending'), status: 'pending', role: { $ne: 'parent' } }).select('-password').sort({ createdAt: -1 });
 		res.json(pendingUsers);
 	} catch (err) {
 		res.status(500).json({ message: 'Server error' });
@@ -70,7 +116,7 @@ export const adminGetRegistrationRecords = async (req: Request, res: Response) =
 			accountType,
 		} = req.query as Record<string, string | undefined>;
 
-		const filter: any = {};
+		const filter: any = { ...requireTenantScope('users:registrations') };
 
 		// Institute-only by default, so this admin view keeps meaning exactly what
 		// it meant before public learners existed. `?accountType=PUBLIC_LEARNER`
@@ -132,6 +178,19 @@ export const adminGetRegistrationRecords = async (req: Request, res: Response) =
 // Admin-only: Approve user registration
 export const adminApproveUser = async (req: Request, res: Response) => {
 	try {
+		// Approving a parent's ACCOUNT here would skip the one check that matters
+		// for a parent: that they belong to the child they named. Their account
+		// is approved by confirming that link instead.
+		const scope = requireTenantScope('users:approve');
+		const target = await User.findOne({ _id: req.params.id, ...scope }).select('role').lean();
+		if (!target) return res.status(404).json({ message: 'User not found' });
+		if ((target as { role?: string } | null)?.role === 'parent') {
+			return res.status(409).json({
+				code: 'PARENT_APPROVED_BY_LINK',
+				message: "A parent's account is approved by confirming their link to a student, under Parent requests.",
+			});
+		}
+
 		const { empCode } = req.body;
 		
 		// Validate empCode is provided
@@ -142,12 +201,16 @@ export const adminApproveUser = async (req: Request, res: Response) => {
 		const sanitizedEmpCode = empCode.trim();
 		
 		// Check empCode uniqueness
-		const existingEmp = await User.findOne({ empCode: sanitizedEmpCode });
+		const existingEmp = await takenAnywhere('empCode', sanitizedEmpCode);
 		if (existingEmp) {
-			return res.status(400).json({ message: `Code "${sanitizedEmpCode}" is already assigned to ${existingEmp.name}` });
+			return res.status(400).json({
+				message: existingEmp.name
+					? `Code "${sanitizedEmpCode}" is already assigned to ${existingEmp.name}`
+					: `Code "${sanitizedEmpCode}" is already in use.`,
+			});
 		}
-		
-		const user = await User.findById(req.params.id);
+
+		const user = await User.findOne({ _id: req.params.id, ...scope });
 		if (!user) return res.status(404).json({ message: 'User not found' });
 		
 		user.status = 'approved';
@@ -164,7 +227,7 @@ export const adminApproveUser = async (req: Request, res: Response) => {
 // Admin-only: Reject user registration
 export const adminRejectUser = async (req: Request, res: Response) => {
 	try {
-		const user = await User.findById(req.params.id);
+		const user = await User.findOne({ _id: req.params.id, ...requireTenantScope('users:reject') });
 		if (!user) return res.status(404).json({ message: 'User not found' });
 		
 		user.status = 'rejected';
@@ -197,9 +260,13 @@ export const adminCreateUser = async (req: Request, res: Response) => {
 			return res.status(400).json({ message: 'Role must be one of admin, teacher, or student' });
 		}
 		
-		// Teachers cannot create admins
-		if (currentUser.role === 'teacher' && role === 'admin') {
-			return res.status(403).json({ message: 'Teacher cannot create admin accounts' });
+		// Only a full administrator creates an administrator; otherwise the
+		// permission for the kind of account being created.
+		if (!(await mayActOn(req, role, 'create'))) {
+			return res.status(403).json({
+				message: role === 'admin' ? 'Only an administrator can create admin accounts' : 'You do not have permission to create this account',
+				code: 'PERMISSION_DENIED',
+			});
 		}
 		
 		// Enforce empCode for teachers and students
@@ -222,12 +289,12 @@ export const adminCreateUser = async (req: Request, res: Response) => {
 	const lcEmail = email.toLowerCase();
 	const sanitizedEmpCode = empCode ? empCode.trim() : undefined;
 
-	const existingEmail = await User.findOne({ email: lcEmail });
+	const existingEmail = await takenAnywhere('email', lcEmail);
 		if (existingEmail) return res.status(400).json({ message: 'Email already in use' });
 
 		// Check empCode uniqueness
 		if (sanitizedEmpCode) {
-			const existingEmp = await User.findOne({ empCode: sanitizedEmpCode });
+			const existingEmp = await takenAnywhere('empCode', sanitizedEmpCode);
 			if (existingEmp) return res.status(400).json({ message: 'empCode already in use by another user' });
 		}
 
@@ -265,7 +332,7 @@ export const adminListUsers = async (req: Request, res: Response) => {
 		const batch = (req.query.batch as string) || undefined;
 		// Institute roster source for admin/teacher student pickers — public
 		// learners must never be selectable as an institute audience member.
-		const filter: any = { ...INSTITUTE_ACCOUNT_CLAUSE, ...tenantScope() };
+		const filter: any = { ...INSTITUTE_ACCOUNT_CLAUSE, ...requireTenantScope('users:list') };
 		if (role && ['teacher', 'student', 'admin'].includes(role)) filter.role = role;
 		if (status && ['pending', 'approved', 'rejected'].includes(status)) filter.status = status;
 		if (registrationSource && ['website', 'app', 'admin', 'unknown'].includes(registrationSource)) {
@@ -308,8 +375,11 @@ export const adminListUsers = async (req: Request, res: Response) => {
 // Admin-only: Get single user
 export const adminGetUser = async (req: Request, res: Response) => {
 	try {
-		const user = await User.findById(req.params.id).select('-password');
+		const user = await User.findOne({ _id: req.params.id, ...requireTenantScope('users:get') }).select('-password');
 		if (!user) return res.status(404).json({ message: 'User not found' });
+		if (!(await mayActOn(req, user.role, 'read'))) {
+			return res.status(403).json({ message: 'You do not have permission to view this account', code: 'PERMISSION_DENIED' });
+		}
 		res.json(user);
 	} catch (err) {
 		res.status(500).json({ message: 'Server error' });
@@ -323,23 +393,26 @@ export const adminUpdateUser = async (req: Request, res: Response) => {
 	try {
 		const currentUser = (req as any).user;
 		const { name, email, role, password, classLevel, batch, empCode } = req.body as Partial<IUser> & { role?: UserRole };
-		const user = await User.findById(req.params.id);
+		const scope = requireTenantScope('users:update');
+		const user = await User.findOne({ _id: req.params.id, ...scope });
 		if (!user) return res.status(404).json({ message: 'User not found' });
-		
-		// Teachers cannot edit admin users, except for themselves
-		if (currentUser.role === 'teacher' && user.role === 'admin') {
-			return res.status(403).json({ message: 'Teacher cannot modify admin accounts' });
+
+		// The account as it is, and as it would become: both must be within
+		// the caller's reach, so a narrow role cannot edit an admin or make one.
+		if (!(await mayActOn(req, user.role, 'update')) || (role && !(await mayActOn(req, role, 'update')))) {
+			return res.status(403).json({
+				message: user.role === 'admin' || role === 'admin' ? 'Only an administrator can modify admin accounts' : 'You do not have permission to modify this account',
+				code: 'PERMISSION_DENIED',
+			});
 		}
 		
 		const oldName = user.name;
 		const currentClass = (user as any).classLevel;
 
 		if (name) user.name = name;
-		if (email) user.email = email;
 		if (role) {
-			// Teachers cannot promote users to admin
-			if (currentUser.role === 'teacher' && role === 'admin') {
-				return res.status(403).json({ message: 'Teacher cannot grant admin roles' });
+			if (!['teacher', 'student', 'admin'].includes(role)) {
+				return res.status(400).json({ message: 'Role must be one of admin, teacher, or student' });
 			}
 			user.role = role;
 		}
@@ -369,9 +442,20 @@ export const adminUpdateUser = async (req: Request, res: Response) => {
 		
 		if (empCode && empCode.trim() !== user.empCode) {
 			const sanitizedEmpCode = empCode.trim();
-			const existing = await User.findOne({ empCode: sanitizedEmpCode });
-			if (existing) return res.status(400).json({ message: `empCode ${sanitizedEmpCode} is already assigned to ${existing.name}` });
+			const existing = await takenAnywhere('empCode', sanitizedEmpCode, String(user._id));
+			if (existing) {
+				return res.status(400).json({
+					message: existing.name
+						? `empCode ${sanitizedEmpCode} is already assigned to ${existing.name}`
+						: `empCode ${sanitizedEmpCode} is already in use.`,
+				});
+			}
 			user.empCode = sanitizedEmpCode;
+		}
+		if (email && email.toLowerCase() !== user.email) {
+			const takenEmail = await takenAnywhere('email', email.toLowerCase(), String(user._id));
+			if (takenEmail) return res.status(400).json({ message: 'Email already in use' });
+			user.email = email.toLowerCase();
 		}
 
 		await user.save();
@@ -381,7 +465,7 @@ export const adminUpdateUser = async (req: Request, res: Response) => {
 		if (name && oldName && name !== oldName) {
 			try {
 				const result = await OfflineResult.updateMany(
-					{ name: oldName, class: currentClass },
+					{ ...scope, name: oldName, class: currentClass },
 					{ $set: { name: name } }
 				);
 				console.log(`[Admin Update] Synced name change '${oldName}' -> '${name}' for ${result.modifiedCount} offline results`);
@@ -401,15 +485,21 @@ export const adminUpdateUser = async (req: Request, res: Response) => {
 export const adminDeleteUser = async (req: Request, res: Response) => {
 	try {
 		const currentUser = (req as any).user;
-		const user = await User.findById(req.params.id);
+		const scope = requireTenantScope('users:delete');
+		const user = await User.findOne({ _id: req.params.id, ...scope });
 		if (!user) return res.status(404).json({ message: 'User not found' });
-		
-		// Teachers cannot delete admin users
-		if (currentUser.role === 'teacher' && user.role === 'admin') {
-			return res.status(403).json({ message: 'Teacher cannot delete admin accounts' });
+
+		if (!(await mayActOn(req, user.role, 'delete'))) {
+			return res.status(403).json({
+				message: user.role === 'admin' ? 'Only an administrator can delete admin accounts' : 'You do not have permission to delete this account',
+				code: 'PERMISSION_DENIED',
+			});
 		}
-		
-		await User.findByIdAndDelete(req.params.id);
+		if (String(user._id) === String(currentUser.id)) {
+			return res.status(400).json({ message: 'You cannot delete your own account here.' });
+		}
+
+		await User.deleteOne({ _id: user._id, ...scope });
 		await logAudit(currentUser.id, 'admin.user.delete', String(user._id));
 		res.json({ message: 'User deleted' });
 	} catch (err) {
@@ -423,7 +513,7 @@ export const adminDashboard = async (_req: Request, res: Response) => {
 		// Scoped by organization where that is safe — see core/tenancy/queryScope.
 		// Without it a claim-mode deployment reports the platform's total head
 		// count to every institute on it, which is both wrong and a disclosure.
-		const scope = tenantScope();
+		const scope = requireTenantScope('users:dashboard');
 		const [admins, teachers, students] = await Promise.all([
 			User.countDocuments({ role: 'admin', ...scope }),
 			User.countDocuments({ role: 'teacher', ...scope }),
@@ -476,35 +566,6 @@ export const updateUserSettings = async (req: Request, res: Response) => {
 	}
 };
 
-// Change password (for authenticated users)
-export const changePassword = async (req: Request, res: Response) => {
-	try {
-		const userId = (req as any).user?.id;
-		const { currentPassword, newPassword } = req.body;
-		
-		if (!currentPassword || !newPassword) {
-			return res.status(400).json({ message: 'Current password and new password are required' });
-		}
-		
-		const user = await User.findById(userId);
-		if (!user) return res.status(404).json({ message: 'User not found' });
-		
-		// Verify current password
-		const isMatch = await user.comparePassword(currentPassword);
-		if (!isMatch) {
-			return res.status(400).json({ message: 'Current password is incorrect' });
-		}
-		
-		// Update password
-		user.password = newPassword;
-		await user.save();
-		
-		await logAudit(userId, 'user.password.change', userId);
-		res.json({ message: 'Password changed successfully' });
-	} catch (err) {
-		res.status(500).json({ message: 'Server error' });
-	}
-};
 // Update user profile (name, phone, profileImage, bio, etc.)
 export const updateProfile = async (req: Request, res: Response) => {
 	try {

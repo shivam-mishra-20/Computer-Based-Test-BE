@@ -72,6 +72,15 @@ export interface IAppBuildJob extends Document {
   artifactType: BuildArtifactType;
   /** The eas.json profile this build ran under, e.g. `org-abc-institute-apk`. */
   buildProfile: string;
+  /**
+   * What the artifact was for, which is what the configuration was judged
+   * against: `production` for a release, `preview` for an internal test build
+   * (the one that may talk to a plaintext server on an office network).
+   *
+   * Recorded rather than recomputed. A build's history has to say what rules
+   * it passed, and those rules can change after the fact.
+   */
+  appProfile: 'production' | 'preview';
   appVersion: string;
 
   requestedBy: mongoose.Types.ObjectId;
@@ -86,6 +95,27 @@ export interface IAppBuildJob extends Document {
   easProjectId?: string;
   easBuildId?: string;
   easBuildUrl?: string;
+
+  /*
+   * ── What EAS last said, and when things began ──────────────────────────
+   * Kept so the console can show a bar that moves with the build rather than
+   * one that jumps to a milestone and stops. See core/platform/buildProgress.ts
+   * for how each is used. All optional: a job written before these existed is
+   * still described correctly, just with less to go on.
+   */
+  /** EAS's own status: NEW, IN_QUEUE, IN_PROGRESS, FINISHED. */
+  easStatus?: string;
+  /** When the build was handed to EAS. */
+  easSubmittedAt?: Date;
+  /** When EAS was first seen compiling — the start of the long phase. */
+  buildingStartedAt?: Date;
+  /** EAS's queue position while waiting for a machine, and where it started. */
+  queuePosition?: number;
+  initialQueuePosition?: number;
+  /** EAS's estimate of the wait, in seconds. */
+  estimatedWaitSeconds?: number;
+  /** How long the compile took, once finished. Feeds the next build's ETA. */
+  buildDurationMs?: number;
 
   artifactUrl?: string;
   artifactFilename?: string;
@@ -132,6 +162,9 @@ const appBuildJobSchema = new Schema<IAppBuildJob>(
     platform: { type: String, enum: BUILD_PLATFORMS, required: true },
     artifactType: { type: String, enum: BUILD_ARTIFACT_TYPES, required: true },
     buildProfile: { type: String, required: true },
+    // Defaulted, not required: every job written before this field existed was
+    // a production build, and that is what they should keep reading as.
+    appProfile: { type: String, enum: ['production', 'preview'], default: 'production' },
     appVersion: { type: String, required: true },
 
     requestedBy: { type: Schema.Types.ObjectId, ref: 'PlatformUser', required: true },
@@ -144,6 +177,13 @@ const appBuildJobSchema = new Schema<IAppBuildJob>(
     easProjectId: { type: String },
     easBuildId: { type: String, index: true },
     easBuildUrl: { type: String },
+    easStatus: { type: String },
+    easSubmittedAt: { type: Date },
+    buildingStartedAt: { type: Date },
+    queuePosition: { type: Number },
+    initialQueuePosition: { type: Number },
+    estimatedWaitSeconds: { type: Number },
+    buildDurationMs: { type: Number },
 
     artifactUrl: { type: String },
     artifactFilename: { type: String },

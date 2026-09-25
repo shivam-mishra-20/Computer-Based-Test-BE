@@ -1,8 +1,8 @@
+import { requireStaffPermission } from '../../middlewares/requirePermission';
 import { Router, Request, Response } from 'express';
 import {
   authMiddleware,
   optionalAuthMiddleware,
-  requireRole,
 } from '../../middlewares/authMiddleware';
 import { publicFormLimiter } from '../../middlewares/rateLimiter';
 import {
@@ -149,7 +149,7 @@ router.get('/mine', authMiddleware, async (req: Request, res: Response) => {
 router.get(
   '/',
   authMiddleware,
-  requireRole('admin', 'developer'),
+  requireStaffPermission('enquiries.manage'),
   async (req: Request, res: Response) => {
     try {
       const result = await listClassRequests({
@@ -176,7 +176,7 @@ router.get(
 router.patch(
   '/:id/status',
   authMiddleware,
-  requireRole('admin', 'developer'),
+  requireStaffPermission('enquiries.manage'),
   async (req: Request, res: Response) => {
     try {
       const reviewerId = (req as Request & { user?: { id: string } }).user?.id;
@@ -207,7 +207,7 @@ router.patch(
 router.delete(
   '/:id',
   authMiddleware,
-  requireRole('admin', 'developer'),
+  requireStaffPermission('enquiries.manage'),
   async (req: Request, res: Response) => {
     try {
       const removed = await deleteClassRequest(req.params.id);

@@ -47,6 +47,9 @@ export const STORAGE_MODULES = [
   'profile',
   'schedule',
   'imports',
+  // An organization's own brand images (logo, splash) uploaded by its
+  // administrators. Public assets, under the organization's prefix.
+  'branding',
 ] as const;
 
 export type StorageModule = (typeof STORAGE_MODULES)[number];

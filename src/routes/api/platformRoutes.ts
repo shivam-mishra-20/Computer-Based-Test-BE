@@ -34,9 +34,28 @@ import {
   getBuild,
   listBuilds,
   markFailed,
-  publicBuildView,
+  publicBuildViewOf,
+  publicBuildViews,
   startBuild,
 } from '../../core/platform/appBuilds';
+import { parseBuildProfile } from '../../core/platform/mobileBuildRules';
+import { RegistrationStorageFailed } from '../../core/platform/appExperience';
+import { GuardianLinkError, listLinks, revokeLink, verifyLink } from '../../core/guardians/guardians';
+import {
+  loadOrgForRegistration,
+  registrationView,
+  updateRegistrationSettings,
+} from '../../core/platform/registrationSettings';
+import {
+  buildDeletionPlan,
+  DeletionRefused,
+  deletionStatus,
+  finishWithoutExternal,
+  issuePlanToken,
+  resumeDeletion,
+  startDeletion,
+  type Staff as DeletionStaff,
+} from '../../core/platform/orgDeletion';
 import {
   NativeAssetRejected,
   nativeAssetState,
@@ -74,7 +93,12 @@ import {
   OrgSlugTaken,
 } from '../../core/platform/organizations';
 import type { PlatformRequestUser } from '../../middlewares/platformAuth';
-import { PLATFORM_ROLES, platformCapabilities } from '../../models/PlatformUser';
+import PlatformUserModel, { PLATFORM_ROLES, platformCapabilities } from '../../models/PlatformUser';
+import UserModel from '../../models/User';
+import { issueInvite, issueResetLink } from '../../core/accounts/accountLinks';
+import { runWithTenant } from '../../core/tenancy/context';
+import Org from '../../models/Org';
+import mongoose from 'mongoose';
 import { signPlatformToken } from '../../core/auth/tokens';
 import { authLimiter } from '../../middlewares/rateLimiter';
 import bcrypt from 'bcrypt';
@@ -188,6 +212,30 @@ router.post('/login', authLimiter, async (req: Request, res: Response) => {
 });
 
 router.use(platformAuthMiddleware);
+
+/**
+ * An organization that is being deleted accepts no other changes.
+ *
+ * Without this, a half-deleted organization could be reactivated, given a new
+ * build, or have its entitlement re-resolved — each of which writes new rows
+ * the deletion then has to chase. Reads still work, and the deletion's own
+ * routes are the only writes allowed.
+ */
+router.param('orgId', (req, res, next, orgId) => {
+  if (req.method === 'GET' || /^\/orgs\/[^/]+\/deletion(\/|$)/.test(req.path)) return next();
+  if (!mongoose.isValidObjectId(orgId)) return next();
+  withoutTenantScope('platform:deletion-guard', async () => Org.exists({ _id: orgId, deletion: { $exists: true, $ne: null } }))
+    .then((deleting) => {
+      if (deleting) {
+        return res.status(409).json({
+          code: 'ORG_DELETING',
+          message: 'This organization is being deleted. It cannot be changed.',
+        });
+      }
+      return next();
+    })
+    .catch(next);
+});
 
 /** Wrap a handler so a thrown error becomes a clean 500 rather than a hang. */
 function handle(fn: (req: Request, res: Response) => Promise<unknown>) {
@@ -319,7 +367,9 @@ router.post(
       orgId: result.orgId,
       entity: 'Org',
       entityId: result.orgId,
-      metadata: { slug: result.slug, complete: result.complete, steps: result.steps },
+      // Never the invite: it is a credential, returned once below and stored
+      // only as a hash.
+      metadata: { slug: result.slug, complete: result.complete, steps: result.steps, adminInvited: Boolean(result.adminInvite) },
     });
     // 207 when some step failed: the organization exists and is partially
     // configured, which is neither a success nor a clean failure, and the
@@ -352,6 +402,106 @@ router.patch(
       changes: req.body,
     });
     return res.json({ organization: updated });
+  }),
+);
+
+/* ── Deleting an organization ───────────────────────────────────────────────
+ * Preview → confirm → background run → verify. See core/platform/orgDeletion.
+ *
+ * `org.delete` is held by the owner role alone. The preview returns the plan
+ * the SERVER built plus a short-lived token bound to this staff member and
+ * organization; the start request must carry that token, the organization's
+ * slug typed out, and an explicit acknowledgement. Nothing in a request says
+ * what to delete — the plan is rebuilt from the database when the run starts.
+ */
+async function deletionStaff(req: Request): Promise<DeletionStaff> {
+  const staff = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+  const account = staff?.id
+    ? await withoutTenantScope('platform:deletion-staff', async () =>
+        PlatformUserModel.findById(staff.id).select('email').lean(),
+      )
+    : null;
+  return {
+    id: String(staff?.id ?? ''),
+    role: staff?.role,
+    email: (account as { email?: string } | null)?.email,
+    ip: req.ip,
+  };
+}
+
+function deletionRefusal(res: Response, err: unknown) {
+  if (err instanceof DeletionRefused) {
+    return res.status(err.httpStatus).json({ message: err.message, problems: err.problems });
+  }
+  throw err;
+}
+
+router.get(
+  '/orgs/:orgId/deletion/preview',
+  requirePlatformCapability('org.delete'),
+  handle(async (req, res) => {
+    try {
+      const staff = await deletionStaff(req);
+      const plan = await buildDeletionPlan(req.params.orgId);
+      return res.json({ plan, planToken: plan.blockers.length ? null : issuePlanToken(req.params.orgId, staff.id) });
+    } catch (err) {
+      return deletionRefusal(res, err);
+    }
+  }),
+);
+
+router.get(
+  '/orgs/:orgId/deletion',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    return res.json(await deletionStatus(req.params.orgId));
+  }),
+);
+
+router.post(
+  '/orgs/:orgId/deletion',
+  requirePlatformCapability('org.delete'),
+  handle(async (req, res) => {
+    try {
+      const staff = await deletionStaff(req);
+      const plan = await startDeletion(req.params.orgId, staff, {
+        confirmSlug: req.body?.confirmSlug,
+        acknowledge: req.body?.acknowledge,
+        planToken: req.body?.planToken,
+      });
+      return res.status(202).json({ state: 'running', plan });
+    } catch (err) {
+      return deletionRefusal(res, err);
+    }
+  }),
+);
+
+router.post(
+  '/orgs/:orgId/deletion/resume',
+  requirePlatformCapability('org.delete'),
+  handle(async (req, res) => {
+    try {
+      await resumeDeletion(req.params.orgId, await deletionStaff(req));
+      return res.status(202).json({ state: 'running' });
+    } catch (err) {
+      return deletionRefusal(res, err);
+    }
+  }),
+);
+
+router.post(
+  '/orgs/:orgId/deletion/finish',
+  requirePlatformCapability('org.delete'),
+  handle(async (req, res) => {
+    try {
+      await finishWithoutExternal(req.params.orgId, await deletionStaff(req), {
+        confirmSlug: req.body?.confirmSlug,
+        acknowledge: req.body?.acknowledge,
+      });
+      return res.status(202).json({ state: 'running' });
+    } catch (err) {
+      return deletionRefusal(res, err);
+    }
   }),
 );
 
@@ -609,6 +759,128 @@ router.get(
   }),
 );
 
+/* ── Public registration, per application ────────────────────────────────
+ *
+ * An operator's view of whether this organization's app takes sign-ups, which
+ * roles it offers, and where those registrations are stored. The store is
+ * SHOWN here — to platform staff, for tracing — and is never accepted as input:
+ * the PUT below takes a policy and roles, and the server assigns the collection.
+ */
+router.get(
+  '/orgs/:orgId/registration',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const org = await loadOrgForRegistration(req.params.orgId);
+    if (!org) return res.status(404).json({ message: 'Organization not found.' });
+    return res.json(registrationView(org, { includeStore: true }));
+  }),
+);
+
+router.put(
+  '/orgs/:orgId/registration',
+  requirePlatformCapability('app.manage'),
+  handle(async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    // Only the policy, roles and support copy reach the organization — see
+    // core/platform/registrationSettings. The server owns where registrations go.
+    try {
+      const saved = await updateRegistrationSettings(req.params.orgId, body);
+      await recordPlatformAction(req, {
+        action: 'registration.update',
+        orgId: req.params.orgId,
+        entity: 'Org',
+        entityId: req.params.orgId,
+        changes: { policy: body.policy, roles: body.roles },
+        metadata: { storeProvisioned: Boolean(saved.registrationCollection) },
+      });
+      const org = await loadOrgForRegistration(req.params.orgId);
+      return res.json(registrationView(org, { includeStore: true }));
+    } catch (err) {
+      if (err instanceof RegistrationStorageFailed) {
+        return res.status(503).json({ message: err.message, code: 'REGISTRATION_STORAGE_FAILED' });
+      }
+      throw err;
+    }
+  }),
+);
+
+/* ── Parent ↔ student links, for platform staff ─────────────────────────────
+ * The same review an organization's own administrators do on
+ * /api/guardian-links, for institutes that have no administrator yet or ask the
+ * platform to act. The organization is the URL's, checked by capability; links
+ * are only ever looked up INSIDE it, so an id from another organization is a 404.
+ */
+router.get(
+  '/orgs/:orgId/guardian-links',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    return res.json({ links: await listLinks(req.params.orgId, String(req.query.status ?? '')) });
+  }),
+);
+
+function decideGuardianLink(action: 'verify' | 'revoke') {
+  return handle(async (req, res) => {
+    const staff = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+    try {
+      const actor = { id: String(staff?.id ?? ''), kind: 'platform' as const };
+      const link =
+        action === 'verify'
+          ? await verifyLink(req.params.orgId, req.params.linkId, actor)
+          : await revokeLink(req.params.orgId, req.params.linkId, actor);
+      await recordPlatformAction(req, {
+        action: `guardian.link.${action}`,
+        orgId: req.params.orgId,
+        entity: 'GuardianLink',
+        entityId: String(link._id),
+        metadata: { status: link.status },
+      });
+      return res.json({ id: String(link._id), status: link.status });
+    } catch (err) {
+      if (err instanceof GuardianLinkError) {
+        return res.status(err.httpStatus).json({ message: err.message, code: err.code });
+      }
+      throw err;
+    }
+  });
+}
+
+/* ── Helping an institute back in ────────────────────────────────────────────────────────────────────────
+ * A fresh invitation for an administrator who never set a password, or a
+ * reset link for one who is locked out. Returned once, audited without the
+ * link. The user is looked up INSIDE the URL's organization, so an id from
+ * another organization is a 404.
+ */
+function platformAccountLink(kind: 'invite' | 'reset') {
+  return handle(async (req, res) => {
+    const staff = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+    const user = (await withoutTenantScope('platform:account-link', async () =>
+      mongoose.isValidObjectId(req.params.userId)
+        ? UserModel.findOne({ _id: req.params.userId, orgId: req.params.orgId }).select('inviteTokenHash').lean()
+        : null,
+    )) as { _id: unknown; inviteTokenHash?: string } | null;
+    if (!user) return res.status(404).json({ message: 'User not found in this organization.' });
+    if (kind === 'invite' && !user.inviteTokenHash) {
+      return res.status(409).json({ message: 'This person has already set a password. Send a reset link instead.' });
+    }
+    const link = await runWithTenant({ orgId: req.params.orgId, source: 'script' }, async () =>
+      kind === 'invite' ? issueInvite(user._id, `platform:${staff?.id ?? ''}`) : issueResetLink(user._id),
+    );
+    await recordPlatformAction(req, {
+      action: `user.${kind}-link`,
+      orgId: req.params.orgId,
+      entity: 'User',
+      entityId: String(user._id),
+    });
+    return res.json({ link: link.link, token: link.token, expiresAt: link.expiresAt, delivery: link.delivery });
+  });
+}
+
+router.post('/orgs/:orgId/users/:userId/invite', requirePlatformCapability('org.manage'), platformAccountLink('invite'));
+router.post('/orgs/:orgId/users/:userId/reset-link', requirePlatformCapability('org.manage'), platformAccountLink('reset'));
+
+router.post('/orgs/:orgId/guardian-links/:linkId/verify', requirePlatformCapability('org.manage'), decideGuardianLink('verify'));
+router.post('/orgs/:orgId/guardian-links/:linkId/revoke', requirePlatformCapability('org.manage'), decideGuardianLink('revoke'));
+
 router.put(
   '/orgs/:orgId/mobile',
   requirePlatformCapability('app.manage'),
@@ -688,11 +960,22 @@ router.post(
 // the work happens in the queue; see queues/appBuildQueue.ts for why the
 // polling is a separate short job rather than a handler that blocks.
 
+/**
+ * Is this organization buildable, and for what.
+ *
+ * `?profile=preview` asks about an internal-testing build, which relaxes one
+ * rule — a plaintext API address — and keeps every other. Anything else,
+ * including nothing, asks about a release. `parseBuildProfile` falls back to
+ * the strict answer, so a stale client or a typo can only tighten the rules.
+ */
 router.get(
   '/orgs/:orgId/mobile/build-readiness',
   requirePlatformCapability('org.read'),
   handle(async (req, res) => {
-    const readiness = await buildReadiness(req.params.orgId);
+    const readiness = await buildReadiness(
+      req.params.orgId,
+      parseBuildProfile(req.query.profile),
+    );
     return res.json(readiness);
   }),
 );
@@ -738,7 +1021,7 @@ router.get(
   requirePlatformCapability('org.read'),
   handle(async (req, res) => {
     const builds = await listBuilds(req.params.orgId, Number(req.query.limit) || 25);
-    return res.json({ builds: builds.map(publicBuildView) });
+    return res.json({ builds: await publicBuildViews(builds) });
   }),
 );
 
@@ -769,6 +1052,7 @@ router.post(
         artifactType: artifactType as 'apk' | 'aab',
         requestedBy: String(actor?.id ?? ''),
         force: req.body?.force === true,
+        appProfile: parseBuildProfile(req.body?.appProfile),
       });
 
       if (created) {
@@ -810,7 +1094,7 @@ router.post(
         });
       }
 
-      return res.status(created ? 201 : 200).json({ build: publicBuildView(build), created });
+      return res.status(created ? 201 : 200).json({ build: await publicBuildViewOf(build), created });
     } catch (err) {
       if (err instanceof BuildNotAllowed) {
         return res.status(422).json({ message: err.message, problems: err.problems });
@@ -831,7 +1115,7 @@ router.get(
   requirePlatformCapability('org.read'),
   handle(async (req, res) => {
     try {
-      return res.json({ build: publicBuildView(await getBuild(req.params.buildId)) });
+      return res.json({ build: await publicBuildViewOf(await getBuild(req.params.buildId)) });
     } catch (err) {
       if (err instanceof BuildNotFound) return res.status(404).json({ message: err.message });
       throw err;
@@ -855,7 +1139,7 @@ router.post(
           metadata: { buildNumber: build.buildNumber },
         });
       }
-      return res.json({ ...result, build: publicBuildView(build) });
+      return res.json({ ...result, build: await publicBuildViewOf(build) });
     } catch (err) {
       if (err instanceof BuildNotFound) return res.status(404).json({ message: err.message });
       throw err;

@@ -63,7 +63,7 @@ const VALID_CLASS_LEVELS = ['6', '7', '8', '9', '10', '11', '12'];
 const MAX_SUBJECTS = 12;
 
 const signToken = (user: { _id: unknown; role?: string; orgId?: string | null }) =>
-  signSessionToken({ id: String(user._id), role: user.role, orgId: user.orgId ?? null });
+  signSessionToken({ id: String(user._id), role: user.role, orgId: user.orgId ?? null, tokenVersion: Number((user as { tokenVersion?: number }).tokenVersion ?? 0) || 0 });
 
 /**
  * Public-safe learner payload. Deliberately omits institute fields (batch,

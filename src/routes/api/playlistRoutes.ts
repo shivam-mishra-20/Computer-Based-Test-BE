@@ -1,8 +1,9 @@
+import { requireStaffPermission } from '../../middlewares/requirePermission';
 import { Router, Request, Response } from 'express';
 import Course from '../../models/Course';
 import PlaylistImport from '../../models/PlaylistImport';
 import StudyResource from '../../models/StudyResource';
-import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
+import { authMiddleware} from '../../middlewares/authMiddleware';
 import {
   extractPlaylistId,
   fetchPlaylistMeta,
@@ -22,7 +23,7 @@ function isQuotaError(err: any): boolean {
 // ─── Preview playlist (before import) ────────────────────────────────────────
 // POST /api/playlist/preview
 // Body: { playlistUrl: string }
-router.post('/preview', requireRole('admin', 'teacher'), async (req: Request, res: Response) => {
+router.post('/preview', requireStaffPermission('courses.manage'), async (req: Request, res: Response) => {
   try {
     const { playlistUrl } = req.body;
     if (!playlistUrl?.trim()) {
@@ -61,7 +62,7 @@ router.post('/preview', requireRole('admin', 'teacher'), async (req: Request, re
 // ─── Import playlist as a new course ─────────────────────────────────────────
 // POST /api/playlist/import
 // Body: { classLevel, subject, courseName, playlistUrl, isFree?, moduleName? }
-router.post('/import', requireRole('admin', 'teacher'), async (req: Request, res: Response) => {
+router.post('/import', requireStaffPermission('courses.manage'), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const {
@@ -194,7 +195,7 @@ router.get('/course/:courseId', async (req: Request, res: Response) => {
 
 // ─── Sync playlist with existing course ──────────────────────────────────────
 // POST /api/playlist/course/:courseId/sync
-router.post('/course/:courseId/sync', requireRole('admin', 'teacher'), async (req: Request, res: Response) => {
+router.post('/course/:courseId/sync', requireStaffPermission('courses.manage'), async (req: Request, res: Response) => {
   const { courseId } = req.params;
 
   const pi = await PlaylistImport.findOne({ courseId });
@@ -311,7 +312,7 @@ router.post('/course/:courseId/sync', requireRole('admin', 'teacher'), async (re
 // ─── Import playlist as bulk Study Resources (Videos) ────────────────────────
 // POST /api/playlist/import-resources
 // Body: { playlistUrl, subject, classLevel, category, tags?, batch?, isPublic? }
-router.post('/import-resources', requireRole('admin', 'teacher'), async (req: Request, res: Response) => {
+router.post('/import-resources', requireStaffPermission('courses.manage'), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const {

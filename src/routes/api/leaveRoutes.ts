@@ -1,3 +1,5 @@
+import { requireTenantScope } from '../../core/tenancy';
+import { staffHolds } from '../../middlewares/requirePermission';
 import { Router, Request, Response } from 'express';
 import Leave from '../../models/Leave';
 import User from '../../models/User';
@@ -29,8 +31,10 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
 
     let query: any = {};
 
-    if (user.role === 'teacher') {
-      // Teachers can only see their own leaves
+    // Everyone sees their own leave; only someone who decides leave sees the
+    // whole institute's. This used to narrow teachers alone, so a student (or
+    // a narrowed custom role) could list every teacher's leave.
+    if (!(await staffHolds(req, 'leaves.approve'))) {
       query.$or = [
         { teacherId: user.id },
         { teacherId: user._id?.toString() },
@@ -74,7 +78,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
       }
     }
 
-    const leaves = await Leave.find(query)
+    const leaves = await Leave.find({ ...query, ...requireTenantScope('leaves') })
       .populate('approvedBy', 'name email')
       .sort({ createdAt: -1 });
 
@@ -89,7 +93,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
 router.get('/:leaveId', authMiddleware, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const leave = await Leave.findById(req.params.leaveId)
+    const leave = await Leave.findOne({ _id: req.params.leaveId, ...requireTenantScope('leaves') })
       .populate('approvedBy', 'name email');
 
     if (!leave) {
@@ -125,7 +129,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
     }
 
     // Fetch full user details to get name and email
-    const teacher = await User.findById(user.id);
+    const teacher = await User.findOne({ _id: user.id, ...requireTenantScope('leaves') });
     if (!teacher) {
       return res.status(404).json({ error: 'Teacher not found' });
     }
@@ -186,7 +190,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
     await leave.save();
 
     // Notify admin about new leave request
-    const admins = await User.find({ role: 'admin' });
+    const admins = await User.find({ role: 'admin', ...requireTenantScope('leaves:notify-admins') });
     for (const admin of admins) {
       const notification = new Notification({
         userId: admin._id,
@@ -212,7 +216,7 @@ router.patch('/:leaveId/status', authMiddleware, async (req: Request, res: Respo
   try {
     const user = (req as any).user;
 
-    if (user.role !== 'admin') {
+    if (!(await staffHolds(req, 'leaves.approve'))) {
       return res.status(403).json({ error: 'Only admins can approve/reject leaves' });
     }
 
@@ -222,7 +226,7 @@ router.patch('/:leaveId/status', authMiddleware, async (req: Request, res: Respo
       return res.status(400).json({ error: 'Status must be either approved or rejected' });
     }
 
-    const leave = await Leave.findById(req.params.leaveId);
+    const leave = await Leave.findOne({ _id: req.params.leaveId, ...requireTenantScope('leaves') });
 
     if (!leave) {
       return res.status(404).json({ error: 'Leave not found' });
@@ -300,7 +304,7 @@ router.patch('/:leaveId/status', authMiddleware, async (req: Request, res: Respo
 router.delete('/:leaveId', authMiddleware, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const leave = await Leave.findById(req.params.leaveId);
+    const leave = await Leave.findOne({ _id: req.params.leaveId, ...requireTenantScope('leaves') });
 
     if (!leave) {
       return res.status(404).json({ error: 'Leave not found' });
@@ -319,11 +323,11 @@ router.delete('/:leaveId', authMiddleware, async (req: Request, res: Response) =
       if (leave.status !== 'pending') {
         return res.status(400).json({ error: 'Cannot delete a processed leave request' });
       }
-    } else if (user.role !== 'admin') {
+    } else if (!(await staffHolds(req, 'leaves.approve'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
 
-    await Leave.findByIdAndDelete(req.params.leaveId);
+    await Leave.findOneAndDelete({ _id: req.params.leaveId, ...requireTenantScope('leaves') });
 
     res.json({ message: 'Leave request deleted successfully' });
   } catch (error: any) {

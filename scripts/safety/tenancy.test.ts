@@ -1,15 +1,23 @@
 /**
  * Tenancy behaviour tests — no database, no network, under a second.
  *
- * These exist to prove the two properties the whole migration rests on:
+ * These exist to prove the properties the whole migration rests on:
  *
- *   1. WARN MODE NEVER FILTERS A READ.
- *      During the warn period orgId is not backfilled yet. If observation
- *      subtracted documents, every screen in production would go blank the
- *      moment this shipped. This is the property that makes the change safe to
- *      deploy to a live system.
+ *   1. WITHOUT A TENANT, WARN MODE NEVER FILTERS A READ.
+ *      Pre-migration production has no context at all. If observation
+ *      subtracted documents there, every screen would go blank on deploy.
  *
- *   2. ENFORCE MODE FAILS CLOSED.
+ *   2. WITH A TENANT, NO MODE BUT `off` LETS IT READ ANOTHER'S DATA.
+ *      Every organization is filtered strictly to itself — including under
+ *      warn, which used to observe only and let one institute's administrator
+ *      read and approve another's users. The legacy data owner alone also sees
+ *      rows that carry no `orgId` (all of which are its own) until enforce.
+ *
+ *   3. NO TENANT MAY WRITE INTO ANOTHER.
+ *      A document created or updated in one organization's context that names
+ *      another organization is refused, in every mode but `off`.
+ *
+ *   4. ENFORCE MODE FAILS CLOSED.
  *      No context means throw — never fall back to an organization, never
  *      return unscoped results, never log-and-continue.
  *
@@ -26,7 +34,7 @@ import {
   withoutTenantScope,
   runWithoutAnyContext,
 } from '../../src/core/tenancy/context';
-import { TenantContextMissing } from '../../src/core/tenancy/errors';
+import { TenantContextMissing, TenantMismatch } from '../../src/core/tenancy/errors';
 
 let failures = 0;
 let checks = 0;
@@ -136,8 +144,8 @@ async function main() {
     );
   }
 
-  // ── Property 1: warn never filters ───────────────────────────────────────
-  console.log('\nwarn mode — the property that makes this deployable');
+  // ── Property 1: without a tenant, warn never filters ───────────────────────
+  console.log('\nwarn mode — no tenant, no change (pre-migration production)');
   setEnv('warn');
   resetUnscopedReport();
 
@@ -152,17 +160,100 @@ async function main() {
     );
   }
 
-  await runWithTenant({ orgId: 'ORG_001', source: 'test' }, async () => {
+  // ── Property 2: a known tenant reads only itself, in warn too ───────────────
+  console.log('\nwarn mode — a known tenant is isolated anyway');
+  delete process.env.ORG_ID;
+  delete process.env.LEGACY_DATA_ORG_ID;
+  await runWithTenant({ orgId: 'ORG_002', source: 'test' }, async () => {
     const query = Scoped.find({ classLevel: '11' });
     await runHooks(query);
     const filter = filterOf(query);
     check(
-      'WARN inside a tenant context: still NOT filtered',
-      filter.orgId === undefined,
-      `filter was ${JSON.stringify(filter)}`,
+      'WARN inside a tenant context: filtered STRICTLY to that organization',
+      filter.orgId === 'ORG_002',
+      `filter was ${JSON.stringify(filter)} — warn must not let one tenant read another`,
     );
     check('original criteria preserved', filter.classLevel === '11');
   });
+
+  await runWithTenant({ orgId: 'ORG_002', source: 'test' }, async () => {
+    const query = Scoped.findOne({ _id: new mongoose.Types.ObjectId(), orgId: 'ORG_009' } as never);
+    await runHooks(query);
+    check(
+      'WARN: an orgId in the query cannot widen or redirect it',
+      filterOf(query).orgId === 'ORG_002',
+      JSON.stringify(filterOf(query)),
+    );
+  });
+
+  process.env.LEGACY_DATA_ORG_ID = 'ORG_001';
+  await runWithTenant({ orgId: 'ORG_001', source: 'test' }, async () => {
+    const query = Scoped.find({});
+    await runHooks(query);
+    check(
+      'WARN, legacy data owner: its own rows AND the un-attributed ones',
+      JSON.stringify(filterOf(query).orgId) === JSON.stringify({ $in: ['ORG_001', null] }),
+      JSON.stringify(filterOf(query)),
+    );
+  });
+  await runWithTenant({ orgId: 'ORG_002', source: 'test' }, async () => {
+    const query = Scoped.find({});
+    await runHooks(query);
+    check(
+      'WARN, any other organization: never the un-attributed rows',
+      filterOf(query).orgId === 'ORG_002',
+      JSON.stringify(filterOf(query)),
+    );
+  });
+  delete process.env.LEGACY_DATA_ORG_ID;
+
+  setEnv('warn', 'pinned');
+  process.env.ORG_ID = 'ORG_001';
+  await runWithTenant({ orgId: 'ORG_001', source: 'pinned' }, async () => {
+    const query = Scoped.find({});
+    await runHooks(query);
+    check(
+      'WARN, pinned (api-legacy): the pinned org owns the un-attributed rows',
+      JSON.stringify(filterOf(query).orgId) === JSON.stringify({ $in: ['ORG_001', null] }),
+      JSON.stringify(filterOf(query)),
+    );
+  });
+  delete process.env.ORG_ID;
+
+  // ── Property 3: no tenant writes into another ───────────────────────────────
+  console.log('\nwrites never cross organizations');
+  const saveHook = (doc: mongoose.Document) =>
+    new Promise<Error | null>((resolve) =>
+      (Scoped as unknown as { hooks: { execPre: Function } }).hooks.execPre('save', doc, [], (err?: Error) => resolve(err ?? null)),
+    );
+  for (const mode of ['warn', 'enforce']) {
+    setEnv(mode, 'claim');
+    await runWithTenant({ orgId: 'ORG_002', source: 'claim' }, async () => {
+      const foreign = await saveHook(new Scoped({ title: 'x', orgId: 'ORG_003' }));
+      check(
+        `${mode.toUpperCase()}: create naming another organization is REFUSED`,
+        foreign instanceof TenantMismatch || foreign?.name === 'TenantMismatch',
+        String(foreign?.message ?? 'no error — a cross-tenant write'),
+      );
+      const own = new Scoped({ title: 'y' });
+      const stamped = await saveHook(own);
+      check(`${mode.toUpperCase()}: create with no orgId is stamped with the context`, stamped === null && own.orgId === 'ORG_002');
+
+      const moved = Scoped.updateOne({ title: 'y' }, { $set: { orgId: 'ORG_003' } });
+      const moveError = await runHooks(moved);
+      check(
+        `${mode.toUpperCase()}: update re-pointing a row at another organization is REFUSED`,
+        moveError?.name === 'TenantMismatch',
+        String(moveError?.message ?? 'no error'),
+      );
+      const stripped = Scoped.updateMany({}, { $unset: { orgId: 1 } });
+      const stripError = await runHooks(stripped);
+      check(`${mode.toUpperCase()}: update stripping the tenant key is REFUSED`, stripError?.name === 'TenantMismatch');
+      const plain = Scoped.updateOne({ title: 'y' }, { $set: { title: 'z' } });
+      check(`${mode.toUpperCase()}: an ordinary update still runs`, (await runHooks(plain)) === null);
+    });
+  }
+  setEnv('warn');
 
   {
     resetUnscopedReport();
@@ -175,7 +266,7 @@ async function main() {
     check('WARN without context: records the event for the gate', report.length > 0);
   }
 
-  // ── Property 2: enforce fails closed ─────────────────────────────────────
+  // ── Property 4: enforce fails closed ─────────────────────────────────────
   console.log('\nenforce mode — fail closed');
   setEnv('enforce');
 
@@ -389,13 +480,28 @@ async function main() {
 
     // The count is asserted so the list cannot grow quietly. Changing it is
     // meant to require editing this number, which forces a reviewer to look.
+    // 20: GET /api/auth/registration-policy joined on 2026-09-23. It tells an
+    // app whether to show a registration form, and when no organization
+    // resolves it answers "unknown application" without reading tenant data.
     check(
       `allowlist size is exactly ${PUBLIC_ROUTE_ALLOWLIST.length} (update deliberately)`,
-      PUBLIC_ROUTE_ALLOWLIST.length === 19,
+      // 23 since 2026-09-24: refresh, accept-invite and reset-password-link,
+      // each authorised by a credential of its own that names one account.
+      PUBLIC_ROUTE_ALLOWLIST.length === 23,
       `got ${PUBLIC_ROUTE_ALLOWLIST.length} — if intentional, update the test`,
+    );
+    check(
+      'the registration-policy entry is pre-auth and GET-only',
+      PUBLIC_ROUTE_ALLOWLIST.some(
+        (e) => e.path === '/api/auth/registration-policy' && e.method === 'GET' && e.classification === 'pre-auth',
+      ) &&
+        !PUBLIC_ROUTE_ALLOWLIST.some((e) => e.path === '/api/auth/registration-policy' && e.method !== 'GET'),
     );
 
     check('login is allowlisted', findPublicRoute('POST', '/api/auth/login') !== null);
+    check('accept-invite is allowlisted', findPublicRoute('POST', '/api/auth/accept-invite') !== null);
+    check('refresh is allowlisted', findPublicRoute('POST', '/api/auth/refresh') !== null);
+    check('logout-all is NOT allowlisted (it needs a session)', findPublicRoute('POST', '/api/auth/logout-all') === null);
     check(
       'param routes match',
       findPublicRoute('GET', '/api/scholarship/tests/abc123') !== null,

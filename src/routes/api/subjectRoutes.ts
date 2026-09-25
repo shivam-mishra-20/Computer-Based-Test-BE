@@ -8,14 +8,17 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
+import { authMiddleware } from '../../middlewares/authMiddleware';
+import { requireStaffAnyPermission } from '../../middlewares/requirePermission';
 import { createSubject, listSubjects, SubjectConflictError, SubjectValidationError } from '../../services/subjectService';
 
 const router = Router();
 
-// Teachers and admins only — the same pair every other subject-adjacent
-// teacher endpoint (AI content, homework, materials) already guards with.
-const guards = [authMiddleware, requireRole('teacher', 'admin')];
+// Staff only. Reading the picker needs any permission that works with
+// subjects; adding one needs the right to manage subjects or to author
+// questions (a teacher adds the subject while writing the question).
+const guards = [authMiddleware, requireStaffAnyPermission('subjects.read', 'subjects.manage', 'questions.read')];
+const writeGuards = [authMiddleware, requireStaffAnyPermission('subjects.manage', 'questions.create')];
 
 /**
  * @route   GET /api/subjects
@@ -37,7 +40,7 @@ router.get('/', ...guards, async (_req: Request, res: Response) => {
  * @desc    Create a new subject, reusable across every teacher screen.
  * @access  Private (teacher, admin)
  */
-router.post('/', ...guards, async (req: Request, res: Response) => {
+router.post('/', ...writeGuards, async (req: Request, res: Response) => {
   try {
     const { subject, subjects } = await createSubject(req.body?.name);
     res.status(201).json({ success: true, subject, subjects });

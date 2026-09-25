@@ -1,5 +1,6 @@
+import { requireStaffPermission } from '../../middlewares/requirePermission';
 import { Router } from 'express';
-import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
+import { authMiddleware} from '../../middlewares/authMiddleware';
 import {
   getRooms,
   getExamDates,
@@ -18,9 +19,9 @@ router.get('/rooms', authMiddleware, getRooms);
 router.get('/student/:date', authMiddleware, getMyRoom);
 
 // Admin: manage allocations per exam date.
-router.get('/dates', authMiddleware, requireRole('admin'), getExamDates);
-router.get('/dates/:date/roster', authMiddleware, requireRole('admin'), getDateRoster);
-router.put('/dates/:date', authMiddleware, requireRole('admin'), saveDraft);
-router.post('/dates/:date/publish', authMiddleware, requireRole('admin'), publishAllocation);
+router.get('/dates', authMiddleware, requireStaffPermission('rooms.manage'), getExamDates);
+router.get('/dates/:date/roster', authMiddleware, requireStaffPermission('rooms.manage'), getDateRoster);
+router.put('/dates/:date', authMiddleware, requireStaffPermission('rooms.manage'), saveDraft);
+router.post('/dates/:date/publish', authMiddleware, requireStaffPermission('rooms.manage'), publishAllocation);
 
 export default router;

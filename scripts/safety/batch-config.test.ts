@@ -57,12 +57,28 @@ section('Pre-migration (today\'s production): batches must still be readable');
 
 section('Pinned deployment before the orgId backfill');
 {
-  const scope = runWithTenant({ orgId: 'org_001', source: 'pinned' }, () => batchReadScope());
+  // api-legacy: pinned to org 001, which owns every document written before
+  // documents carried an orgId. It must still read those — and, since warn
+  // now filters reads, must NOT read documents stamped with another
+  // organization.
+  const saved = { mode: process.env.TENANT_MODE, org: process.env.ORG_ID, enf: process.env.TENANT_ENFORCEMENT };
+  Object.assign(process.env, { TENANT_MODE: 'pinned', ORG_ID: 'org_001', TENANT_ENFORCEMENT: 'warn' });
+  const scope = runWithTenant({ orgId: 'org_001', source: 'pinned' }, () => batchReadScope()) as { orgId?: { $in?: unknown[] } };
+  const accepted = scope.orgId?.$in ?? [];
   check(
-    'pinned + warn does not filter on a field the documents do not carry yet',
-    isUnscoped(scope),
+    'pinned + warn still reads documents that carry no orgId yet',
+    accepted.includes(null),
     JSON.stringify(scope),
   );
+  check(
+    '...and its own, and nothing stamped with another organization',
+    accepted.length === 2 && accepted.includes('org_001'),
+    JSON.stringify(scope),
+  );
+  for (const [key, value] of [['TENANT_MODE', saved.mode], ['ORG_ID', saved.org], ['TENANT_ENFORCEMENT', saved.enf]] as const) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 }
 
 section('Multi-tenant: isolation must hold');

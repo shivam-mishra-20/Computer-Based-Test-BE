@@ -44,6 +44,7 @@ import {
   verifyWorkspaceIdentity,
 } from '../core/platform/appBuildWorkspace';
 import { getEasBuild, redactSecrets, startEasBuild } from '../core/platform/easClient';
+import { normaliseEasDuration } from '../core/platform/buildProgress';
 import { ensureEasProject, storedEasProject } from '../core/platform/easProvisioning';
 import {
   pollContextRoot,
@@ -138,6 +139,7 @@ async function runPrepare(data: AppBuildJobData): Promise<void> {
       orgId: String(job.orgId),
       buildId,
       artifactType: job.artifactType,
+      appProfile: job.appProfile,
       onProgress: async (message) => {
         await markProgress(buildId, { statusMessage: message, progress: 25 });
       },
@@ -226,6 +228,8 @@ async function runPrepare(data: AppBuildJobData): Promise<void> {
       progress: 55,
       easBuildId: started.id,
       easBuildUrl: started.buildUrl,
+      easStatus: started.status || 'NEW',
+      easSubmittedAt: new Date(),
     });
 
     // Deliberately not fatal. By this point EAS IS building — throwing here
@@ -298,6 +302,15 @@ async function runPoll(data: AppBuildJobData): Promise<void> {
   }
 
   if (build.status === 'FINISHED') {
+    // How long the compile took, for the NEXT build's estimate. EAS's own
+    // metric when it is usable; otherwise our observation of it, which is at
+    // most one poll interval off at either end.
+    const measured =
+      normaliseEasDuration(build.buildDuration) ??
+      (job.buildingStartedAt ? Date.now() - new Date(job.buildingStartedAt).getTime() : null);
+    if (measured) {
+      await markProgress(buildId, { easStatus: 'FINISHED', buildDurationMs: measured });
+    }
     if (!build.artifactUrl) {
       await markFailed(buildId, {
         errorCode: 'EAS_NO_ARTIFACT',
@@ -343,6 +356,17 @@ async function runPoll(data: AppBuildJobData): Promise<void> {
     statusMessage: described.message,
     progress: described.progress,
     easBuildUrl: build.buildUrl || job.easBuildUrl,
+    easStatus: build.status,
+    // Queue fields are written even when absent, so a build that has left the
+    // queue does not keep showing the position it had while in it.
+    queuePosition: build.status === 'IN_QUEUE' ? build.queuePosition : undefined,
+    initialQueuePosition: build.initialQueuePosition ?? job.initialQueuePosition,
+    estimatedWaitSeconds: build.status === 'IN_QUEUE' ? build.estimatedWaitTimeLeftSeconds : undefined,
+    // The first poll that sees it compiling marks the start of the long phase.
+    // Never overwritten, or every poll would restart the clock.
+    ...(build.status === 'IN_PROGRESS' && !job.buildingStartedAt
+      ? { buildingStartedAt: new Date() }
+      : {}),
   });
 
   await enqueuePoll({ ...data, pollCount: pollCount + 1 }, pollDelayMs(pollCount + 1)).catch((err) => {

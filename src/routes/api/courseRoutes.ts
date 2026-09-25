@@ -1,3 +1,5 @@
+import { requireTenantScope } from '../../core/tenancy';
+import { staffHolds } from '../../middlewares/requirePermission';
 import { Router, Request, Response } from 'express';
 import Course from '../../models/Course';
 import CourseProgress from '../../models/CourseProgress';
@@ -70,7 +72,7 @@ router.get('/', authMiddleware, cacheMiddleware({ ttl: 300, keyFn: (req) => `cou
   try {
     const user = (req as any).user;
     const { classLevel, subject, batch, status } = req.query;
-    const isAdmin = ['admin', 'teacher'].includes(user.role);
+    const isAdmin = await staffHolds(req, 'courses.read');
     const requestedClassLevel = typeof classLevel === 'string' ? classLevel : '';
 
     const query: any = {};
@@ -152,8 +154,8 @@ router.get('/', authMiddleware, cacheMiddleware({ ttl: 300, keyFn: (req) => `cou
 router.get('/:courseId', authMiddleware, cacheMiddleware({ ttl: 300, keyFn: (req) => `course:${req.params.courseId}:user:${(req as any).user.id}` }), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    const isAdmin = ['admin', 'teacher'].includes(user.role);
-    const course = await Course.findById(req.params.courseId)
+    const isAdmin = await staffHolds(req, 'courses.read');
+    const course = await Course.findOne({ _id: req.params.courseId, ...requireTenantScope('courses') })
       .populate('instructor', 'name email')
       .lean();
 
@@ -217,7 +219,7 @@ router.post('/:courseId/enroll', authMiddleware, invalidateCacheOn(['courses', '
       return res.status(403).json({ error: 'Only students can enroll in courses' });
     }
 
-    const course = await Course.findById(req.params.courseId);
+    const course = await Course.findOne({ _id: req.params.courseId, ...requireTenantScope('courses') });
     
     if (!course) {
       return res.status(404).json({ error: 'Course not found' });
@@ -245,7 +247,7 @@ router.post('/:courseId/enroll', authMiddleware, invalidateCacheOn(['courses', '
     }
 
     // Add student to enrolled list
-    await Course.findByIdAndUpdate(course._id, {
+    await Course.findOneAndUpdate({ _id: course._id, ...requireTenantScope('courses') }, {
       $addToSet: { enrolledStudents: user.id }
     });
 
@@ -276,7 +278,7 @@ router.post('/:courseId/progress', authMiddleware, invalidateCacheOn(['enrolled'
       return res.status(403).json({ error: 'Only students can update course progress' });
     }
     
-    const course = await Course.findById(req.params.courseId);
+    const course = await Course.findOne({ _id: req.params.courseId, ...requireTenantScope('courses') });
     if (!course) {
       return res.status(404).json({ error: 'Course not found' });
     }
@@ -330,7 +332,7 @@ router.post('/:courseId/lectures/:lectureId/position', authMiddleware, async (re
       return res.status(403).json({ error: 'Only students can save lecture positions' });
     }
 
-    const course = await Course.findById(courseId).select('classLevel').lean();
+    const course = await Course.findOne({ _id: courseId, ...requireTenantScope('courses') }).select('classLevel').lean();
     if (!course) {
       return res.status(404).json({ error: 'Course not found' });
     }
@@ -371,7 +373,7 @@ router.get('/:courseId/lectures/:lectureId/position', authMiddleware, cacheMiddl
       return res.status(403).json({ error: 'Only students can fetch lecture positions' });
     }
 
-    const course = await Course.findById(courseId).select('classLevel').lean();
+    const course = await Course.findOne({ _id: courseId, ...requireTenantScope('courses') }).select('classLevel').lean();
     if (!course) {
       return res.status(404).json({ error: 'Course not found' });
     }
@@ -441,7 +443,7 @@ router.get('/my/enrolled', authMiddleware, cacheMiddleware({ ttl: 300, keyFn: (r
 router.post('/', authMiddleware, invalidateCacheOn(['courses', 'course:']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'courses.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
@@ -460,13 +462,11 @@ router.post('/', authMiddleware, invalidateCacheOn(['courses', 'course:']), asyn
 // Admin: Update course - Invalidates course and enrolled caches
 router.put('/:courseId', authMiddleware, invalidateCacheOn(['courses', 'course:', 'enrolled']), async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'courses.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
-    const course = await Course.findByIdAndUpdate(
-      req.params.courseId,
+    const course = await Course.findOneAndUpdate({ _id: req.params.courseId, ...requireTenantScope('courses') },
       req.body,
       { new: true }
     );
@@ -484,12 +484,11 @@ router.put('/:courseId', authMiddleware, invalidateCacheOn(['courses', 'course:'
 // Admin: Delete course - Invalidates all course caches
 router.delete('/:courseId', authMiddleware, invalidateCacheOn(['courses', 'course:', 'enrolled']), async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'courses.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
-    const course = await Course.findByIdAndDelete(req.params.courseId);
+    const course = await Course.findOneAndDelete({ _id: req.params.courseId, ...requireTenantScope('courses') });
     
     if (!course) {
       return res.status(404).json({ error: 'Course not found' });
@@ -506,8 +505,7 @@ router.delete('/:courseId', authMiddleware, invalidateCacheOn(['courses', 'cours
 // Add module to course
 router.post('/:courseId/modules', authMiddleware, invalidateCacheOn(['course:', 'courses:']), async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'courses.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
@@ -516,7 +514,7 @@ router.post('/:courseId/modules', authMiddleware, invalidateCacheOn(['course:', 
       return res.status(400).json({ error: 'Module title is required' });
     }
     
-    const course = await Course.findById(req.params.courseId);
+    const course = await Course.findOne({ _id: req.params.courseId, ...requireTenantScope('courses') });
     if (!course) {
       return res.status(404).json({ error: 'Course not found' });
     }
@@ -541,15 +539,14 @@ router.post('/:courseId/modules', authMiddleware, invalidateCacheOn(['course:', 
 // Update module
 router.put('/:courseId/modules/:moduleIndex', authMiddleware, invalidateCacheOn(['course:', 'courses:']), async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'courses.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
     const { title, description } = req.body;
     const moduleIndex = parseInt(req.params.moduleIndex);
     
-    const course = await Course.findById(req.params.courseId);
+    const course = await Course.findOne({ _id: req.params.courseId, ...requireTenantScope('courses') });
     if (!course || !course.syllabus || !course.syllabus[moduleIndex]) {
       return res.status(404).json({ error: 'Module not found' });
     }
@@ -567,14 +564,13 @@ router.put('/:courseId/modules/:moduleIndex', authMiddleware, invalidateCacheOn(
 // Delete module
 router.delete('/:courseId/modules/:moduleIndex', authMiddleware, invalidateCacheOn(['course:', 'courses:']), async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'courses.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
     const moduleIndex = parseInt(req.params.moduleIndex);
     
-    const course = await Course.findById(req.params.courseId);
+    const course = await Course.findOne({ _id: req.params.courseId, ...requireTenantScope('courses') });
     if (!course || !course.syllabus || !course.syllabus[moduleIndex]) {
       return res.status(404).json({ error: 'Module not found' });
     }
@@ -595,8 +591,7 @@ import youtubeService from '../../services/youtubeService';
 // Add lecture to module
 router.post('/:courseId/modules/:moduleIndex/lectures', authMiddleware, invalidateCacheOn(['course:', 'courses:']), async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'courses.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
@@ -607,7 +602,7 @@ router.post('/:courseId/modules/:moduleIndex/lectures', authMiddleware, invalida
       return res.status(400).json({ error: 'Lecture title is required' });
     }
     
-    const course = await Course.findById(req.params.courseId);
+    const course = await Course.findOne({ _id: req.params.courseId, ...requireTenantScope('courses') });
     if (!course || !course.syllabus || !course.syllabus[moduleIndex]) {
       return res.status(404).json({ error: 'Module not found' });
     }
@@ -652,8 +647,7 @@ router.post('/:courseId/modules/:moduleIndex/lectures', authMiddleware, invalida
 // Update lecture
 router.put('/:courseId/modules/:moduleIndex/lectures/:lectureIndex', authMiddleware, invalidateCacheOn(['course:', 'courses:']), async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'courses.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
@@ -661,7 +655,7 @@ router.put('/:courseId/modules/:moduleIndex/lectures/:lectureIndex', authMiddlew
     const moduleIndex = parseInt(req.params.moduleIndex);
     const lectureIndex = parseInt(req.params.lectureIndex);
     
-    const course = await Course.findById(req.params.courseId);
+    const course = await Course.findOne({ _id: req.params.courseId, ...requireTenantScope('courses') });
     if (!course || !course.syllabus?.[moduleIndex]?.lectures?.[lectureIndex]) {
       return res.status(404).json({ error: 'Lecture not found' });
     }
@@ -695,15 +689,14 @@ router.put('/:courseId/modules/:moduleIndex/lectures/:lectureIndex', authMiddlew
 // Delete lecture
 router.delete('/:courseId/modules/:moduleIndex/lectures/:lectureIndex', authMiddleware, invalidateCacheOn(['course:', 'courses:']), async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'courses.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
     const moduleIndex = parseInt(req.params.moduleIndex);
     const lectureIndex = parseInt(req.params.lectureIndex);
     
-    const course = await Course.findById(req.params.courseId);
+    const course = await Course.findOne({ _id: req.params.courseId, ...requireTenantScope('courses') });
     if (!course || !course.syllabus?.[moduleIndex]?.lectures?.[lectureIndex]) {
       return res.status(404).json({ error: 'Lecture not found' });
     }

@@ -22,11 +22,14 @@ export {
   shouldRunScheduledJobs,
   legacyStorageCompatEnabled,
   describeTenancy,
+  legacyDataOrgId,
+  readScopeFor,
+  readFilterFor,
   type TenantMode,
   type TenantEnforcement,
 } from './config';
 
-export { tenantScope, tenantScopeActive } from './queryScope';
+export { tenantScope, tenantScopeActive, requireTenantScope, currentTenantOrgId, type TenantFilter } from './queryScope';
 
 export {
   preservingTenantContext,

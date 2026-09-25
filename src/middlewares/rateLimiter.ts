@@ -134,6 +134,32 @@ export const uploadLimiter = rateLimit({
  * since there is no user. Deliberately tight: a real person submits a handful
  * of these, so a low ceiling blunts scripted spam without affecting anyone.
  */
+/**
+ * Failed attempts to identify a ward, per device.
+ *
+ * A parent proves a relationship with a student code and the student's phone
+ * number. Each wrong guess is refused with the same message, but without a
+ * limit an attacker holding a seating chart could simply try phone numbers.
+ * Keyed by IP rather than account, because the attacker chooses the account
+ * email and would rotate it. Successful matches do not count, and requests that
+ * are not a parent's are not seen at all.
+ */
+export const guardianVerifyLimiter = rateLimit({
+  windowMs: envNumber('GUARDIAN_VERIFY_WINDOW_MS', 60 * 60 * 1000),
+  max: envNumber('GUARDIAN_VERIFY_MAX', 10),
+  message: { message: 'Too many attempts to verify a student from this device. Please try again later.', code: 'WARD_VERIFY_LIMITED' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: createRedisStore('rl:guardian-verify:'),
+  passOnStoreError: true,
+  skipSuccessfulRequests: true,
+  skip: (req) => {
+    const role = String((req.body as { role?: unknown } | undefined)?.role ?? '').toLowerCase();
+    return !(role === 'parent' || req.path.includes('link-request'));
+  },
+  validate: false,
+});
+
 export const publicFormLimiter = rateLimit({
   windowMs: envNumber('PUBLIC_FORM_RATE_LIMIT_WINDOW_MS', 60 * 60 * 1000),
   max: envNumber('PUBLIC_FORM_RATE_LIMIT_MAX', 20),

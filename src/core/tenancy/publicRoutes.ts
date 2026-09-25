@@ -59,6 +59,16 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
     justification: 'Account creation precedes any session; the org comes from the invite or host.',
   },
   {
+    method: 'GET',
+    path: '/api/auth/registration-policy',
+    classification: 'pre-auth',
+    reason: 'auth:registration-policy',
+    justification:
+      'Tells an app whether its register screen should show a form. Reached with no ' +
+      'organization only when the routing hint names none, and then answers "unknown ' +
+      'application" without reading any tenant data.',
+  },
+  {
     method: 'POST',
     path: '/api/auth/public-register',
     classification: 'pre-auth',
@@ -96,6 +106,34 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
     classification: 'pre-auth',
     reason: 'auth:reset-password',
     justification: 'Authorised by a single-use emailed token, not by a session.',
+  },
+  {
+    method: 'POST',
+    path: '/api/auth/reset-password-link',
+    classification: 'pre-auth',
+    reason: 'auth:reset-password-link',
+    justification:
+      'Authorised by a one-time 32-byte link token (stored only as its hash) that names ' +
+      'exactly one account; reached by someone who cannot sign in.',
+  },
+  {
+    method: 'POST',
+    path: '/api/auth/accept-invite',
+    classification: 'pre-auth',
+    reason: 'auth:accept-invite',
+    justification:
+      'An invited person setting their first password. Authorised by the one-time invite ' +
+      'token, which names exactly one account; there is no session yet by definition.',
+  },
+  {
+    method: 'POST',
+    path: '/api/auth/refresh',
+    classification: 'pre-auth',
+    reason: 'auth:refresh',
+    justification:
+      'Exchanges a refresh token for an access token. The refresh token is the credential ' +
+      '(audience "refresh", checked against the user\'s tokenVersion); the handler reads ' +
+      'only that one account and its organization\'s state.',
   },
   {
     method: 'GET',

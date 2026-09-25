@@ -10,11 +10,15 @@ export async function logAudit(
 ) {
 	try {
 		if (!userId) return;
+		// `entityId` and `metadata` are the schema's names. This used to write
+		// `resource` and `meta`, which strict mode silently discarded, so every
+		// audit row recorded WHO and WHAT ACTION but never what it was done to.
 		await AuditLog.create({
 			userId: new Types.ObjectId(String(userId)),
 			action,
-			resource,
-			meta,
+			status: 'success',
+			entityId: resource,
+			metadata: meta,
 		});
 	} catch {
 		// ignore logging failures

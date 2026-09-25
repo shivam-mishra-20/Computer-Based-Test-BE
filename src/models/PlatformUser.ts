@@ -38,6 +38,11 @@ export const PLATFORM_CAPABILITIES = [
   // colour is fixed by saving again, a wrong package name is a second listing
   // in a store that cannot be merged with the first.
   'app.manage',
+  // Permanently deleting an organization and everything it owns. Its own
+  // capability, held by `owner` alone (owner holds every capability by
+  // construction): no other role's work ever needs it, and a destructive
+  // operation should not ride along with a grant made for something else.
+  'org.delete',
 ] as const;
 
 /**

@@ -15,16 +15,15 @@
  * what stops holding the day a bad import or a bad merge writes an Attempt in
  * one org pointing at a User in another. This makes the guarantee explicit.
  *
- * ── Why it is enforcement-aware ─────────────────────────────────────────────
- * Under `warn`, `orgId` has not been backfilled, so a sub-pipeline matching
- * `orgId` would match NOTHING and these endpoints would return empty joins
- * immediately on deploy. Same trap as read filtering, and the same answer:
- * observe under warn, constrain under enforce. Under `warn` this emits the
- * byte-identical `localField`/`foreignField` stage the code used before.
+ * ── The constraint ──────────────────────────────────────────────────────────
+ * The same filter the plugin applies to the source collection
+ * (`config.readFilterFor`): strict for every organization, and inclusive of
+ * un-attributed rows for the legacy data owner until enforce — so the join
+ * never reaches another organization's rows, in any mode but `off`.
  */
 
 import { currentOrgId } from './context';
-import { shouldFilterReads } from './config';
+import { readFilterFor } from './config';
 
 export interface TenantLookupSpec {
   /** Target collection name, as `$lookup.from` expects it. */
@@ -52,14 +51,11 @@ export function tenantLookup(spec: TenantLookupSpec): Record<string, unknown> {
 
   if (spec.global) return plain;
 
-  // Warn / off: behave exactly as the original code did.
-  if (!shouldFilterReads()) return plain;
-
   const orgId = currentOrgId();
-  // Enforce with no context: the plugin has already thrown on the source
-  // collection before this stage is ever built, so reaching here means the
-  // caller is inside an explicit withoutTenantScope block. Honour that.
-  if (!orgId) return plain;
+  // No tenant (pre-migration, or an explicit withoutTenantScope block): the
+  // original stage, exactly as before.
+  const filter = readFilterFor(orgId);
+  if (!orgId || !filter) return plain;
 
   return {
     $lookup: {
@@ -71,7 +67,7 @@ export function tenantLookup(spec: TenantLookupSpec): Record<string, unknown> {
             // Both conditions in ONE $match so the orgId constraint cannot be
             // separated from the join predicate by a later refactor.
             $expr: { $eq: [`$${spec.foreignField}`, '$$tenantLookupKey'] },
-            orgId,
+            ...filter,
           },
         },
       ],

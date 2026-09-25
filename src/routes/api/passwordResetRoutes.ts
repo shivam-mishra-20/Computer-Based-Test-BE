@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import User from '../../models/User';
+import { withoutTenantScope } from '../../core/tenancy';
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';
 import { passwordResetLimiter } from '../../middlewares/rateLimiter';
@@ -27,7 +28,8 @@ router.post('/forgot-password', passwordResetLimiter, async (req: Request, res: 
     }
     
     // Generate reset token (6-digit numeric code for simplicity)
-    const resetToken = Math.floor(100000 + Math.random() * 900000).toString();
+    // A code for a human to type, drawn from a CSPRNG (Math.random is not one).
+    const resetToken = crypto.randomInt(100000, 1000000).toString();
     const resetExpires = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes
     
     // Hash the token before storing
@@ -37,8 +39,12 @@ router.post('/forgot-password', passwordResetLimiter, async (req: Request, res: 
     user.passwordResetExpires = resetExpires;
     await user.save();
     
-    // In production, you would send an email here
-    // For now, we'll return the token in development mode
+    // DELIVERY: the platform has no email/SMS provider. In production the code
+    // is therefore NOT returned (that would hand any caller the account), and it
+    // cannot be delivered either — self-service reset needs a provider wired in
+    // here. Until then an administrator issues a reset LINK instead
+    // (POST /api/org-admin/users/:id/reset-link). The response is identical
+    // either way, so it does not reveal whether the account exists.
     const response: any = { 
       success: true, 
       message: 'Password reset token generated. Valid for 15 minutes.',
@@ -67,8 +73,8 @@ router.post('/reset-password', passwordResetLimiter, async (req: Request, res: R
       return res.status(400).json({ error: 'Email, token, and new password are required' });
     }
     
-    if (newPassword.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters' });
+    if (String(newPassword).length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
     }
     
     // Hash the provided token for comparison
@@ -88,6 +94,8 @@ router.post('/reset-password', passwordResetLimiter, async (req: Request, res: R
     user.password = newPassword;
     user.passwordResetToken = undefined;
     user.passwordResetExpires = undefined;
+    // A reset signs out every session, including a thief's.
+    user.tokenVersion = (Number(user.tokenVersion) || 0) + 1;
     await user.save();
     
     res.json({ success: true, message: 'Password has been reset successfully' });
@@ -105,12 +113,19 @@ router.post('/welcome-tutorial/complete', async (req: Request, res: Response) =>
       return res.status(401).json({ error: 'Unauthorized' });
     }
     
-    // Decode token to get user ID (simplified - in production use proper middleware)
+    // Only a session credential of the account itself (not a platform or a
+    // refresh token), and only a harmless flag on that one account — looked up
+    // by the signed id, so it works with or without an organization claim.
     const jwt = require('jsonwebtoken');
     const token = authHeader.replace('Bearer ', '');
-    const decoded = jwt.verify(token, process.env.JWT_SECRET) as { id: string };
+    const decoded = jwt.verify(token, process.env.JWT_SECRET) as { id: string; aud?: string };
+    if (decoded.aud && decoded.aud !== 'tenant' && decoded.aud !== 'legacy') {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
     
-    await User.findByIdAndUpdate(decoded.id, { welcomeTutorialCompleted: true });
+    await withoutTenantScope('auth:welcome-tutorial', async () =>
+      User.updateOne({ _id: decoded.id }, { $set: { welcomeTutorialCompleted: true } }),
+    );
     
     res.json({ success: true, message: 'Welcome tutorial marked as completed' });
   } catch (error: any) {

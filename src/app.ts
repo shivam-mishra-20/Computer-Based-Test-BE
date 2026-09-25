@@ -9,6 +9,9 @@ import publicContentRoutes from './routes/api/publicContentRoutes';
 import publicTestRoutes from './routes/api/publicTestRoutes';
 import publicTestAdminRoutes from './routes/api/publicTestAdminRoutes';
 import userRoutes from './routes/api/userRoutes';
+import parentRoutes from './routes/api/parentRoutes';
+import guardianLinkRoutes from './routes/api/guardianLinkRoutes';
+import orgAdminRoutes from './routes/api/orgAdminRoutes';
 import testRoutes from './routes/api/testRoutes';
 import examRoutes from './routes/api/examRoutes';
 import attemptRoutes from './routes/api/attemptRoutes';
@@ -28,6 +31,7 @@ import scheduleRoutes from './routes/api/scheduleRoutes';
 import leaderboardRoutes from './routes/api/leaderboardRoutes';
 import bookmarkRoutes from './routes/api/bookmarkRoutes';
 import passwordResetRoutes from './routes/api/passwordResetRoutes';
+import sessionRoutes from './routes/api/sessionRoutes';
 import doubtRoutes from './routes/api/doubtRoutes';
 import lectureRoutes from './routes/api/lectureRoutes';
 import teacherRoutes from './routes/api/teacherRoutes';
@@ -169,6 +173,14 @@ const corsOptions: cors.CorsOptions = {
 		// fails the preflight and every save after step 1 looks to the
 		// applicant like the server is down.
 		'X-Application-Token',
+		// The pre-login organization hint (and the app identity beside it). A
+		// web client sends X-Org-Id before anyone has signed in, so a login page
+		// can be painted in its institute's colours; without these listed the
+		// browser failed the preflight, the request never left, and every web
+		// login page fell back to unbranded. Routing hints only — the server
+		// never lets them outrank a signed token (tenantContext.ts).
+		'X-Org-Id',
+		'X-App-Id',
 	],
 	exposedHeaders: ['Content-Range', 'X-Content-Range'],
 	methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -353,6 +365,7 @@ app.use('/api/me', meContextRoutes);
 app.use('/api/org', orgPublicRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/auth', passwordResetRoutes); // Password reset under /api/auth
+app.use('/api/auth', sessionRoutes); // Refresh, sign out everywhere, invite + reset links
 app.use('/api/learner', learnerRoutes); // Public Learner profile, home, saves, progress
 // Public "Register your institute" submissions. Unauthenticated, rate
 // limited, and able to write only to OrganizationRegistration — it creates
@@ -363,6 +376,9 @@ app.use('/api/public', publicContentRoutes); // Guest + learner content discover
 app.use('/api/public', publicTestRoutes); // Guest + learner assessment discovery (browse-only)
 app.use('/api/admin-assessments', publicTestAdminRoutes); // Staff authoring for public tests
 app.use('/api/users', userRoutes);
+app.use('/api/parent', parentRoutes); // Parent-scoped: verified wards only
+app.use('/api/guardian-links', guardianLinkRoutes); // Org admins review parent links
+app.use('/api/org-admin', orgAdminRoutes); // An institute's admins manage their OWN organization
 app.use('/api/tests', testRoutes);
 app.use('/api/exams', examRoutes);
 app.use('/api/attempts', attemptRoutes);

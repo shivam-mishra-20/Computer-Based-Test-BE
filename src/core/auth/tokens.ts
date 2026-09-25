@@ -46,14 +46,26 @@ export const TOKEN_TTL = {
   platform: '15m',
   refresh: '30d',
   /**
-   * 3650 days — deliberately unchanged.
+   * 3650 days — for clients that cannot refresh, and ONLY them.
    *
-   * The installed app has no refresh logic; shortening this would log every
-   * user out the moment their current token expired, with no way for the app to
-   * recover. It is a real weakness and it is tracked as one, but fixing it
-   * requires a client that can refresh, which is the new app.
+   * The installed legacy app has no refresh logic; shortening this would log
+   * every user out the moment their current token expired, with no way for the
+   * app to recover. So a client that does not ask for a refreshable session
+   * still gets this shape — with two changes that do not need the client's
+   * cooperation:
+   *
+   *   revocable   the token carries `tv` (the user's tokenVersion); a password
+   *               change, a reset or "sign out everywhere" bumps it and every
+   *               outstanding token dies. A token with no `tv` is valid only
+   *               while the user has never been revoked (tokenVersion 0).
+   *   bounded     an ADMINISTRATOR's session is capped at `legacyAdmin`. An
+   *               admin token is the most valuable credential a tenant has.
+   *
+   * Clients that can refresh (the web panel) ask for `session: 'refresh'` and
+   * get a 15-minute access token and a rotating 30-day refresh token instead.
    */
   legacy: '3650d',
+  legacyAdmin: '30d',
 } as const;
 
 function secret(): string {
@@ -139,9 +151,52 @@ export function signSessionToken(claims: {
   id: string;
   role?: string;
   orgId?: string | null;
+  tokenVersion?: number;
 }): string {
   const payload: Record<string, unknown> = { id: claims.id };
   if (claims.role) payload.role = claims.role;
   if (claims.orgId) payload.orgId = String(claims.orgId);
-  return jwt.sign(payload, secret(), { expiresIn: TOKEN_TTL.legacy });
+  if (typeof claims.tokenVersion === 'number') payload.tv = claims.tokenVersion;
+  const ttl = claims.role === 'admin' ? TOKEN_TTL.legacyAdmin : TOKEN_TTL.legacy;
+  return jwt.sign(payload, secret(), { expiresIn: ttl });
+}
+
+export interface SessionPair {
+  token: string;
+  refreshToken: string;
+  /** Seconds until `token` expires, for the client's refresh timer. */
+  expiresIn: number;
+}
+
+/**
+ * A refreshable session: a short access token and a rotating refresh token.
+ *
+ * The access token is a `tenant` token (accepted by authMiddleware exactly like
+ * a session token) that lives 15 minutes. The refresh token is audience
+ * `refresh`, so it can never be presented as an access token, and it carries
+ * `tv` so revoking the user kills it too.
+ */
+export function signSessionPair(claims: {
+  id: string;
+  role?: string;
+  orgId?: string | null;
+  tokenVersion: number;
+}): SessionPair {
+  const access: Record<string, unknown> = { id: claims.id, tv: claims.tokenVersion, aud: 'tenant' };
+  if (claims.role) access.role = claims.role;
+  if (claims.orgId) access.orgId = String(claims.orgId);
+  const refresh: Record<string, unknown> = { id: claims.id, tv: claims.tokenVersion, aud: 'refresh' };
+  if (claims.orgId) refresh.orgId = String(claims.orgId);
+  return {
+    token: jwt.sign(access, secret(), { expiresIn: TOKEN_TTL.tenant }),
+    refreshToken: jwt.sign(refresh, secret(), { expiresIn: TOKEN_TTL.refresh }),
+    expiresIn: 15 * 60,
+  };
+}
+
+/** Verify a refresh token. Throws on anything that is not one. */
+export function verifyRefreshToken(raw: string): { id: string; tv?: number; orgId?: string } {
+  const decoded = jwt.verify(raw, secret()) as { id?: string; tv?: number; orgId?: string; aud?: string };
+  if (decoded.aud !== 'refresh' || !decoded.id) throw new TokenAudienceMismatch('refresh', String(decoded.aud ?? 'legacy'));
+  return { id: decoded.id, tv: decoded.tv, orgId: decoded.orgId };
 }

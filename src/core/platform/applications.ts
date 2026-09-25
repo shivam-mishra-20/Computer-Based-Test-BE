@@ -182,7 +182,7 @@ export async function saveDraft(
 
   const current = (found.application ?? { version: 1 }) as IOrganizationApplication;
   const SECTIONS: (keyof IOrganizationApplication)[] = [
-    'organization', 'branding', 'academic', 'policy',
+    'organization', 'branding', 'appExperience', 'academic', 'policy',
     'modules', 'staff', 'integrations', 'commercial', 'completedSteps',
   ];
   for (const key of SECTIONS) {
