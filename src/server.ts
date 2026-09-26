@@ -24,6 +24,27 @@
 // silently, which is the worst failure mode for a security control.
 // verifyTenantPluginApplied() below turns that silence into a loud error.
 import { registerTenancy, verifyTenantPluginApplied } from './core/tenancy';
+import { applyDataSourcePolicy } from './core/tenancy/dataSource';
+
+// ── The database decides the mode ───────────────────────────────────────────
+// Before tenancy is registered and before any model can reach the database:
+// pointed at the LEGACY database, this process runs in legacy mode (whatever
+// TENANT_MODE says), creates and indexes nothing, seeds nothing and schedules
+// nothing. See core/tenancy/dataSource.ts.
+{
+  const policy = applyDataSourcePolicy();
+  if (policy.legacy) {
+    console.warn(
+      `[data-source] "${policy.database}" is listed in LEGACY_DB_NAMES: legacy mode, legacy accounts only, organization accounts refused.`,
+    );
+    for (const change of policy.changes) console.warn(`[data-source]   ${change}`);
+  } else {
+    console.log(
+      `[data-source] "${policy.database ?? '(no database in MONGO_URI)'}" is not in LEGACY_DB_NAMES: ` +
+        `TENANT_MODE=${process.env.TENANT_MODE || '(unset)'} applies as configured.`,
+    );
+  }
+}
 registerTenancy();
 
 import http from 'http';

@@ -82,6 +82,16 @@ process.env.ENABLE_CRON = 'false';
 process.env.PPT_WORKER_EMBEDDED = 'false';
 process.env.REDIS_ENABLED = 'false';
 
+// A cluster at its collection cap (Atlas: 500 across every database) cannot
+// take the collections Mongoose would create for models this scratch database
+// has never used, and the boot fails part-way. Off, the server reads and writes
+// the collections that already exist and creates none.
+if (process.env.P6_AUTO_CREATE === 'false') {
+  const mongoose = require('mongoose');
+  mongoose.set('autoCreate', false);
+  mongoose.set('autoIndex', false);
+}
+
 console.log(`[p6] serving ${dbName} on port ${process.env.PORT} (${mode === 'legacy' ? 'legacy, pre-migration' : 'TENANT_MODE=claim'})`);
 
 process.on('unhandledRejection', (r) => console.warn('[p6] unhandled rejection:', r && r.message));

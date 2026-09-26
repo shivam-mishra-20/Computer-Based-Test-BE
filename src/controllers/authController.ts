@@ -1,3 +1,4 @@
+import { ORGANIZATION_ACCOUNT_REFUSAL, refusesOrganizationAccounts } from '../core/tenancy/dataSource';
 import { Request, Response } from 'express';
 import User from '../models/User';
 import { AuthPayload } from '../middlewares/authMiddleware';
@@ -297,6 +298,18 @@ export const login = async (req: Request, res: Response) => {
 
     // Public learners are always created `approved`, so they never hit the
     // gates above. Nothing about the institute status handling changes.
+
+    // A legacy deployment serves legacy accounts only. An account that belongs
+    // to an organization signs in to the organization system — never here,
+    // where there is no tenant isolation to serve it with.
+    // See core/tenancy/dataSource.ts.
+    if ((user as any).orgId && refusesOrganizationAccounts()) {
+      return res.status(ORGANIZATION_ACCOUNT_REFUSAL.status).json({
+        message: ORGANIZATION_ACCOUNT_REFUSAL.message,
+        code: ORGANIZATION_ACCOUNT_REFUSAL.code,
+        status: 'organization-account',
+      });
+    }
 
     // User is approved, generate token (10 years - effectively permanent until manual logout)
     // Carries `orgId` so a claim-mode deployment knows which organization this

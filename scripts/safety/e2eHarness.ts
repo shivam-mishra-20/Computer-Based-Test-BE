@@ -95,6 +95,26 @@ export function request(
   });
 }
 
+/**
+ * The scratch database for this run, from the environment.
+ *
+ *   SCRATCH_DB_NAME        an explicit scratch database name (same cluster and
+ *                          credentials as MONGO_URI). Preferred: it does not
+ *                          change when MONGO_URI is switched between databases.
+ *   --scratch-suffix <s>   otherwise `<MONGO_URI's database>_<s>`, as before.
+ *
+ * Either way `assertNotProduction` then refuses anything unmarked or protected.
+ */
+export function scratchUriFor(productionUri: string): string {
+  const explicit = (process.env.SCRATCH_DB_NAME || '').trim();
+  if (explicit) {
+    const m = productionUri.match(/^(mongodb(?:\+srv)?:\/\/(?:[^@/]*@)?[^/?]+\/)([^?]*)(\?.*)?$/);
+    if (!m) throw new Error('MONGO_URI could not be parsed.');
+    return `${m[1]}${explicit}${m[3] ?? ''}`;
+  }
+  return deriveScratchUri(productionUri, arg('--scratch-suffix') || 'scratch_app');
+}
+
 export interface ScratchApp {
   port: number;
   dbName: string;
@@ -109,7 +129,7 @@ export interface ScratchApp {
  */
 export async function bootScratchApp(extraEnv: Record<string, string> = {}): Promise<ScratchApp> {
   const productionUri = requireEnv('MONGO_URI');
-  const uri = deriveScratchUri(productionUri, arg('--scratch-suffix') || 'scratch_app');
+  const uri = scratchUriFor(productionUri);
   assertNotProduction(uri, productionUri);
 
   configureDnsForSrv();
@@ -136,6 +156,20 @@ export async function bootScratchApp(extraEnv: Record<string, string> = {}): Pro
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const mongoose = require('mongoose');
   await mongoose.connect(uri, { serverSelectionTimeoutMS: 15000 });
+
+  // Never create a database by accident. Requiring the app below compiles
+  // every model, and Mongoose then creates each model's collection — dozens,
+  // on a cluster already at its collection cap. A scratch database that does
+  // not exist yet is refused unless that is asked for explicitly.
+  const existing = await mongoose.connection.db.listCollections({}, { nameOnly: true }).toArray();
+  if (existing.length === 0 && process.env.SCRATCH_ALLOW_NEW_DB !== 'true') {
+    const name = mongoose.connection.db.databaseName;
+    await mongoose.disconnect();
+    throw new Error(
+      `Scratch database "${name}" does not exist yet, and creating it would add dozens of collections. ` +
+        'Point SCRATCH_DB_NAME at an existing scratch database, or set SCRATCH_ALLOW_NEW_DB=true.',
+    );
+  }
 
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const app = require('../../src/app').default || require('../../src/app');

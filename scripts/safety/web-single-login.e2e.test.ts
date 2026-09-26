@@ -42,7 +42,7 @@ import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { config } from 'dotenv';
 import { assertNotProduction, configureDnsForSrv, requireEnv } from './lib';
-import { deriveScratchUri } from './e2eHarness';
+import { scratchUriFor } from './e2eHarness';
 
 config({ quiet: true } as never);
 
@@ -98,8 +98,7 @@ async function main() {
   mkdirSync(SHOTS, { recursive: true });
   const production = requireEnv('MONGO_URI');
   configureDnsForSrv();
-  const platformUri =
-    process.env.WL_PLATFORM_URI || deriveScratchUri(production, 'scratch_app');
+  const platformUri = process.env.WL_PLATFORM_URI || scratchUriFor(production);
   const legacyUri =
     process.env.WL_LEGACY_URI ||
     platformUri.replace(/\/[^/?]+(\?|$)/, '/p6_client_platform_web_scratch$1');
@@ -346,7 +345,8 @@ async function main() {
       (await path()) === '/login?org=xyz',
       await path(),
     );
-    await page.evaluate(() => localStorage.removeItem('orgHint'));
+    // The hint an address carries is kept for the tab (sessionStorage).
+    await page.evaluate(() => sessionStorage.removeItem('orgHint'));
 
     await go('/login');
     await shot('02-login');
@@ -377,7 +377,8 @@ async function main() {
       JSON.stringify(brand),
     );
     check('...and titled with its name', brand.title === ORG.name, brand.title);
-    await page.evaluate(() => localStorage.removeItem('orgHint'));
+    // The hint an address carries is kept for the tab (sessionStorage).
+    await page.evaluate(() => sessionStorage.removeItem('orgHint'));
 
     /* ══ 2. Refusals ══════════════════════════════════════════════════════ */
     section('a refused sign-in');

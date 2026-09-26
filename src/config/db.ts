@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import dns from 'node:dns';
 import User from '../models/User';
 import { withoutTenantScope } from '../core/tenancy/context';
+import { isLegacyDatabase } from '../core/tenancy/dataSource';
 
 dotenv.config();
 
@@ -47,8 +48,14 @@ export const connectDB = async (): Promise<void> => {
       configureMongoDnsServers();
     }
 
+    // The legacy database is never created in or indexed from here — see
+    // core/tenancy/dataSource.ts. (Also set globally at boot; stated again at
+    // the connection so no call path can miss it.)
+    const legacy = isLegacyDatabase(uri);
+    const options = legacy ? { autoCreate: false, autoIndex: false } : {};
+
     try {
-      await mongoose.connect(uri);
+      await mongoose.connect(uri, options);
     } catch (primaryError) {
       if (isSrvDnsRefused(primaryError) && uri.startsWith('mongodb+srv://')) {
         const directUri = process.env.MONGO_URI_DIRECT;
@@ -60,7 +67,7 @@ export const connectDB = async (): Promise<void> => {
         }
 
         console.warn('⚠️ MongoDB SRV lookup failed. Retrying with MONGO_URI_DIRECT...');
-        await mongoose.connect(directUri);
+        await mongoose.connect(directUri, options);
       } else {
         throw primaryError;
       }
@@ -93,6 +100,12 @@ export const connectDB = async (): Promise<void> => {
      * template for request-path code: anything serving a request has a
      * context and must be scoped to it.
      */
+    // Never on the legacy database: starting a process must not write to it,
+    // and a seeded administrator there would be an account nobody created.
+    if (legacy) {
+      console.log('ℹ️ Legacy database: bootstrap administrator not seeded');
+      return;
+    }
     const adminEmail = process.env.ADMIN_EMAIL || 'admin@cbt.local';
     const adminPassword = process.env.ADMIN_PASSWORD || 'Admin@123';
     const adminName = process.env.ADMIN_NAME || 'System Admin';

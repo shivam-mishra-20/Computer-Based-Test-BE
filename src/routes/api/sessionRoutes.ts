@@ -18,6 +18,7 @@ import { authLimiter, passwordResetLimiter } from '../../middlewares/rateLimiter
 import { signSessionPair, verifyRefreshToken } from '../../core/auth/tokens';
 import { withoutTenantScope } from '../../core/tenancy/context';
 import { orgStateOf } from '../../core/tenancy/orgState';
+import { ORGANIZATION_ACCOUNT_REFUSAL, refusesOrganizationAccounts } from '../../core/tenancy/dataSource';
 import { LinkRefused, redeem, revokeSessions } from '../../core/accounts/accountLinks';
 import { logAudit } from '../../utils/logger';
 
@@ -41,6 +42,9 @@ router.post('/refresh', authLimiter, async (req: Request, res: Response) => {
   const version = Number(user?.tokenVersion ?? 0) || 0;
   if (!user || claims.tv !== version || user.status !== 'approved') {
     return res.status(401).json({ message: 'Please sign in again.', code: 'SESSION_REVOKED' });
+  }
+  if (user.orgId && refusesOrganizationAccounts()) {
+    return res.status(401).json({ message: ORGANIZATION_ACCOUNT_REFUSAL.message, code: ORGANIZATION_ACCOUNT_REFUSAL.code });
   }
   if (user.orgId) {
     const state = await orgStateOf(String(user.orgId));

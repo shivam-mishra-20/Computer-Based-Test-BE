@@ -20,6 +20,10 @@
  * `onboardOrganization()`. See docs/organization-registration.md.
  */
 
+// Organization registration is the organization system's. A legacy deployment
+// answers 404 here, exactly as it does for /api/platform, so no organization
+// application can ever be written into the legacy database.
+import { requirePlatformDeployment } from '../../middlewares/requirePlatformDeployment';
 import express, { Request, Response } from 'express';
 import { draftEditLimiter, publicFormLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
 import { resolveBrandConfig, SUPPORTED_AUTH_ROLES } from '../../core/platform/mobileBuildRules';
@@ -50,7 +54,7 @@ const router = express.Router();
  * Rate limited by IP through the existing `publicFormLimiter`. Unauthenticated
  * by design — requiring an account to ask for an account is a loop.
  */
-router.post('/organization-registration', publicFormLimiter, async (req: Request, res: Response) => {
+router.post('/organization-registration', requirePlatformDeployment, publicFormLimiter, async (req: Request, res: Response) => {
   try {
     // ── Honeypot ────────────────────────────────────────────────────────────
     // A field no human sees and no real browser fills. Scripted submitters
@@ -183,7 +187,7 @@ function handleApplicationError(res: Response, err: unknown, what: string) {
  * whole reason it is on this router. It is rate limited because it is public,
  * not because it is sensitive.
  */
-router.post('/brand-preview', publicFormLimiter, (req: Request, res: Response) => {
+router.post('/brand-preview', requirePlatformDeployment, publicFormLimiter, (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
   try {
     return res.json({
@@ -207,7 +211,7 @@ router.post('/brand-preview', publicFormLimiter, (req: Request, res: Response) =
 });
 
 /** Start an application. Returns the id and the only copy of the token. */
-router.post('/organization-applications', publicFormLimiter, async (req: Request, res: Response) => {
+router.post('/organization-applications', requirePlatformDeployment, publicFormLimiter, async (req: Request, res: Response) => {
   try {
     const { registration, draftToken } = await createDraft(
       {
@@ -237,7 +241,7 @@ router.post('/organization-applications', publicFormLimiter, async (req: Request
 });
 
 /** Resume a draft. */
-router.get('/organization-applications/:id', draftEditLimiter, async (req: Request, res: Response) => {
+router.get('/organization-applications/:id', requirePlatformDeployment, draftEditLimiter, async (req: Request, res: Response) => {
   try {
     const found = await loadDraft(req.params.id, draftTokenOf(req));
     // Assets travel alongside the draft rather than inside it: the stored
@@ -249,7 +253,7 @@ router.get('/organization-applications/:id', draftEditLimiter, async (req: Reque
 });
 
 /** Save a step. Sections are replaced whole — see `saveDraft`. */
-router.patch('/organization-applications/:id', draftEditLimiter, async (req: Request, res: Response) => {
+router.patch('/organization-applications/:id', requirePlatformDeployment, draftEditLimiter, async (req: Request, res: Response) => {
   try {
     const updated = await saveDraft(
       req.params.id,
@@ -286,7 +290,7 @@ router.patch('/organization-applications/:id', draftEditLimiter, async (req: Req
  * namespace, because no organization owns it yet.
  */
 router.post(
-  '/organization-applications/:id/assets',
+  '/organization-applications/:id/assets', requirePlatformDeployment,
   uploadLimiter,
   // Not the shared `upload`: that one refuses image/svg+xml, which is the file
   // this form recommends. See middlewares/uploadBrandAsset.ts.
@@ -311,7 +315,7 @@ router.post(
 );
 
 /** Submit. Validates, stamps, and retires the token. */
-router.post('/organization-applications/:id/submit', draftEditLimiter, async (req: Request, res: Response) => {
+router.post('/organization-applications/:id/submit', requirePlatformDeployment, draftEditLimiter, async (req: Request, res: Response) => {
   try {
     const submitted = await submitApplication(req.params.id, draftTokenOf(req));
     return res.json({

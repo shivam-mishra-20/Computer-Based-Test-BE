@@ -11,6 +11,7 @@ import { stashTenantStore } from '../core/tenancy/requestContext';
 import { resolveUserPermissions, type ResolvedAccess } from '../core/rbac/resolve';
 import { LEGACY_ROLE_PERMISSIONS, PERMISSIONS } from '../core/rbac/permissions';
 import { orgStateOf, READ_ONLY_STATUSES } from '../core/tenancy/orgState';
+import { ORGANIZATION_ACCOUNT_REFUSAL, refusesOrganizationAccounts } from '../core/tenancy/dataSource';
 import { moduleRefusal } from './requireModule';
 
 /**
@@ -42,12 +43,18 @@ import { moduleRefusal } from './requireModule';
  *               unscoped would show them every organization's data.
  *   legacy      Pre-migration (no tenancy configured) or `off`: today's
  *               behaviour, untouched.
+ *   organization-account
+ *               An account that BELONGS to an organization, on a legacy
+ *               (pre-migration) deployment. Refused: organization accounts
+ *               live in the organization system, and a process without tenant
+ *               isolation must never serve one (core/tenancy/dataSource.ts).
  */
 type Principal =
   | { kind: 'tenant'; orgId: string }
   | { kind: 'foreign'; orgId: string }
   | { kind: 'learner' }
   | { kind: 'unattached' }
+  | { kind: 'organization-account' }
   | { kind: 'legacy' };
 
 interface PrincipalRecord {
@@ -61,7 +68,7 @@ export function principalOf(user: PrincipalRecord): Principal {
 
   if (tenantMode() === 'pinned') {
     const pinned = pinnedOrgId();
-    if (!pinned) return { kind: 'legacy' };
+    if (!pinned) return own && refusesOrganizationAccounts() ? { kind: 'organization-account' } : { kind: 'legacy' };
     if (own && own !== pinned) return { kind: 'foreign', orgId: own };
     return { kind: 'tenant', orgId: pinned };
   }
@@ -122,6 +129,14 @@ function principalContext(
           status: 403,
           message: 'This account is not attached to an organization.',
           code: 'TENANT_REQUIRED',
+        },
+      };
+    case 'organization-account':
+      return {
+        refuse: {
+          status: ORGANIZATION_ACCOUNT_REFUSAL.status,
+          message: ORGANIZATION_ACCOUNT_REFUSAL.message,
+          code: ORGANIZATION_ACCOUNT_REFUSAL.code,
         },
       };
     case 'learner':
