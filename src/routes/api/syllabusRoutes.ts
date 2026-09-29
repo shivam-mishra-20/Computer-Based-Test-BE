@@ -1,10 +1,55 @@
 import { Router, Request, Response } from 'express';
+import mongoose from 'mongoose';
 import Syllabus from '../../models/Syllabus';
 import User from '../../models/User';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import { instituteStudentFilter } from '../../utils/instituteAudience';
 
 const router = Router();
+
+/**
+ * Who may write a syllabus.
+ *
+ * Teachers manage the syllabi they own. Admins may create syllabi — for
+ * themselves or on behalf of a teacher — and manage any syllabus, since the
+ * admin Syllabus Management screen lists every one of them.
+ */
+const isAdmin = (user: any) => user?.role === 'admin';
+const mayWrite = (user: any) => user?.role === 'teacher' || isAdmin(user);
+const ownsSyllabus = (syllabus: any, user: any) =>
+  syllabus.teacherId === user.id ||
+  syllabus.teacherId === user._id?.toString() ||
+  syllabus.teacherId === user.firebaseUid;
+const mayChange = (syllabus: any, user: any) => isAdmin(user) || ownsSyllabus(syllabus, user);
+
+/**
+ * Chapters as the client sent them, with the one change topics being optional
+ * needs: blank topics are dropped (a chapter may have none), and a chapter
+ * needs a name. `previous` keeps a topic-less chapter's completion when a
+ * client that does not know that field re-sends the chapter without it.
+ */
+function cleanChapters(input: unknown, previous: any[] = []): any[] | undefined {
+  if (!Array.isArray(input)) return undefined;
+  const before = new Map(previous.map((c: any) => [String(c?._id || ''), c]));
+  return input
+    .filter((c: any) => c && typeof c === 'object')
+    .map((c: any, index: number) => {
+      const topics = (Array.isArray(c.topics) ? c.topics : [])
+        .filter((t: any) => t && typeof t === 'object' && String(t.name || '').trim())
+        .map((t: any) => ({ ...t, name: String(t.name).trim() }));
+      const old = c._id ? before.get(String(c._id)) : undefined;
+      const completed = typeof c.completed === 'boolean' ? c.completed : Boolean(old?.completed);
+      return {
+        ...c,
+        name: String(c.name || '').trim(),
+        order: Number.isFinite(Number(c.order)) ? Number(c.order) : index + 1,
+        topics,
+        completed,
+        completedDate: completed ? c.completedDate || old?.completedDate || new Date() : undefined,
+      };
+    })
+    .filter((c: any) => c.name);
+}
 
 // Get all syllabi (Teachers: their own, Students: their class/batch)
 router.get('/', authMiddleware, async (req: Request, res: Response) => {
@@ -141,17 +186,32 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
 
-    if (user.role !== 'teacher') {
-      return res.status(403).json({ error: 'Only teachers can create syllabi' });
+    if (!mayWrite(user)) {
+      return res.status(403).json({ error: 'Only teachers and admins can create syllabi' });
     }
 
-    // Fetch teacher details
-    const teacher = await User.findById(user.id);
-    if (!teacher) {
-      return res.status(404).json({ error: 'Teacher not found' });
+    // The owner: the teacher themselves, or — when an admin creates it — the
+    // teacher the admin picked (so it shows up in that teacher's list), or the
+    // admin when none was picked.
+    let teacher: any = null;
+    const assignTo = String(req.body?.teacherId || '').trim();
+    if (isAdmin(user) && assignTo) {
+      if (!mongoose.Types.ObjectId.isValid(assignTo)) {
+        return res.status(400).json({ error: 'Invalid teacher' });
+      }
+      teacher = await User.findOne({ _id: assignTo, role: 'teacher' });
+      if (!teacher) {
+        return res.status(404).json({ error: 'Teacher not found' });
+      }
+    } else {
+      teacher = await User.findById(user.id);
+      if (!teacher) {
+        return res.status(404).json({ error: 'User not found' });
+      }
     }
 
-    const { subject, classLevel, batch, academicYear, items, chapters } = req.body;
+    const { subject, classLevel, batch, academicYear, items } = req.body;
+    const chapters = cleanChapters(req.body?.chapters);
 
     // Validate required fields
     if (!subject || !classLevel || !academicYear) {
@@ -190,7 +250,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
       classLevel,
       batch: batch || null,
       academicYear,
-      chapters: chapters || [], // New structure
+      chapters: chapters || [], // New structure (topics optional)
       items: items || [] // Legacy support
     });
 
@@ -211,8 +271,8 @@ router.put('/:syllabusId', authMiddleware, async (req: Request, res: Response) =
   try {
     const user = (req as any).user;
 
-    if (user.role !== 'teacher') {
-      return res.status(403).json({ error: 'Only teachers can update syllabi' });
+    if (!mayWrite(user)) {
+      return res.status(403).json({ error: 'Only teachers and admins can update syllabi' });
     }
 
     const syllabus = await Syllabus.findById(req.params.syllabusId);
@@ -221,24 +281,20 @@ router.put('/:syllabusId', authMiddleware, async (req: Request, res: Response) =
       return res.status(404).json({ error: 'Syllabus not found' });
     }
 
-    // Check ownership
-    const isOwner = 
-      syllabus.teacherId === user.id ||
-      syllabus.teacherId === user._id?.toString() ||
-      syllabus.teacherId === user.firebaseUid;
-
-    if (!isOwner) {
+    // Teachers change their own syllabi; admins may change any.
+    if (!mayChange(syllabus, user)) {
       return res.status(403).json({ error: 'Not authorized to update this syllabus' });
     }
 
-    const { subject, classLevel, batch, academicYear, items, chapters } = req.body;
+    const { subject, classLevel, batch, academicYear, items } = req.body;
+    const chapters = cleanChapters(req.body?.chapters, (syllabus.chapters || []) as any[]);
 
     if (subject) syllabus.subject = subject;
     if (classLevel) syllabus.classLevel = classLevel;
     if (batch !== undefined) syllabus.batch = batch;
     if (academicYear) syllabus.academicYear = academicYear;
     if (items) syllabus.items = items; // Legacy support
-    if (chapters) syllabus.chapters = chapters; // New structure
+    if (chapters) syllabus.chapters = chapters as any; // New structure (topics optional)
 
     await syllabus.save();
 
@@ -257,8 +313,8 @@ router.patch('/:syllabusId/topics/:topicId', authMiddleware, async (req: Request
   try {
     const user = (req as any).user;
 
-    if (user.role !== 'teacher') {
-      return res.status(403).json({ error: 'Only teachers can update topic status' });
+    if (!mayWrite(user)) {
+      return res.status(403).json({ error: 'Only teachers and admins can update topic status' });
     }
 
     const syllabus = await Syllabus.findById(req.params.syllabusId);
@@ -267,13 +323,8 @@ router.patch('/:syllabusId/topics/:topicId', authMiddleware, async (req: Request
       return res.status(404).json({ error: 'Syllabus not found' });
     }
 
-    // Check ownership
-    const isOwner = 
-      syllabus.teacherId === user.id ||
-      syllabus.teacherId === user._id?.toString() ||
-      syllabus.teacherId === user.firebaseUid;
-
-    if (!isOwner) {
+    // Teachers change their own syllabi; admins may change any.
+    if (!mayChange(syllabus, user)) {
       return res.status(403).json({ error: 'Not authorized to update this syllabus' });
     }
 
@@ -319,8 +370,8 @@ router.delete('/:syllabusId', authMiddleware, async (req: Request, res: Response
   try {
     const user = (req as any).user;
 
-    if (user.role !== 'teacher') {
-      return res.status(403).json({ error: 'Only teachers can delete syllabi' });
+    if (!mayWrite(user)) {
+      return res.status(403).json({ error: 'Only teachers and admins can delete syllabi' });
     }
 
     const syllabus = await Syllabus.findById(req.params.syllabusId);
@@ -329,13 +380,8 @@ router.delete('/:syllabusId', authMiddleware, async (req: Request, res: Response
       return res.status(404).json({ error: 'Syllabus not found' });
     }
 
-    // Check ownership
-    const isOwner = 
-      syllabus.teacherId === user.id ||
-      syllabus.teacherId === user._id?.toString() ||
-      syllabus.teacherId === user.firebaseUid;
-
-    if (!isOwner) {
+    // Teachers change their own syllabi; admins may change any.
+    if (!mayChange(syllabus, user)) {
       return res.status(403).json({ error: 'Not authorized to delete this syllabus' });
     }
 

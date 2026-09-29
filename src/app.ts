@@ -57,6 +57,7 @@ import orgRegistrationPublicRoutes from './routes/api/orgRegistrationPublicRoute
 import eodRoutes from './routes/api/eodRoutes';
 import playlistRoutes from './routes/api/playlistRoutes';
 import scholarshipRoutes from './routes/api/scholarshipRoutes';
+import agtsRoutes from './routes/api/agtsRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import { globalLimiter } from './middlewares/rateLimiter';
 import { tenantContextMiddleware } from './middlewares/tenantContext';
@@ -165,7 +166,8 @@ const corsOptions: cors.CorsOptions = {
 		'Authorization',
 		'X-Requested-With',
 		'Accept',
-		// Scholarship attempt access control
+		// AGTS attempt access control (and its pre-AGTS name, still accepted)
+		'X-AGTS-Attempt-Key',
 		'X-Scholarship-Attempt-Key',
 		'X-Attempt-Key',
 		// The institute onboarding draft: an applicant has no account, so the
@@ -438,7 +440,9 @@ app.use('/api/eod', eodRoutes);
 // YouTube playlist import & sync
 app.use('/api/playlist', playlistRoutes);
 
-// Scholarship test routes
+// AGTS — Abhigyan Gurukul Test Series (public test flow + staff lead desk)
+app.use('/api/agts', agtsRoutes);
+// Pre-AGTS scholarship routes: kept for links and admin tooling already in use
 app.use('/api/scholarship', scholarshipRoutes);
 
 // Webhook routes

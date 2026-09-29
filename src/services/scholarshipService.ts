@@ -2,9 +2,31 @@ import ScholarshipAttempt from '../models/ScholarshipAttempt';
 import ScholarshipTest from '../models/ScholarshipTest';
 import { getClassQuestionModel } from '../models/ClassQuestion';
 import { Types } from 'mongoose';
-import { randomBytes, randomInt } from 'crypto';
+import { randomBytes, randomInt, timingSafeEqual } from 'crypto';
+import { scorePaper, questionKind, type QuestionKey, type ResponseInput } from './assessment/assessmentScoring';
 
-const SCHOLARSHIP_BOARD_PATTERN = /scholarship/i;
+/**
+ * The question bank this engine draws from. Questions were tagged
+ * `board: "Scholarship"` before the test was renamed AGTS; both tags are
+ * accepted so the existing bank keeps working and new questions can be tagged
+ * "AGTS" without a data migration.
+ */
+export const ASSESSMENT_BOARD_PATTERN = /scholarship|agts/i;
+const SCHOLARSHIP_BOARD_PATTERN = ASSESSMENT_BOARD_PATTERN;
+
+/** Answers arriving this long after the timer ended are still accepted (network lag). */
+export const SUBMIT_GRACE_MS = Math.max(0, Number(process.env.AGTS_SUBMIT_GRACE_SEC || 90)) * 1000;
+
+/** When the candidate's time ends, from the server's own clock and record. */
+export function attemptDeadline(attempt: { startedAt?: Date | string; durationMins?: number }): number {
+  const started = attempt?.startedAt ? new Date(attempt.startedAt).getTime() : Date.now();
+  return started + Math.max(1, Number(attempt?.durationMins) || 60) * 60 * 1000;
+}
+
+/** True once the timer AND the grace window have both passed. */
+export function isPastDeadline(attempt: { startedAt?: Date | string; durationMins?: number }, now = Date.now()): boolean {
+  return now > attemptDeadline(attempt) + SUBMIT_GRACE_MS;
+}
 
 function normalizePhone(phone: string): { raw: string; normalized: string } {
   const raw = String(phone || '').trim();
@@ -29,17 +51,30 @@ function generateResultPublicToken(): string {
   return randomBytes(20).toString('hex');
 }
 
-function requireValidAttemptAccess(attempt: any, providedKey?: string) {
+/**
+ * The per-attempt key is the only thing that authorises a guest to read or
+ * change an attempt.
+ *
+ * An attempt with NO stored key (created before keys existed) is refused
+ * outright. It used to be served — and issued a fresh key — to anyone who
+ * named its id, and those ids (`SCH-<class>-<ddmmyy>-<4 chars>`) are guessable,
+ * which exposed the candidate's name and phone number. Such results remain
+ * reachable through the admin-issued public result link.
+ */
+export function hasValidAttemptAccess(attempt: any, providedKey?: string): boolean {
   const stored = String(attempt?.attemptAccessKey || '');
-  if (!stored) return;
-
   const given = String(providedKey || '');
-  if (!given || given !== stored) {
+  if (!stored || !given || stored.length !== given.length) return false;
+  return timingSafeEqual(Buffer.from(stored), Buffer.from(given));
+}
+
+function requireValidAttemptAccess(attempt: any, providedKey?: string) {
+  if (!hasValidAttemptAccess(attempt, providedKey)) {
     throw new Error('Unauthorized attempt access');
   }
 }
 
-function expandSubjectAliases(subject: string): string[] {
+export function expandSubjectAliases(subject: string): string[] {
   const s = (subject || '').trim();
   if (!s) return [];
 
@@ -83,7 +118,7 @@ function normalizeSubjectName(subject: any): string | null {
   return null;
 }
 
-function normalizeSubjects(input: any[]): string[] {
+export function normalizeSubjects(input: any[]): string[] {
   if (!Array.isArray(input)) return [];
 
   const canonical = input
@@ -93,20 +128,23 @@ function normalizeSubjects(input: any[]): string[] {
   return Array.from(new Set(canonical));
 }
 
-// Generate unique attempt ID
-function generateAttemptId(classLevel: number): string {
+// Generate unique attempt ID. Legacy attempts keep the SCH- form; AGTS attempts
+// are AGTS- with a longer, crypto-random tail. The id is not a credential (the
+// attempt key is), but it should not be guessable either.
+function generateAttemptId(classLevel: number, prefix: 'SCH' | 'AGTS' = 'SCH'): string {
   const now = new Date();
   const dd = String(now.getDate()).padStart(2, '0');
   const mm = String(now.getMonth() + 1).padStart(2, '0');
   const yy = String(now.getFullYear()).slice(-2);
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const length = prefix === 'AGTS' ? 8 : 4;
   let randomStr = '';
 
-  for (let i = 0; i < 4; i++) {
-    randomStr += chars.charAt(Math.floor(Math.random() * chars.length));
+  for (let i = 0; i < length; i++) {
+    randomStr += chars.charAt(randomInt(0, chars.length));
   }
 
-  return `SCH-${classLevel}-${dd}${mm}${yy}-${randomStr}`;
+  return `${prefix}-${classLevel}-${dd}${mm}${yy}-${randomStr}`;
 }
 
 function isLegacyRandomShareLink(value?: string): boolean {
@@ -143,7 +181,7 @@ function resolveFrontendBaseUrl(): string {
 
 async function generateLogicalShareLink(testName: string, eligibleClasses: number[]): Promise<string> {
   const classPart = (eligibleClasses || []).slice().sort((a, b) => a - b).join('-');
-  const base = `${slugify(testName || 'scholarship-test') || 'scholarship-test'}${classPart ? `-class-${classPart}` : ''}`;
+  const base = `${slugify(testName || 'agts-test') || 'agts-test'}${classPart ? `-class-${classPart}` : ''}`;
   let candidate = base;
   let index = 2;
 
@@ -160,7 +198,7 @@ async function ensureLogicalShareLink(test: any): Promise<string> {
     return test.shareLink;
   }
 
-  const generated = await generateLogicalShareLink(test?.testName || 'scholarship-test', test?.eligibleClasses || []);
+  const generated = await generateLogicalShareLink(test?.testName || 'agts-test', test?.eligibleClasses || []);
   await ScholarshipTest.updateOne({ _id: test._id }, { shareLink: generated });
   return generated;
 }
@@ -230,26 +268,33 @@ function normalizeSingleAnswer(questionId: string, answer: any): NormalizedAnswe
   if (!questionId) return null;
 
   if (answer && typeof answer === 'object' && !Array.isArray(answer)) {
-    return {
-      questionId,
-      ...answer,
-    };
+    // Picked, never spread: the client chooses an option or types an answer.
+    // `isCorrect` and `marks` are the grader's to write; spreading the body
+    // here used to let a request set them.
+    const picked: NormalizedAnswer = { questionId };
+    if (typeof answer.chosenOptionId === 'string') picked.chosenOptionId = answer.chosenOptionId.slice(0, 64);
+    if (typeof answer.textAnswer === 'string' || typeof answer.textAnswer === 'number') {
+      picked.textAnswer = String(answer.textAnswer).slice(0, 500);
+    }
+    if (typeof answer.markedForReview === 'boolean') picked.markedForReview = answer.markedForReview;
+    return picked;
   }
 
   if (typeof answer === 'string') {
+    const value = answer.slice(0, 500);
     return {
       questionId,
       // For MCQ answers, frontend sends selected option id as a string.
-      chosenOptionId: answer,
+      chosenOptionId: value,
       // For short-answer questions, frontend may send text as a string.
-      textAnswer: answer,
+      textAnswer: value,
     };
   }
 
   if (answer !== undefined && answer !== null) {
     return {
       questionId,
-      textAnswer: String(answer),
+      textAnswer: String(answer).slice(0, 500),
     };
   }
 
@@ -275,11 +320,54 @@ function normalizeSubmittedAnswers(answers: any): NormalizedAnswer[] {
   return [];
 }
 
+const sameName = (a: unknown, b: unknown) =>
+  String(a || '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase() ===
+  String(b || '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLowerCase();
+
+/**
+ * What to tell a caller who registered with a phone number that already has an
+ * attempt for this test.
+ *
+ * The phone number is typed, not verified, so it cannot on its own hand out
+ * an attempt's key:
+ *  - a SUBMITTED attempt is reported as locked and its key is withheld — the
+ *    owner already holds it; anyone else would be reading a stranger's result;
+ *  - an IN-PROGRESS attempt resumes only when the student name matches too,
+ *    so a guessed number cannot take over someone else's running test.
+ */
+function existingAttemptResponse(existing: any, requestName: string) {
+  const locked = existing.status === 'submitted' || isPastDeadline(existing);
+  const resumable = !locked && sameName(existing.name, requestName);
+  return {
+    attemptId: existing.attemptId,
+    _id: existing._id,
+    startedAt: existing.startedAt,
+    durationMins: existing.durationMins,
+    status: existing.status,
+    attemptAccessKey: resumable ? existing.attemptAccessKey || '' : '',
+    created: false,
+    resumed: resumable,
+    locked,
+    conflict: !locked && !resumable,
+    message: locked
+      ? 'This phone number has already taken this test. Retake is not allowed.'
+      : resumable
+        ? 'Resuming your previous attempt.'
+        : 'A test is already in progress for this phone number on another device.',
+  };
+}
+
+export interface AttemptExtras {
+  program?: 'agts';
+  leadId?: Types.ObjectId;
+}
+
 export async function createScholarshipAttempt(
   name: string,
   phone: string,
   classLevel: number | undefined,
-  testId?: string
+  testId?: string,
+  extras: AttemptExtras = {}
 ) {
   const safeName = String(name || '').trim();
   const { raw: rawPhone, normalized: phoneNormalized } = normalizePhone(phone);
@@ -310,7 +398,7 @@ export async function createScholarshipAttempt(
       : await ScholarshipTest.findOne({ shareLink: testId }).lean();
 
     if (!test || !test.isActive) {
-      throw new Error('Selected scholarship test is not available');
+      throw new Error('Selected test is not available');
     }
 
     // If the test is for exactly one class, we can infer the class from the test.
@@ -328,7 +416,7 @@ export async function createScholarshipAttempt(
 
     const normalizedSubjects = normalizeSubjects(test.subjects || []);
     if (normalizedSubjects.length === 0) {
-      throw new Error('Selected scholarship test has no valid subjects configured');
+      throw new Error('Selected test has no valid subjects configured');
     }
 
     subjects = normalizedSubjects;
@@ -352,28 +440,14 @@ export async function createScholarshipAttempt(
     }).lean();
 
     if (existing) {
-      // Backfill access key for legacy attempts.
-      if (!existing.attemptAccessKey) {
+      // Backfill an access key for pre-key attempts, but only hand it out
+      // through the same resume rules as any other attempt.
+      if (!existing.attemptAccessKey && existing.status !== 'submitted') {
         const key = generateAttemptAccessKey();
         await ScholarshipAttempt.updateOne({ _id: existing._id }, { attemptAccessKey: key });
         (existing as any).attemptAccessKey = key;
       }
-
-      const locked = existing.status === 'submitted';
-      return {
-        attemptId: existing.attemptId,
-        _id: existing._id,
-        startedAt: existing.startedAt,
-        durationMins: existing.durationMins,
-        status: existing.status,
-        attemptAccessKey: (existing as any).attemptAccessKey || '',
-        created: false,
-        resumed: !locked,
-        locked,
-        message: locked
-          ? 'This phone number has already submitted this scholarship test. Retake is not allowed.'
-          : 'Resuming your previous scholarship test attempt.',
-      };
+      return existingAttemptResponse(existing, safeName);
     }
   }
 
@@ -382,11 +456,12 @@ export async function createScholarshipAttempt(
   }
 
   // Generate unique attempt ID (depends on classLevel)
-  let attemptId = generateAttemptId(resolvedClassLevel);
+  const idPrefix = extras.program === 'agts' ? 'AGTS' : 'SCH';
+  let attemptId = generateAttemptId(resolvedClassLevel, idPrefix);
   let exists = await ScholarshipAttempt.findOne({ attemptId });
 
   while (exists) {
-    attemptId = generateAttemptId(resolvedClassLevel);
+    attemptId = generateAttemptId(resolvedClassLevel, idPrefix);
     exists = await ScholarshipAttempt.findOne({ attemptId });
   }
 
@@ -409,7 +484,7 @@ export async function createScholarshipAttempt(
 
     if (questions.length < questionsPerSubject) {
       throw new Error(
-        `Not enough Scholarship-board questions for Class ${resolvedClassLevel} - ${subject}. ` +
+        `Questions for Class ${resolvedClassLevel} - ${subject} are not available yet. ` +
           `Required: ${questionsPerSubject}, Found: ${questions.length}`
       );
     }
@@ -417,7 +492,7 @@ export async function createScholarshipAttempt(
     const questionIds = pickRandomUniqueIds(questions as any, questionsPerSubject, usedQuestionIds);
     if (questionIds.length < questionsPerSubject) {
       throw new Error(
-        `Not enough unique Scholarship-board questions for Class ${resolvedClassLevel} - ${subject}. ` +
+        `Unique questions for Class ${resolvedClassLevel} - ${subject} are not available yet. ` +
           `Required: ${questionsPerSubject}, Available unique (after de-duplication): ${questionIds.length}`
       );
     }
@@ -447,6 +522,8 @@ export async function createScholarshipAttempt(
       questions: allQuestionIds,
       subjectQuestions,
       status: 'in-progress',
+      ...(extras.program ? { program: extras.program } : {}),
+      ...(extras.leadId ? { leadId: extras.leadId } : {}),
     });
 
     return {
@@ -474,53 +551,57 @@ export async function createScholarshipAttempt(
       }).lean();
 
       if (existing) {
-        if (!existing.attemptAccessKey) {
-          const key = generateAttemptAccessKey();
-          await ScholarshipAttempt.updateOne({ _id: existing._id }, { attemptAccessKey: key });
-          (existing as any).attemptAccessKey = key;
-        }
-
-        const locked = existing.status === 'submitted';
-        return {
-          attemptId: existing.attemptId,
-          _id: existing._id,
-          startedAt: existing.startedAt,
-          durationMins: existing.durationMins,
-          status: existing.status,
-          attemptAccessKey: (existing as any).attemptAccessKey || '',
-          created: false,
-          resumed: !locked,
-          locked,
-          message: locked
-            ? 'This phone number has already submitted this scholarship test. Retake is not allowed.'
-            : 'Resuming your previous scholarship test attempt.',
-        };
+        return existingAttemptResponse(existing, safeName);
       }
     }
     throw err;
   }
 }
 
-export async function getScholarshipAttempt(attemptId: string, accessKey?: string) {
-  const attempt = await ScholarshipAttempt.findOne({ attemptId });
-  if (!attempt) {
-    throw new Error('Attempt not found');
-  }
-
-  // Legacy-safe: if key isn't set yet, set it now and return it.
-  if (!attempt.attemptAccessKey) {
-    attempt.attemptAccessKey = generateAttemptAccessKey();
-    await attempt.save();
-  }
-
-  requireValidAttemptAccess(attempt, accessKey);
-
+/**
+ * The server's answer key for an attempt's paper, in the order the candidate
+ * saw it. Shared by grading and by the AGTS report so both read one key.
+ */
+export async function loadAttemptPaper(attempt: { classLevel: number; questions: string[] }) {
   const ClassQuestionModel = getClassQuestionModel(`Class ${attempt.classLevel}`);
-  const questions = await ClassQuestionModel.find({
-    _id: { $in: attempt.questions.map((id) => new Types.ObjectId(id)) },
-  }).lean();
+  const ids = (attempt.questions || []).filter((id) => Types.ObjectId.isValid(String(id)));
+  const docs = await ClassQuestionModel.find({ _id: { $in: ids.map((id) => new Types.ObjectId(id)) } }).lean();
+  const byId = new Map(docs.map((q: any) => [String(q._id), q]));
+  const ordered = ids.map((id) => byId.get(String(id))).filter(Boolean) as any[];
+  const keys: QuestionKey[] = ordered.map((q: any) => ({
+    id: String(q._id),
+    type: q.type,
+    marks: Number(q.marks) > 0 ? Number(q.marks) : 1,
+    options: Array.isArray(q.options) ? q.options.map((o: any) => ({ id: String(o?._id || ''), isCorrect: Boolean(o?.isCorrect) })) : [],
+    correctAnswerText: q.correctAnswerText || '',
+    integerAnswer: typeof q.integerAnswer === 'number' ? q.integerAnswer : null,
+    subject: q.subject,
+    chapter: q.chapter,
+    topic: q.topic,
+    difficulty: q.difficulty,
+  }));
+  return { docs: ordered, keys };
+}
 
-  const includePublishedSolutions = Boolean(attempt.resultPublished);
+/** Stored answers as scorer input. Reviewer marks count only where the engine cannot grade. */
+export function responsesOf(attempt: any, keys: QuestionKey[]): ResponseInput[] {
+  const reviewed = Boolean(attempt?.adminReview?.isReviewed);
+  const kindById = new Map(keys.map((k) => [k.id, questionKind(k)]));
+  return (attempt?.answers || []).map((a: any) => ({
+    questionId: String(a?.questionId || ''),
+    chosenOptionId: a?.chosenOptionId || '',
+    textAnswer: a?.textAnswer || '',
+    markedForReview: Boolean(a?.markedForReview),
+    manualMarks:
+      reviewed && kindById.get(String(a?.questionId || '')) === 'ungraded' && typeof a?.marks === 'number' ? a.marks : null,
+  }));
+}
+
+function buildAttemptView(attempt: any, questions: any[], opts: { includeKey: boolean }) {
+  // AGTS results are the server's report (agtsService), never an answer key:
+  // publishing an AGTS attempt must not reveal the bank's solutions.
+  const isAgts = attempt.program === 'agts';
+  const includePublishedSolutions = Boolean(attempt.resultPublished) && !isAgts;
   const questionDetails = questions.map((q: any) => {
     const options = Array.isArray(q.options)
       ? q.options.map((opt: any) => ({
@@ -560,12 +641,6 @@ export async function getScholarshipAttempt(attemptId: string, accessKey?: strin
     };
   });
 
-  // Preserve the exact shuffled order stored on the attempt.
-  const byId = new Map(questionDetails.map((q: any) => [String(q._id), q]));
-  const orderedQuestionDetails = (attempt.questions || [])
-    .map((id) => byId.get(String(id)))
-    .filter(Boolean);
-
   const base: any = {
     attemptId: attempt.attemptId,
     name: attempt.name,
@@ -576,27 +651,55 @@ export async function getScholarshipAttempt(attemptId: string, accessKey?: strin
     status: attempt.status,
     submittedAt: attempt.submittedAt,
     resultPublished: Boolean(attempt.resultPublished),
-    attemptAccessKey: attempt.attemptAccessKey || '',
-    questions: orderedQuestionDetails,
+    questions: questionDetails,
     questionIds: attempt.questions,
     subjectQuestions: attempt.subjectQuestions,
-    answers: attempt.answers,
+    // Only what the candidate chose — never the grader's isCorrect/marks.
+    answers: (attempt.answers || []).map((a: any) => ({
+      questionId: a.questionId,
+      chosenOptionId: a.chosenOptionId,
+      textAnswer: a.textAnswer,
+      markedForReview: Boolean(a.markedForReview),
+      ...(includePublishedSolutions ? { isCorrect: a.isCorrect, marks: a.marks } : {}),
+    })),
   };
+  if (opts.includeKey) base.attemptAccessKey = attempt.attemptAccessKey || '';
 
-  if (attempt.resultPublished) {
+  if (attempt.resultPublished && !isAgts) {
     base.totalScore = attempt.totalScore || 0;
     base.maxScore = attempt.maxScore || 0;
     base.batch = attempt.batch || '';
-    base.scholarshipAward = attempt.scholarshipAward || {
-      percentage: 0,
-      earlyBirdDiscountPercentage: 0,
-      amount: 0,
-      notes: '',
-    };
-    base.adminReview = attempt.adminReview || { isReviewed: false, notes: '' };
+    base.adminReview = { isReviewed: Boolean(attempt.adminReview?.isReviewed), notes: attempt.adminReview?.notes || '' };
   }
 
   return base;
+}
+
+export async function getScholarshipAttempt(attemptId: string, accessKey?: string) {
+  const attempt = await ScholarshipAttempt.findOne({ attemptId });
+  if (!attempt) {
+    throw new Error('Attempt not found');
+  }
+
+  requireValidAttemptAccess(attempt, accessKey);
+
+  const { docs } = await loadAttemptPaper(attempt as any);
+  return buildAttemptView(attempt, docs, { includeKey: true });
+}
+
+/** Resolve and validate one answer against the attempt's own paper. */
+async function assertAnswerBelongsToPaper(attempt: any, answer: NormalizedAnswer) {
+  if (!(attempt.questions || []).map(String).includes(String(answer.questionId))) {
+    throw new Error('Question is not part of this attempt');
+  }
+  if (answer.chosenOptionId && Types.ObjectId.isValid(answer.chosenOptionId)) {
+    const ClassQuestionModel = getClassQuestionModel(`Class ${attempt.classLevel}`);
+    const q: any = await ClassQuestionModel.findById(answer.questionId).select('options._id type').lean();
+    const optionIds = new Set((q?.options || []).map((o: any) => String(o._id)));
+    if (optionIds.size > 0 && !optionIds.has(String(answer.chosenOptionId))) {
+      throw new Error('Option is not part of this question');
+    }
+  }
 }
 
 export async function saveScholarshipAnswer(
@@ -610,28 +713,33 @@ export async function saveScholarshipAnswer(
     throw new Error('Attempt not found');
   }
 
-  if (!attempt.attemptAccessKey) {
-    attempt.attemptAccessKey = generateAttemptAccessKey();
-  }
-
   requireValidAttemptAccess(attempt, accessKey);
 
   if (attempt.status === 'submitted') {
     throw new Error('Attempt already submitted');
   }
 
+  if (isPastDeadline(attempt)) {
+    throw new Error('Time is up for this attempt');
+  }
+
   const normalizedAnswer = normalizeSingleAnswer(questionId, answer);
   if (!normalizedAnswer) {
     throw new Error('Invalid answer payload');
   }
+  await assertAnswerBelongsToPaper(attempt, normalizedAnswer);
 
   const existingAnswerIndex = attempt.answers.findIndex(
     (a) => a.questionId === questionId
   );
 
   if (existingAnswerIndex >= 0) {
+    const current: any = (attempt.answers[existingAnswerIndex] as any).toObject?.() ?? attempt.answers[existingAnswerIndex];
     attempt.answers[existingAnswerIndex] = {
-      ...attempt.answers[existingAnswerIndex],
+      questionId,
+      chosenOptionId: current.chosenOptionId,
+      textAnswer: current.textAnswer,
+      markedForReview: current.markedForReview,
       ...normalizedAnswer,
     };
   } else {
@@ -648,17 +756,19 @@ export async function submitScholarshipTest(attemptId: string, answers: any, acc
     throw new Error('Attempt not found');
   }
 
-  if (!attempt.attemptAccessKey) {
-    attempt.attemptAccessKey = generateAttemptAccessKey();
-  }
-
   requireValidAttemptAccess(attempt, accessKey);
 
   if (attempt.status === 'submitted') {
     throw new Error('Attempt already submitted');
   }
 
-  const normalizedAnswers = normalizeSubmittedAnswers(answers);
+  // After the timer and its grace window, the stored answers are final: a late
+  // submit is accepted but cannot add or change anything.
+  const late = isPastDeadline(attempt);
+  const paper = new Set((attempt.questions || []).map(String));
+  const normalizedAnswers = late
+    ? []
+    : normalizeSubmittedAnswers(answers).filter((a) => paper.has(String(a.questionId)));
 
   for (const answer of normalizedAnswers) {
     const existingIndex = attempt.answers.findIndex(
@@ -666,8 +776,12 @@ export async function submitScholarshipTest(attemptId: string, answers: any, acc
     );
 
     if (existingIndex >= 0) {
+      const current: any = (attempt.answers[existingIndex] as any).toObject?.() ?? attempt.answers[existingIndex];
       attempt.answers[existingIndex] = {
-        ...attempt.answers[existingIndex],
+        questionId: answer.questionId,
+        chosenOptionId: current.chosenOptionId,
+        textAnswer: current.textAnswer,
+        markedForReview: current.markedForReview,
         ...answer,
       };
     } else {
@@ -676,7 +790,7 @@ export async function submitScholarshipTest(attemptId: string, answers: any, acc
   }
 
   attempt.status = 'submitted';
-  attempt.submittedAt = new Date();
+  attempt.submittedAt = late ? new Date(attemptDeadline(attempt)) : new Date();
 
   await attempt.save();
 
@@ -684,56 +798,39 @@ export async function submitScholarshipTest(attemptId: string, answers: any, acc
     attemptId: attempt.attemptId,
     status: attempt.status,
     submittedAt: attempt.submittedAt,
-    message: 'Test submitted successfully. Results will be published soon.',
+    message: 'Test submitted successfully.',
   };
 }
 
+/**
+ * Grade an attempt from the server's answer key (assessmentScoring).
+ *
+ * The maximum is the whole paper's, answered or not — see assessmentScoring
+ * for why the previous per-answer maximum inflated percentages. Per-answer
+ * `isCorrect`/`marks` are still written for the admin review screen.
+ */
 export async function gradeScholarshipAttempt(attemptId: string) {
   const attempt = await ScholarshipAttempt.findOne({ attemptId });
   if (!attempt) {
     throw new Error('Attempt not found');
   }
 
-  const ClassQuestionModel = getClassQuestionModel(`Class ${attempt.classLevel}`);
-  const questions = await ClassQuestionModel.find({
-    _id: { $in: attempt.questions.map((id) => new Types.ObjectId(id)) },
-  }).lean();
-
-  const questionMap = new Map(questions.map((q: any) => [q._id.toString(), q]));
-  let totalScore = 0;
-  let maxScore = 0;
+  const { keys } = await loadAttemptPaper(attempt as any);
+  const summary = scorePaper(keys, responsesOf(attempt, keys));
+  const resultById = new Map(summary.perQuestion.map((r) => [r.questionId, r]));
 
   for (const answer of attempt.answers) {
-    const question = questionMap.get(answer.questionId);
-    if (!question) {
-      continue;
-    }
-
-    const marks = question.marks || 1;
-    maxScore += marks;
-
-    if (question.type === 'mcq') {
-      const correctOption = question.options?.find((opt: any) => opt.isCorrect);
-      if (correctOption && answer.chosenOptionId === correctOption._id.toString()) {
-        answer.marks = marks;
-        answer.isCorrect = true;
-        totalScore += marks;
-      } else {
-        answer.marks = 0;
-        answer.isCorrect = false;
-      }
-    } else if (question.type === 'short-answer') {
-      answer.marks = 0;
-      answer.isCorrect = false;
-    }
+    const result = resultById.get(String(answer.questionId));
+    if (!result || !result.gradable) continue;
+    answer.marks = result.awarded;
+    answer.isCorrect = result.outcome === 'correct';
   }
 
-  attempt.totalScore = totalScore;
-  attempt.maxScore = maxScore;
+  attempt.totalScore = summary.score;
+  attempt.maxScore = summary.maxScore;
   await attempt.save();
 
-  const percentage = maxScore > 0 ? ((totalScore / maxScore) * 100).toFixed(2) : '0.00';
-  return { totalScore, maxScore, percentage };
+  return { totalScore: summary.score, maxScore: summary.maxScore, percentage: summary.percentage.toFixed(2), summary };
 }
 
 export async function getScholarshipResults(filters: any = {}) {
@@ -809,9 +906,7 @@ export async function publishScholarshipResults(filters: { classLevel?: number; 
     .map((a) => ({
       attemptId: a.attemptId,
       name: a.name,
-      publicUrl: `${frontendBase}/scholarship-results?resultToken=${encodeURIComponent(
-        String(a.resultPublicToken)
-      )}`,
+      publicUrl: `${frontendBase}/agts/result?token=${encodeURIComponent(String(a.resultPublicToken))}`,
     }));
 
   return {
@@ -841,30 +936,28 @@ export async function getScholarshipResultPublicLink(attemptId: string) {
   return {
     attemptId: attempt.attemptId,
     name: attempt.name,
-    publicUrl: `${frontendBase}/scholarship-results?resultToken=${encodeURIComponent(
-      String(attempt.resultPublicToken)
-    )}`,
+    publicUrl: `${frontendBase}/agts/result?token=${encodeURIComponent(String(attempt.resultPublicToken))}`,
   };
 }
 
 export async function getScholarshipPublicResultByToken(token: string) {
   const normalizedToken = String(token || '').trim();
-  if (!normalizedToken) {
-    throw new Error('Result token is required');
+  // Tokens are 40 hex chars; anything else cannot match and is not looked up.
+  if (!/^[a-f0-9]{40}$/i.test(normalizedToken)) {
+    throw new Error(normalizedToken ? 'Invalid or expired result link' : 'Result token is required');
   }
 
   const attempt = await ScholarshipAttempt.findOne({ resultPublicToken: normalizedToken });
-  if (!attempt) {
+  if (!attempt || !attempt.resultPublished) {
     throw new Error('Invalid or expired result link');
   }
 
-  const data: any = await getScholarshipAttempt(
-    attempt.attemptId,
-    attempt.attemptAccessKey || undefined
-  );
-
-  // Never expose attempt access key on public endpoint.
-  delete data.attemptAccessKey;
+  // The token is the authorisation here, so the view is built directly rather
+  // than through the attempt-key check (which refuses pre-key attempts).
+  const { docs } = await loadAttemptPaper(attempt as any);
+  const data: any = buildAttemptView(attempt, docs, { includeKey: false });
+  // A shared link is for the result, not for the candidate's contact details.
+  delete data.phone;
   data.isPublicResult = true;
 
   return data;
@@ -1112,7 +1205,7 @@ export async function getScholarshipTestPreview(testId: string, classLevel?: num
 
     if (availableQuestions.length < (test.questionsPerSubject || 15)) {
       throw new Error(
-        `Not enough Scholarship-board questions for Class ${previewClass} - ${subject}. ` +
+        `Not enough AGTS questions for Class ${previewClass} - ${subject}. ` +
           `Required: ${test.questionsPerSubject || 15}, Found: ${availableQuestions.length}`
       );
     }
@@ -1187,7 +1280,7 @@ export async function getTestShareLink(testId: string) {
   return {
     shareLink: logicalShareLink,
     testName: test.testName,
-    publicUrl: `${resolveFrontendBaseUrl()}/scholarship?test=${encodeURIComponent(logicalShareLink)}`,
+    publicUrl: `${resolveFrontendBaseUrl()}/agts?test=${encodeURIComponent(logicalShareLink)}`,
   };
 }
 

@@ -211,6 +211,74 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
     justification: 'Result link shared with the candidate; the token is the authorisation.',
   },
 
+  // AGTS (Abhigyan Gurukul Test Series) — the scholarship flow above, renamed
+  // and hardened. Same audience: a prospective family with no account.
+  {
+    method: 'GET',
+    path: '/api/agts/tests',
+    classification: 'public-global',
+    reason: 'public:agts-browse',
+    justification: 'Active AGTS test names, classes, subjects and durations for the public landing page. No candidate data.',
+  },
+  {
+    method: 'GET',
+    path: '/api/agts/tests/:ref',
+    classification: 'public-global',
+    reason: 'public:agts-browse',
+    justification: 'One AGTS test resolved from a share link. Metadata only; never questions or answers.',
+  },
+  {
+    method: 'POST',
+    path: '/api/agts/register',
+    classification: 'public-global',
+    reason: 'public:agts-register',
+    justification:
+      'A family registers with consent and starts a test. Rate limited per network and per phone; ' +
+      'every stored field is validated and allow-listed server-side.',
+  },
+  {
+    method: 'GET',
+    path: '/api/agts/attempts/:attemptId',
+    classification: 'public-global',
+    reason: 'public:agts-attempt',
+    justification: 'The paper for an in-progress attempt. Authorised by the per-attempt key header; no answer key is returned.',
+  },
+  {
+    method: 'POST',
+    path: '/api/agts/attempts/:attemptId/answer',
+    classification: 'public-global',
+    reason: 'public:agts-attempt',
+    justification: 'Saves one answer to the attempt the per-attempt key names. The server enforces the deadline.',
+  },
+  {
+    method: 'POST',
+    path: '/api/agts/attempts/:attemptId/submit',
+    classification: 'public-global',
+    reason: 'public:agts-attempt',
+    justification: 'Closes the attempt the per-attempt key names. Scoring is computed server-side from the answer key.',
+  },
+  {
+    method: 'GET',
+    path: '/api/agts/attempts/:attemptId/result',
+    classification: 'public-global',
+    reason: 'public:agts-result',
+    justification: 'The candidate\'s own performance report, authorised by the per-attempt key. No contact details are returned.',
+  },
+  {
+    method: 'POST',
+    path: '/api/agts/attempts/:attemptId/guidance',
+    classification: 'public-global',
+    reason: 'public:agts-guidance',
+    justification: 'The candidate asks for academic guidance from their result. Authorised by the per-attempt key; rate limited.',
+  },
+  {
+    method: 'GET',
+    path: '/api/agts/shared/:token',
+    classification: 'public-global',
+    reason: 'public:agts-result',
+    justification: 'A result link an admin chose to share; the 160-bit token is the authorisation. No contact details are returned.',
+  },
+
   // ── Diagnostics ──────────────────────────────────────────────────────────
   {
     method: 'GET',

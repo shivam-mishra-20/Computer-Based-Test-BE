@@ -487,7 +487,9 @@ async function main() {
       `allowlist size is exactly ${PUBLIC_ROUTE_ALLOWLIST.length} (update deliberately)`,
       // 23 since 2026-09-24: refresh, accept-invite and reset-password-link,
       // each authorised by a credential of its own that names one account.
-      PUBLIC_ROUTE_ALLOWLIST.length === 23,
+      // 32 since 2026-09-28: the nine AGTS routes (the renamed scholarship
+      // flow) — test metadata, registration, and per-attempt-key routes.
+      PUBLIC_ROUTE_ALLOWLIST.length === 32,
       `got ${PUBLIC_ROUTE_ALLOWLIST.length} — if intentional, update the test`,
     );
     check(

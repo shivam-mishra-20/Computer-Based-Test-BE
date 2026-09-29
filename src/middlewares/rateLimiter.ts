@@ -176,6 +176,43 @@ export const publicFormLimiter = rateLimit({
 });
 
 /**
+ * AGTS registration — the one AGTS route that creates rows (a lead and an
+ * attempt with its own question selection).
+ *
+ * Sized above `publicFormLimiter` on purpose: a school or coaching centre may
+ * run AGTS for a whole class from one Wi-Fi address (see the note at the top
+ * of this file). The per-phone ceiling in agtsService is the tighter control.
+ */
+export const agtsRegisterLimiter = rateLimit({
+  windowMs: envNumber('AGTS_REGISTER_RATE_LIMIT_WINDOW_MS', 60 * 60 * 1000),
+  max: envNumber('AGTS_REGISTER_RATE_LIMIT_MAX', 60),
+  message: { message: 'Too many test registrations from this network. Please try again in a little while.', code: 'AGTS_RATE_LIMITED' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: createRedisStore('rl:agts-register:'),
+  passOnStoreError: true,
+  validate: false,
+});
+
+/**
+ * AGTS answer traffic, keyed by ATTEMPT rather than by IP, so a hall of
+ * candidates on one address is never throttled together while a single
+ * attempt cannot be hammered. A real candidate saves each answer a handful of
+ * times; the ceiling is far above that.
+ */
+export const agtsAttemptLimiter = rateLimit({
+  windowMs: envNumber('AGTS_ATTEMPT_RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000),
+  max: envNumber('AGTS_ATTEMPT_RATE_LIMIT_MAX', 900),
+  message: { message: 'Too many requests for this test. Please slow down.', code: 'AGTS_RATE_LIMITED' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: createRedisStore('rl:agts-attempt:'),
+  passOnStoreError: true,
+  keyGenerator: (req: Request) => `attempt:${String(req.params?.attemptId || '').slice(0, 40)}`,
+  validate: false,
+});
+
+/**
  * Working on a draft you already hold the token for.
  *
  * ── Why this is not `publicFormLimiter` ─────────────────────────────────────
