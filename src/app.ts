@@ -9,6 +9,9 @@ import publicContentRoutes from './routes/api/publicContentRoutes';
 import publicTestRoutes from './routes/api/publicTestRoutes';
 import publicTestAdminRoutes from './routes/api/publicTestAdminRoutes';
 import userRoutes from './routes/api/userRoutes';
+import parentRoutes from './routes/api/parentRoutes';
+import guardianLinkRoutes from './routes/api/guardianLinkRoutes';
+import orgAdminRoutes from './routes/api/orgAdminRoutes';
 import testRoutes from './routes/api/testRoutes';
 import examRoutes from './routes/api/examRoutes';
 import attemptRoutes from './routes/api/attemptRoutes';
@@ -28,6 +31,7 @@ import scheduleRoutes from './routes/api/scheduleRoutes';
 import leaderboardRoutes from './routes/api/leaderboardRoutes';
 import bookmarkRoutes from './routes/api/bookmarkRoutes';
 import passwordResetRoutes from './routes/api/passwordResetRoutes';
+import sessionRoutes from './routes/api/sessionRoutes';
 import doubtRoutes from './routes/api/doubtRoutes';
 import lectureRoutes from './routes/api/lectureRoutes';
 import teacherRoutes from './routes/api/teacherRoutes';
@@ -53,6 +57,7 @@ import orgRegistrationPublicRoutes from './routes/api/orgRegistrationPublicRoute
 import eodRoutes from './routes/api/eodRoutes';
 import playlistRoutes from './routes/api/playlistRoutes';
 import scholarshipRoutes from './routes/api/scholarshipRoutes';
+import agtsRoutes from './routes/api/agtsRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import { globalLimiter } from './middlewares/rateLimiter';
 import { tenantContextMiddleware } from './middlewares/tenantContext';
@@ -77,30 +82,6 @@ app.disable('x-powered-by');
 
 // Trust proxy for proper IP detection behind load balancers
 app.set('trust proxy', 1);
-
-// Apply global rate limiter (must be early in middleware chain)
-app.use(globalLimiter);
-
-// Parse JSON bodies, but SKIP parsing when there is no body. A body-less POST
-// (e.g. course enroll) that still carries `Content-Type: application/json`
-// would otherwise make express.json try to parse an empty string and reject the
-// whole request with "Unexpected token … is not valid JSON" — before the route
-// even runs. Skipping empty bodies lets those requests through cleanly.
-const jsonParser = express.json({ limit: BODY_LIMIT });
-app.use((req, res, next) => {
-	const contentLength = req.headers['content-length'];
-	const hasBody =
-		(contentLength !== undefined && contentLength !== '0') ||
-		req.headers['transfer-encoding'] !== undefined;
-	if (!hasBody) {
-		// Mirror express.json's empty-body behavior so downstream handlers that
-		// destructure req.body don't crash.
-		if (req.body === undefined) req.body = {};
-		return next();
-	}
-	return jsonParser(req, res, next);
-});
-app.use(express.urlencoded({ limit: BODY_LIMIT, extended: true, parameterLimit: 1000 }));
 
 // CORS configuration - allow credentials and Authorization header
 // When credentials is true, origin cannot be '*', so we use a function to dynamically allow origins
@@ -185,9 +166,23 @@ const corsOptions: cors.CorsOptions = {
 		'Authorization',
 		'X-Requested-With',
 		'Accept',
-		// Scholarship attempt access control
+		// AGTS attempt access control (and its pre-AGTS name, still accepted)
+		'X-AGTS-Attempt-Key',
 		'X-Scholarship-Attempt-Key',
 		'X-Attempt-Key',
+		// The institute onboarding draft: an applicant has no account, so the
+		// draft token IS the authorisation. Without it listed here the browser
+		// fails the preflight and every save after step 1 looks to the
+		// applicant like the server is down.
+		'X-Application-Token',
+		// The pre-login organization hint (and the app identity beside it). A
+		// web client sends X-Org-Id before anyone has signed in, so a login page
+		// can be painted in its institute's colours; without these listed the
+		// browser failed the preflight, the request never left, and every web
+		// login page fell back to unbranded. Routing hints only — the server
+		// never lets them outrank a signed token (tenantContext.ts).
+		'X-Org-Id',
+		'X-App-Id',
 	],
 	exposedHeaders: ['Content-Range', 'X-Content-Range'],
 	methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -196,6 +191,46 @@ const corsOptions: cors.CorsOptions = {
 
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
+
+/*
+ * ── Why the rate limiter and the body parsers come AFTER cors ──────────────
+ * They used to come first, and the cost was paid in diagnosis rather than in
+ * correctness. Anything that answers a cross-origin request BEFORE `cors()`
+ * runs answers it with no `Access-Control-Allow-Origin` header, and a browser
+ * reports that as "blocked by CORS policy" whatever the real reason was. So a
+ * 429 from the global limiter, and a 400 from `express.json` on a malformed
+ * body, both reached the client as a CORS error — sending whoever was
+ * debugging to the allow-list, which was never the problem.
+ *
+ * Running cors first costs two response headers on requests that are about to
+ * be refused, and in exchange every refusal says what it actually is. It also
+ * means a preflight is answered before the limiter counts it, which is right:
+ * a browser's OPTIONS is not a request the user made.
+ */
+
+// Apply global rate limiter (early, but never before CORS — see above)
+app.use(globalLimiter);
+
+// Parse JSON bodies, but SKIP parsing when there is no body. A body-less POST
+// (e.g. course enroll) that still carries `Content-Type: application/json`
+// would otherwise make express.json try to parse an empty string and reject the
+// whole request with "Unexpected token … is not valid JSON" — before the route
+// even runs. Skipping empty bodies lets those requests through cleanly.
+const jsonParser = express.json({ limit: BODY_LIMIT });
+app.use((req, res, next) => {
+	const contentLength = req.headers['content-length'];
+	const hasBody =
+		(contentLength !== undefined && contentLength !== '0') ||
+		req.headers['transfer-encoding'] !== undefined;
+	if (!hasBody) {
+		// Mirror express.json's empty-body behavior so downstream handlers that
+		// destructure req.body don't crash.
+		if (req.body === undefined) req.body = {};
+		return next();
+	}
+	return jsonParser(req, res, next);
+});
+app.use(express.urlencoded({ limit: BODY_LIMIT, extended: true, parameterLimit: 1000 }));
 
 // Helmet with CSP disabled to avoid devtools CSP console noise on API root
 app.use(helmet({ contentSecurityPolicy: false }));
@@ -332,6 +367,7 @@ app.use('/api/me', meContextRoutes);
 app.use('/api/org', orgPublicRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/auth', passwordResetRoutes); // Password reset under /api/auth
+app.use('/api/auth', sessionRoutes); // Refresh, sign out everywhere, invite + reset links
 app.use('/api/learner', learnerRoutes); // Public Learner profile, home, saves, progress
 // Public "Register your institute" submissions. Unauthenticated, rate
 // limited, and able to write only to OrganizationRegistration — it creates
@@ -342,6 +378,9 @@ app.use('/api/public', publicContentRoutes); // Guest + learner content discover
 app.use('/api/public', publicTestRoutes); // Guest + learner assessment discovery (browse-only)
 app.use('/api/admin-assessments', publicTestAdminRoutes); // Staff authoring for public tests
 app.use('/api/users', userRoutes);
+app.use('/api/parent', parentRoutes); // Parent-scoped: verified wards only
+app.use('/api/guardian-links', guardianLinkRoutes); // Org admins review parent links
+app.use('/api/org-admin', orgAdminRoutes); // An institute's admins manage their OWN organization
 app.use('/api/tests', testRoutes);
 app.use('/api/exams', examRoutes);
 app.use('/api/attempts', attemptRoutes);
@@ -401,7 +440,9 @@ app.use('/api/eod', eodRoutes);
 // YouTube playlist import & sync
 app.use('/api/playlist', playlistRoutes);
 
-// Scholarship test routes
+// AGTS — Abhigyan Gurukul Test Series (public test flow + staff lead desk)
+app.use('/api/agts', agtsRoutes);
+// Pre-AGTS scholarship routes: kept for links and admin tooling already in use
 app.use('/api/scholarship', scholarshipRoutes);
 
 // Webhook routes

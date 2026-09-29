@@ -24,7 +24,7 @@
  */
 
 import { currentOrgId, withoutTenantScope } from '../tenancy/context';
-import { tenantScope } from '../tenancy/queryScope';
+import { tenantScope, type TenantFilter } from '../tenancy/queryScope';
 import { SUPPORTED_CLASS_VALUES } from '../../config/studentBatchConfig';
 import { CURRICULUM_SUBJECTS } from '../../config/subjects';
 import { ROOMS, ROOM_CAPACITY } from '../../models/RoomAllocation';
@@ -118,7 +118,7 @@ export function legacySubjects(): string[] {
  */
 export function batchReadScope(
   explicitOrgId?: string | null,
-): Record<string, never> | { orgId: string } {
+): TenantFilter {
   return explicitOrgId ? { orgId: explicitOrgId } : tenantScope();
 }
 

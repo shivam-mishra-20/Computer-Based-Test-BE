@@ -1,3 +1,5 @@
+import { requireTenantScope } from '../../core/tenancy';
+import { staffHolds } from '../../middlewares/requirePermission';
 import { Router, Request, Response } from 'express';
 import EOD from '../../models/EOD';
 import Schedule from '../../models/Schedule';
@@ -319,7 +321,7 @@ router.get('/student/by-date/:date', authMiddleware, async (req: AuthRequest, re
     const endOfDay = new Date(`${dateStr}T23:59:59.999Z`);
 
     // Fetch full student record to get classLevel and batch
-    const student = await User.findById(req.user._id).select('classLevel batch name').lean();
+    const student = await User.findOne({ _id: req.user._id, ...requireTenantScope('eod') }).select('classLevel batch name').lean();
 
     if (!student) {
       return res.status(404).json({ error: 'Student not found' });
@@ -381,7 +383,7 @@ router.get('/student/by-date/:date', authMiddleware, async (req: AuthRequest, re
 // POST - Trigger teacher EOD reminder manually (Admin only)
 router.post('/admin/send-reminder', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    if (req.user?.role !== 'admin') {
+    if (!(await staffHolds(req, 'eod.review'))) {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
@@ -407,7 +409,7 @@ router.post('/admin/send-reminder', authMiddleware, async (req: AuthRequest, res
 // GET - Get all EODs (Admin only)
 router.get('/admin/all', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    if (req.user?.role !== 'admin') {
+    if (!(await staffHolds(req, 'eod.review'))) {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
@@ -439,6 +441,7 @@ router.get('/admin/all', authMiddleware, async (req: AuthRequest, res: Response)
     if (teacherId) query.teacherId = teacherId;
     if (status) query.status = status;
 
+    Object.assign(query, requireTenantScope('eod:admin-all'));
     console.log('[EOD Admin] Query filter:', JSON.stringify(query, null, 2));
 
     const skip = (Number(page) - 1) * Number(limit);
@@ -474,7 +477,7 @@ router.get('/admin/all', authMiddleware, async (req: AuthRequest, res: Response)
 // GET - Get EOD statistics (Admin only)
 router.get('/admin/stats', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    if (req.user?.role !== 'admin') {
+    if (!(await staffHolds(req, 'eod.review'))) {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
@@ -551,7 +554,7 @@ router.get('/admin/stats', authMiddleware, async (req: AuthRequest, res: Respons
 // PUT - Update EOD Status (Admin only)
 router.put('/admin/:eodId/status', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    if (req.user?.role !== 'admin') {
+    if (!(await staffHolds(req, 'eod.review'))) {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
@@ -561,7 +564,7 @@ router.put('/admin/:eodId/status', authMiddleware, async (req: AuthRequest, res:
       return res.status(400).json({ error: 'Invalid status. Use "approved" or "rejected"' });
     }
 
-    const eod = await EOD.findById(req.params.eodId);
+    const eod = await EOD.findOne({ _id: req.params.eodId, ...requireTenantScope('eod') });
 
     if (!eod) {
       return res.status(404).json({ error: 'EOD not found' });
@@ -585,16 +588,16 @@ router.put('/admin/:eodId/status', authMiddleware, async (req: AuthRequest, res:
 // DELETE - Delete EOD (Admin only)
 router.delete('/admin/:eodId', authMiddleware, async (req: AuthRequest, res: Response) => {
   try {
-    if (req.user?.role !== 'admin') {
+    if (!(await staffHolds(req, 'eod.review'))) {
       return res.status(403).json({ error: 'Admin access required' });
     }
 
-    const eod = await EOD.findById(req.params.eodId);
+    const eod = await EOD.findOne({ _id: req.params.eodId, ...requireTenantScope('eod') });
     if (!eod) {
       return res.status(404).json({ error: 'EOD not found' });
     }
 
-    await EOD.findByIdAndDelete(req.params.eodId);
+    await EOD.findOneAndDelete({ _id: req.params.eodId, ...requireTenantScope('eod') });
     res.json({ message: 'EOD deleted successfully' });
   } catch (error: any) {
     console.error('Error deleting EOD:', error);

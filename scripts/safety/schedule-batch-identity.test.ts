@@ -488,7 +488,9 @@ function main() {
     'it is scoped to the organization',
     clearBlock.includes('...tenantScope(),'),
   );
-  check('admin only', clearBlock.includes("user.role !== 'admin'"));
+  // Admin authority as a permission, so a narrowed custom role cannot clear a
+  // day by virtue of its role string.
+  check('admin only', clearBlock.includes("staffHolds(req, 'schedule.manage', 'classes.manage')"));
   check('the date must be a real date', clearBlock.includes('$/.test(date)'));
 
   // Retire rather than erase, so a day that genuinely ran stays in history —

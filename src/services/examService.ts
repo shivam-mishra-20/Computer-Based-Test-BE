@@ -1,3 +1,4 @@
+import { requireTenantScope } from '../core/tenancy';
 import { Types } from 'mongoose';
 import Exam, { IExam } from '../models/Exam';
 import Question, { IQuestion } from '../models/Question';
@@ -126,13 +127,13 @@ export const listQuestions = async (filter: any = {}, limit = 50, skip = 0) => {
 };
 
 export const updateQuestion = async (id: string, payload: Partial<IQuestion>) => {
-  const q = await Question.findByIdAndUpdate(id, payload, { new: true });
+  const q = await Question.findOneAndUpdate({ _id: id, ...requireTenantScope('questions') }, payload, { new: true });
   return q;
 };
 
-export const deleteQuestion = async (id: string) => {
-  await Question.findByIdAndDelete(id);
-};
+/** The deleted question, or null when this organization has none by that id. */
+export const deleteQuestion = async (id: string) =>
+  Question.findOneAndDelete({ _id: id, ...requireTenantScope('questions') });
 
 // Ensure a marking scheme coming from any client persists as numbers (so the
 // scheme set during exam creation reliably reaches the DB and the review).
@@ -172,23 +173,31 @@ export const createExam = async (payload: Partial<IExam>) => {
 export const updateExam = async (id: string, payload: Partial<IExam>) => {
   let existing: IExam | null = null;
   if (payload.isPublished) {
-    existing = await Exam.findById(id);
+    existing = await Exam.findOne({ _id: id, ...requireTenantScope('exams') });
     assertPublishReady(payload, existing);
   }
-  const updated = await Exam.findByIdAndUpdate(id, normalizeMarkingScheme({ ...payload }), { new: true });
+  const updated = await Exam.findOneAndUpdate({ _id: id, ...requireTenantScope('exams') }, normalizeMarkingScheme({ ...payload }), { new: true });
   return withStatus(updated);
 };
 
-export const getExam = async (id: string) => withStatus(await Exam.findById(id));
+export const getExam = async (id: string) => withStatus(await Exam.findOne({ _id: id, ...requireTenantScope('exams') }));
 export const listExams = async (filter: any = {}, limit = 50, skip = 0) => {
+  const scoped = { ...filter, ...requireTenantScope('exams') };
   const [items, total] = await Promise.all([
-    Exam.find(filter).limit(limit).skip(skip).sort({ createdAt: -1 }),
-    Exam.countDocuments(filter),
+    Exam.find(scoped).limit(limit).skip(skip).sort({ createdAt: -1 }),
+    Exam.countDocuments(scoped),
   ]);
   return { items: items.map(withStatus), total };
 };
 
+/** The deleted exam, or null when this organization has none by that id. */
 export const deleteExam = async (id: string) => {
+  // This organization's exam, or nothing is touched. The cascade below matches
+  // by exam id alone, so it must never run for an id that is not ours.
+  if (!Types.ObjectId.isValid(id)) return null;
+  const scope = requireTenantScope('exams');
+  const exam = await Exam.findOne({ _id: id, ...scope }).select('_id').lean();
+  if (!exam) return null;
   const examObjectId = new Types.ObjectId(id);
 
   // Cascade delete everything tied to this exam. Without this, deleting an exam
@@ -196,16 +205,16 @@ export const deleteExam = async (id: string) => {
   // results/analytics. Removing attempts + their evaluations + review logs keeps
   // student performance data consistent with the exams that still exist.
   await Promise.all([
-    Attempt.deleteMany({ examId: examObjectId }),
-    ExamEvaluation.deleteMany({ examId: examObjectId }),
-    ReviewAuditLog.deleteMany({ examId: examObjectId }),
+    Attempt.deleteMany({ examId: examObjectId, ...scope }),
+    ExamEvaluation.deleteMany({ examId: examObjectId, ...scope }),
+    ReviewAuditLog.deleteMany({ examId: examObjectId, ...scope }),
   ]);
 
-  return Exam.findByIdAndDelete(id);
+  return Exam.findOneAndDelete({ _id: id, ...scope });
 };
 
 export const assignExam = async (id: string, users?: string[], groups?: string[]) => {
-  const exam = await Exam.findById(id);
+  const exam = await Exam.findOne({ _id: id, ...requireTenantScope('exams') });
   if (!exam) return null;
   // Non-destructive: a caller that only sends `groups` (e.g. the
   // Schedule & Publish flow, which is class/batch-only) must not silently
@@ -248,14 +257,15 @@ export const assignExam = async (id: string, users?: string[], groups?: string[]
 export const createBlueprint = async (payload: Partial<IBlueprint> & { owner: Types.ObjectId }) => {
   return Blueprint.create(payload as IBlueprint);
 };
+// "Shared" means shared within this organization, never across them.
 export const listBlueprints = async (owner: Types.ObjectId) => {
-  return Blueprint.find({ $or: [{ owner }, { shared: true }] }).sort({ createdAt: -1 });
+  return Blueprint.find({ $or: [{ owner }, { shared: true }], ...requireTenantScope('blueprints') }).sort({ createdAt: -1 });
 };
 export const updateBlueprint = async (id: string, owner: Types.ObjectId, payload: Partial<IBlueprint>) => {
-  return Blueprint.findOneAndUpdate({ _id: id, owner }, payload, { new: true });
+  return Blueprint.findOneAndUpdate({ _id: id, owner, ...requireTenantScope('blueprints') }, payload, { new: true });
 };
 export const deleteBlueprint = async (id: string, owner: Types.ObjectId) => {
-  await Blueprint.findOneAndDelete({ _id: id, owner });
+  await Blueprint.findOneAndDelete({ _id: id, owner, ...requireTenantScope('blueprints') });
 };
 
 // Create exam (and optionally questions) from generated paper result

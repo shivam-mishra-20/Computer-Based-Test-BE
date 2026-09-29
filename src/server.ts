@@ -24,6 +24,27 @@
 // silently, which is the worst failure mode for a security control.
 // verifyTenantPluginApplied() below turns that silence into a loud error.
 import { registerTenancy, verifyTenantPluginApplied } from './core/tenancy';
+import { applyDataSourcePolicy } from './core/tenancy/dataSource';
+
+// ── The database decides the mode ───────────────────────────────────────────
+// Before tenancy is registered and before any model can reach the database:
+// pointed at the LEGACY database, this process runs in legacy mode (whatever
+// TENANT_MODE says), creates and indexes nothing, seeds nothing and schedules
+// nothing. See core/tenancy/dataSource.ts.
+{
+  const policy = applyDataSourcePolicy();
+  if (policy.legacy) {
+    console.warn(
+      `[data-source] "${policy.database}" is listed in LEGACY_DB_NAMES: legacy mode, legacy accounts only, organization accounts refused.`,
+    );
+    for (const change of policy.changes) console.warn(`[data-source]   ${change}`);
+  } else {
+    console.log(
+      `[data-source] "${policy.database ?? '(no database in MONGO_URI)'}" is not in LEGACY_DB_NAMES: ` +
+        `TENANT_MODE=${process.env.TENANT_MODE || '(unset)'} applies as configured.`,
+    );
+  }
+}
 registerTenancy();
 
 import http from 'http';
@@ -66,6 +87,26 @@ function shouldRunEmbeddedPptWorker(): boolean {
   return cluster.worker?.id === 1;
 }
 
+/**
+ * The mobile app build worker, on the same terms — and its OWN switch.
+ *
+ * ── Why not reuse the flag above ────────────────────────────────────────────
+ * It was written for the AI pipeline and is named for it. Hanging mobile
+ * builds off it means that turning the PPT worker off — a reasonable thing to
+ * do while debugging generation — silently stops every "Build App" click in
+ * the console, with no message anywhere and a build that sits on "Waiting for
+ * a build worker" until somebody thinks to look at the queue. Two unrelated
+ * capabilities should not share one switch.
+ *
+ * Same one-instance gating as cron: under cluster mode only fork 1 runs it, so
+ * one click does not become four uploads to EAS.
+ */
+function shouldRunEmbeddedAppBuildWorker(): boolean {
+  if (process.env.APP_BUILD_WORKER_EMBEDDED === 'false') return false;
+  if (!cluster.isWorker) return true;
+  return cluster.worker?.id === 1;
+}
+
 const httpServer = http.createServer(app);
 
 // Initialize Socket.IO with Redis adapter
@@ -99,6 +140,63 @@ connectDB().then(async () => {
       `✅ [Worker ${WORKER_ID}] Embedded AI PPT worker started (set PPT_WORKER_EMBEDDED=false to run it separately)`,
     );
   }
+
+  if (shouldRunEmbeddedAppBuildWorker()) {
+    // Wrapped, because the failure mode this replaces was silence. A worker
+    // that throws on startup and is not caught leaves the server running, the
+    // queue filling, and every build in the console reading "Waiting for a
+    // build worker" with nothing in the log to say why.
+    try {
+      const { startAppBuildWorker } = require('./workers/appBuildWorkerCore');
+      startAppBuildWorker();
+      console.log(
+        `✅ [Worker ${WORKER_ID}] Embedded mobile app build worker started (set APP_BUILD_WORKER_EMBEDDED=false to run it separately)`,
+      );
+
+      // A BuildJob can outlive its queue entry — Redis flushed, a job dropped,
+      // or a server that accepted the build and was restarted before the
+      // worker ever existed. Those sit in `queued` for ever. This puts them
+      // back on the queue, and is safe to run on every boot: the queue id is
+      // derived from the BuildJob id, so re-enqueueing one that is already
+      // there is a no-op rather than a second build.
+      const { reconcileOrphanedBuilds } = require('./core/platform/appBuilds');
+      reconcileOrphanedBuilds()
+        .then((result: { requeued: number; alreadyQueued: number }) => {
+          if (result.requeued > 0) {
+            console.log(
+              `♻️ [Worker ${WORKER_ID}] Re-queued ${result.requeued} build(s) that had no queue entry`,
+            );
+          }
+        })
+        .catch((err: unknown) => {
+          console.error(
+            `⚠️ [Worker ${WORKER_ID}] Could not reconcile orphaned builds:`,
+            (err as Error)?.message,
+          );
+        });
+    } catch (err) {
+      console.error(
+        `❌ [Worker ${WORKER_ID}] The mobile app build worker FAILED to start — every build will sit in the queue:`,
+        (err as Error)?.message,
+      );
+    }
+  } else {
+    console.log(
+      `ℹ️ [Worker ${WORKER_ID}] Mobile app build worker is DISABLED here (APP_BUILD_WORKER_EMBEDDED=false) — run \`npm run start:worker:app-build\``,
+    );
+  }
+
+  // An organization deletion that was running when the previous process
+  // stopped carries on from its last saved step. Each one is claimed
+  // atomically, so several workers booting together run it once.
+  import('./core/platform/orgDeletion')
+    .then(({ resumeStalledDeletions }) => resumeStalledDeletions())
+    .then((n: number) => {
+      if (n > 0) console.log(`♻️ [Worker ${WORKER_ID}] Resumed ${n} organization deletion(s)`);
+    })
+    .catch((err: unknown) => {
+      console.error(`⚠️ [Worker ${WORKER_ID}] Could not resume organization deletions:`, (err as Error)?.message);
+    });
 }).catch((err: any) => {
   console.error('Database connection failed at startup:', err);
 });
@@ -117,6 +215,8 @@ const shutdown = async (signal: string) => {
   try {
     const { stopPptPipelineWorker } = require('./workers/pptWorkerCore');
     await stopPptPipelineWorker();
+    const { stopAppBuildWorker } = require('./workers/appBuildWorkerCore');
+    await stopAppBuildWorker();
   } catch {
     /* best-effort */
   }

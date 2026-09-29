@@ -15,6 +15,10 @@
 
 export const PERMISSIONS = [
   'users.read', 'users.create', 'users.update', 'users.delete', 'users.invite',
+  // Admitting people: approving self-registrations, and confirming that a
+  // parent belongs to a student. Separate from users.update because both
+  // decide who gets IN, which a Front Desk may do and a teacher may not.
+  'registrations.review', 'guardians.manage',
   'roles.read', 'roles.create', 'roles.update', 'roles.delete',
 
   'students.read', 'students.create', 'students.update', 'students.delete', 'students.import',
@@ -39,6 +43,9 @@ export const PERMISSIONS = [
   'courses.read', 'courses.manage',
   'leaves.read', 'leaves.approve',
   'announcements.read', 'announcements.manage',
+  // Institute-wide actions that were admin-only by role name. Each has its own
+  // permission so converting the route did not quietly hand it to teachers.
+  'holidays.manage', 'eod.review', 'notifications.send', 'enquiries.manage',
 
   'analytics.read', 'reports.read', 'reports.export',
 
@@ -77,10 +84,19 @@ export function sanitizePermissions(values: string[]): Permission[] {
 export const LEGACY_ROLE_PERMISSIONS: Record<string, Permission[]> = {
   admin: [...PERMISSIONS],
 
+  // None, deliberately and explicitly. A parent reads verified wards' data only
+  // through /api/parent, which checks the guardian link itself; no permission
+  // here could be narrow enough to mean "this one child".
+  parent: [],
+
   teacher: [
     'users.read',
-    'students.read', 'students.create', 'students.update', 'students.import',
-    'teachers.read',
+    // Transcribed from what the user routes let a teacher do today: create,
+    // edit and delete teacher and student accounts (never an admin). Omitting
+    // these would have locked Abhigyan's teachers out of it the moment the
+    // routes read permissions. An organization narrows it with a custom role.
+    'students.read', 'students.create', 'students.update', 'students.delete', 'students.import',
+    'teachers.read', 'teachers.create', 'teachers.update', 'teachers.delete',
     'classes.read', 'subjects.read', 'batches.read', 'rooms.read',
     'schedule.read', 'schedule.manage', 'syllabus.read', 'syllabus.manage',
     'exams.read', 'exams.create', 'exams.update', 'exams.delete', 'exams.publish',
@@ -153,6 +169,7 @@ export const SYSTEM_ROLE_TEMPLATES: RoleTemplate[] = [
     description: 'Reception — enrolment and attendance, no academic authority.',
     permissions: [
       'students.read', 'students.create', 'students.update',
+      'registrations.review', 'enquiries.manage',
       'attendance.read', 'attendance.mark',
       'schedule.read', 'announcements.read',
     ],

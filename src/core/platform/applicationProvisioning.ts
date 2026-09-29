@@ -23,6 +23,7 @@
  * mean inventing a password or provisioning an account nobody can sign into.
  */
 
+import { normalizeAppExperience } from './appExperience';
 import {
   isValidHexColor,
   slugifyOrgName,
@@ -365,6 +366,21 @@ export function applicationToOnboardingInput(
   ];
   for (const [k, v] of brandPairs) if (v) mappedBranding[k] = v;
 
+  // ── App experience ───────────────────────────────────────────────────────
+  //
+  // Passed through rather than mapped. Every field is optional and every one
+  // is validated, capped and defaulted by `resolveBrandConfig` when a build is
+  // generated — mapping it again here would be a second set of rules, and the
+  // only thing a second set of rules can add is disagreement.
+  //
+  // What is NOT passed through is the organization's contact details: those
+  // already live on the organization, and the sign-in screen reads its own
+  // `authCopy.supportEmail`. An institute that filled in one and not the other
+  // meant the one it filled in.
+  // Validated by the same function the console uses, so the two write paths
+  // cannot disagree about which keys an organization may set.
+  const experience = normalizeAppExperience(app.appExperience);
+
   // ── Locale ───────────────────────────────────────────────────────────────
   const locale: Record<string, unknown> = {};
   if (policy.locale?.timezone) locale.timezone = policy.locale.timezone;
@@ -441,6 +457,7 @@ export function applicationToOnboardingInput(
           `(${registration.contactName}, ${registration.email}).`,
     },
     ...(Object.keys(mappedBranding).length ? { branding: mappedBranding } : {}),
+    ...(experience ? { appExperience: experience } : {}),
     ...(Object.keys(locale).length ? { locale } : {}),
     ...(Object.keys(configuration).length ? { configuration } : {}),
     ...(Object.keys(mappedPolicy).length ? { policy: mappedPolicy } : {}),

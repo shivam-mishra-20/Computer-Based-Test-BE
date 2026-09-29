@@ -19,6 +19,7 @@ import {
   getScholarshipPublicResultByToken,
 } from '../services/scholarshipService';
 import ScholarshipAttempt from '../models/ScholarshipAttempt';
+import { submitAttempt as submitAgtsAttempt } from '../services/agts/agtsService';
 
 export async function createAttemptCtrl(req: Request, res: Response) {
   try {
@@ -96,8 +97,16 @@ export async function submitTestCtrl(req: Request, res: Response) {
     const accessKey =
       (req.header('x-scholarship-attempt-key') || req.header('x-attempt-key') || '').trim();
 
+    // An AGTS attempt reached through the old endpoint is closed the AGTS way,
+    // so its lead still receives the result and the analysis is stored.
+    const existing = await ScholarshipAttempt.findOne({ attemptId: String(attemptId) }).select('program').lean();
+    if (existing?.program === 'agts') {
+      const report = await submitAgtsAttempt(String(attemptId), accessKey, { answers: answers || [], reason: 'candidate' });
+      return res.json({ attemptId: report.attemptId, status: report.status, submittedAt: report.submittedAt, message: 'Test submitted successfully.' });
+    }
+
     const result = await submitScholarshipTest(attemptId, answers || [], accessKey);
-    
+
     // Auto-grade the test
     await gradeScholarshipAttempt(attemptId);
 
@@ -198,7 +207,7 @@ export async function getTestPreviewCtrl(req: Request, res: Response) {
   } catch (err: any) {
     const message = err?.message || 'Failed to load test preview';
     if (
-      /Not enough Scholarship-board questions|Invalid class for preview|Test not found/i.test(
+      /Not enough AGTS questions|Invalid class for preview|Test not found/i.test(
         message
       )
     ) {

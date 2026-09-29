@@ -16,6 +16,7 @@
  * exact mechanism built to prevent that.
  */
 
+import { clearOrgStateCache } from '../tenancy/orgState';
 import { runWithTenant, withoutTenantScope } from '../tenancy/context';
 import { resolveEntitlement, getEntitlement } from '../entitlements/resolve';
 import { getOrgConfiguration } from '../config/orgConfig';
@@ -125,6 +126,22 @@ export async function getOrganizationDetail(orgId: string) {
 
   if (!org) return null;
 
+  // An organization being deleted is shown as its deletion and nothing else.
+  // The full view is not merely irrelevant but harmful: `getEntitlement`
+  // resolves lazily, so opening the page would write back the entitlement the
+  // deletion just removed. Counts are plain reads and stay useful.
+  if ((org as { deletion?: unknown }).deletion) {
+    return {
+      organization: org,
+      entitlement: null,
+      configuration: null,
+      policy: {},
+      counts: await getOrganizationCounts(orgId),
+      subscription: null,
+      roles: [],
+    };
+  }
+
   const [entitlement, configuration, policy, counts, subscription, roles] = await Promise.all([
     getEntitlement(orgId),
     getOrgConfiguration(orgId),
@@ -198,6 +215,8 @@ export async function setOrganizationStatus(orgId: string, status: string) {
   });
 
   await resolveEntitlement(orgId, `status-changed:${status}`);
+  // Suspension is read-only from the next request, not after a cache expires.
+  clearOrgStateCache(orgId);
   return updated;
 }
 
@@ -207,7 +226,7 @@ export async function updateOrganization(orgId: string, patch: Record<string, un
   // `mobile` is admitted here so a full organization record round-trips, but
   // the console edits it through /orgs/:id/mobile — that path checks
   // uniqueness and requires `app.manage`, which this one does not.
-  const allowed = ['name', 'branding', 'locale', 'notes', 'domains', 'isPlatformOwned', 'mobile'];
+  const allowed = ['name', 'branding', 'locale', 'profile', 'notes', 'domains', 'isPlatformOwned', 'mobile'];
   const update: Record<string, unknown> = {};
   for (const key of allowed) {
     if (patch[key] !== undefined) update[key] = patch[key];

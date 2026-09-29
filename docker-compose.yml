@@ -9,7 +9,20 @@ services:
       - "6379:6379"
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    # noeviction, NOT an lru policy. BullMQ (the AI PPT / question-paper
+    # pipeline in src/queues) keeps a job's state in Redis keys, so an
+    # eviction policy does not shed cache — it deletes jobs mid-flight, and
+    # the work disappears with no error anywhere. BullMQ checks this on
+    # connect and warns: 'Eviction policy is <x>. It should be "noeviction"'.
+    #
+    # Everything else here survives a full Redis: the rate limiters run with
+    # passOnStoreError:true and degrade open, the cache helpers return null,
+    # and the Socket.IO adapter reconnects. Losing a queued job is the only
+    # failure that is silent, which is why the queue's requirement wins.
+    #
+    # Managed Redis (the REDIS_URL in .env points at Redis Cloud) sets this
+    # per-database in the provider console, not here.
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy noeviction
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]

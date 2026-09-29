@@ -5,17 +5,25 @@
  * driver layer rather than at 805 individual call sites. A developer cannot
  * forget it, because there is nothing for them to remember.
  *
- * ── Read/write asymmetry, and why it is the crux of the migration ───────────
- * Stamping a write is ADDITIVE: it sets a field on a document being created
- * anyway, and nothing reads that field until enforce mode.
+ * ── Reads: filtered for every known tenant ──────────────────────────────────
+ * Stamping a write is ADDITIVE; filtering a read is SUBTRACTIVE. The migration
+ * used to resolve that tension by not filtering reads at all under `warn`,
+ * which kept the legacy institute's un-backfilled rows visible — and let any
+ * organization's administrator read and approve another's users.
  *
- * Filtering a read is SUBTRACTIVE: it removes documents from a result set.
- * During the warn period `orgId` has not been backfilled, so almost no document
- * carries it — adding `{ orgId: X }` to a read at that moment matches nothing
- * and every screen in production goes blank.
+ * Reads are now narrowed whenever a tenant context exists, in every mode but
+ * `off`, by the policy in `config.readFilterFor`: strictly to the organization,
+ * except for the legacy data owner before enforce, which also sees the rows
+ * that carry no `orgId` (all of which are its own). No request with a known
+ * tenant depends on `enforce` for isolation.
  *
- * Therefore: warn mode stamps writes and NEVER touches reads. That asymmetry is
- * what makes this deployable to a live system on day one.
+ * ── Writes: stamped, and never pointed at another organization ──────────────
+ * A document created in a tenant's context is stamped with that tenant. One that
+ * NAMES a different organization — `orgId` in a request body spread into
+ * `create()`, or a `$set: { orgId }` in an update — is refused with
+ * `TenantMismatch` rather than honoured. Code that genuinely writes across
+ * organizations (platform, onboarding) runs in `withoutTenantScope` or in the
+ * target organization's own context, and is unaffected.
  *
  * ── What this plugin cannot protect ─────────────────────────────────────────
  * `$lookup` inside an aggregation pipeline reaches into another collection
@@ -28,12 +36,12 @@
 import type { Schema, Query, Aggregate, Document } from 'mongoose';
 import { currentOrgId, getTenantContext, inUnscopedBlock, unscopedReason } from './context';
 import {
-  shouldFilterReads,
+  readFilterFor,
   shouldStampWrites,
   shouldThrowOnMissingContext,
   tenantEnforcement,
 } from './config';
-import { TenantContextMissing } from './errors';
+import { TenantContextMissing, TenantMismatch } from './errors';
 
 /**
  * Query operations that READ or NARROW an existing set. These are the ones
@@ -152,6 +160,46 @@ function modelNameOf(thing: { model?: { modelName?: string }; modelName?: string
   return thing?.model?.modelName || thing?.modelName || 'UnknownModel';
 }
 
+/** The operations whose update document could re-point a row to another org. */
+const UPDATE_OPS = new Set([
+  'update',
+  'updateOne',
+  'updateMany',
+  'findOneAndUpdate',
+  'replaceOne',
+  'findOneAndReplace',
+]);
+
+/**
+ * Refuse an update that would move a document out of the caller's organization.
+ *
+ * `orgId` may appear at the top level (a replacement, or Mongoose's implicit
+ * `$set`), under `$set` / `$setOnInsert`, or under `$unset` — which would strip
+ * the tenant key and orphan the row. Setting it to the context's OWN
+ * organization is allowed: that is the backfill-on-write the legacy owner's
+ * un-attributed rows rely on.
+ */
+function refuseForeignOrgInUpdate(query: Query<unknown, unknown>, model: string, orgId: string): void {
+  const op = (query as unknown as { op?: string }).op || '';
+  if (!UPDATE_OPS.has(op)) return;
+  const update = (query.getUpdate() || {}) as Record<string, unknown>;
+  const candidates: unknown[] = [update.orgId];
+  for (const operator of ['$set', '$setOnInsert']) {
+    const block = update[operator] as Record<string, unknown> | undefined;
+    if (block && typeof block === 'object' && 'orgId' in block) candidates.push(block.orgId);
+  }
+  const unset = update.$unset as Record<string, unknown> | undefined;
+  if (unset && typeof unset === 'object' && 'orgId' in unset) {
+    throw new TenantMismatch(model, orgId, '(none)');
+  }
+  for (const value of candidates) {
+    if (value === undefined) continue;
+    if (value === null || String(value) !== orgId) {
+      throw new TenantMismatch(model, orgId, value === null ? '(none)' : String(value));
+    }
+  }
+}
+
 export function tenantPlugin(schema: Schema): void {
   if (!isTenantScoped(schema)) return;
   // A tenant key belongs on the document a query can filter, not inside an
@@ -205,10 +253,11 @@ export function tenantPlugin(schema: Schema): void {
       return;
     }
 
-    // See the header comment: warn mode observes, it does not subtract.
-    if (!shouldFilterReads()) return;
+    // Writes first: an update may not move a document to another organization.
+    refuseForeignOrgInUpdate(this, model, orgId);
 
-    this.where({ orgId });
+    const filter = readFilterFor(orgId);
+    if (filter) this.where(filter);
   };
 
   for (const op of SCOPED_QUERY_OPS) {
@@ -229,19 +278,35 @@ export function tenantPlugin(schema: Schema): void {
       recordUnscoped(model, 'aggregate');
       return;
     }
-    if (!shouldFilterReads()) return;
+    const filter = readFilterFor(orgId);
+    if (!filter) return;
 
     // Prepended, not appended: a $match placed after a $group or a $limit
     // filters the wrong thing — or nothing, because the tenant field no longer
     // exists in the shape by that point.
-    this.pipeline().unshift({ $match: { orgId } });
+    this.pipeline().unshift({ $match: filter });
   });
 
   // ── Document creation ────────────────────────────────────────────────────
   schema.pre('save', function (this: Document & { orgId?: string }) {
     if (!shouldStampWrites()) return;
     if (inUnscopedBlock()) return;
-    if (this.orgId) return; // already attributed — respect an explicit value
+
+    if (this.orgId) {
+      // Already attributed. Honoured when it is the context's own
+      // organization; refused when a tenant-scoped write names another one —
+      // `create({ ...req.body })` with an `orgId` in the body, or a handler
+      // re-pointing a document it loaded.
+      const ambient = getTenantContext();
+      if (
+        ambient &&
+        String(this.orgId) !== ambient.orgId &&
+        (this.isNew || this.isModified('orgId'))
+      ) {
+        throw new TenantMismatch(modelNameOf(this.constructor as never), ambient.orgId, String(this.orgId));
+      }
+      return;
+    }
 
     const context = getTenantContext();
     if (!context) {
@@ -272,6 +337,9 @@ export function tenantPlugin(schema: Schema): void {
     }
 
     for (const doc of docs as Record<string, unknown>[]) {
+      if (doc && typeof doc === 'object' && doc.orgId && String(doc.orgId) !== context.orgId) {
+        return next(new TenantMismatch(modelNameOf(this as never), context.orgId, String(doc.orgId)));
+      }
       if (doc && typeof doc === 'object' && !doc.orgId) {
         doc.orgId = context.orgId;
         if (context.branchId !== undefined && doc.branchId === undefined) {

@@ -182,7 +182,7 @@ export async function saveDraft(
 
   const current = (found.application ?? { version: 1 }) as IOrganizationApplication;
   const SECTIONS: (keyof IOrganizationApplication)[] = [
-    'organization', 'branding', 'academic', 'policy',
+    'organization', 'branding', 'appExperience', 'academic', 'policy',
     'modules', 'staff', 'integrations', 'commercial', 'completedSteps',
   ];
   for (const key of SECTIONS) {
@@ -302,7 +302,8 @@ export async function submitApplication(
    Assets
    ══════════════════════════════════════════════════════════════════════════ */
 
-const MAX_ASSET_BYTES = 5 * 1024 * 1024;
+/** Exported so `middlewares/uploadBrandAsset` enforces the same ceiling. */
+export const MAX_ASSET_BYTES = 5 * 1024 * 1024;
 const ALLOWED_KINDS = new Set(['logo', 'logoLight', 'logoDark', 'favicon']);
 /**
  * SVG is accepted because a vector logo is what produces good native assets,
@@ -397,6 +398,49 @@ export async function signAsset(storagePath: string, ttlMs?: number): Promise<st
 /* ══════════════════════════════════════════════════════════════════════════
    What the applicant is allowed to see
    ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The applicant's own uploads, as something a browser can display.
+ *
+ * The stored record holds a storage PATH, not a URL, and the object is
+ * private — an `<img src>` pointed at the raw path, or at a guessed public
+ * googleapis URL, renders a broken image. So each asset is signed here, the
+ * same way staff read them, and the applicant sees the file they just sent.
+ *
+ * `signUnchecked` is the right call: the route has already proved possession
+ * of the draft token, and an application asset has no owning organization to
+ * check against. Signing is best-effort per asset — one unreadable object
+ * must not take down the step that shows the rest.
+ *
+ * The TTL is deliberately short. This is a preview inside an open form, not a
+ * link anyone should be able to keep.
+ */
+const APPLICANT_ASSET_TTL_MS = 30 * 60 * 1000;
+
+export async function applicantAssetViews(
+  registration: IOrganizationRegistration,
+): Promise<
+  Array<{
+    kind: string;
+    filename: string;
+    mimeType: string;
+    bytes: number;
+    uploadedAt?: Date;
+    url: string | null;
+  }>
+> {
+  const assets = registration.application?.assets ?? [];
+  return Promise.all(
+    assets.map(async (a) => ({
+      kind: a.kind,
+      filename: a.filename,
+      mimeType: a.mimeType,
+      bytes: a.bytes,
+      uploadedAt: a.uploadedAt,
+      url: await signAsset(a.storagePath, APPLICANT_ASSET_TTL_MS).catch(() => null),
+    })),
+  );
+}
 
 /**
  * The draft as the applicant may read it back.

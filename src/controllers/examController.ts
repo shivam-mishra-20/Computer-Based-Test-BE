@@ -33,7 +33,8 @@ export const updateQuestionCtrl = async (req: Request, res: Response) => {
 };
 
 export const deleteQuestionCtrl = async (req: Request, res: Response) => {
-  await deleteQuestion(req.params.id);
+  const deleted = await deleteQuestion(req.params.id);
+  if (!deleted) return res.status(404).json({ message: 'Question not found' });
   res.json({ message: 'Question deleted' });
 };
 
@@ -84,7 +85,8 @@ export const listExamsCtrl = async (req: Request, res: Response) => {
 };
 
 export const deleteExamCtrl = async (req: Request, res: Response) => {
-  await deleteExam(req.params.id);
+  const deleted = await deleteExam(req.params.id);
+  if (!deleted) return res.status(404).json({ message: 'Exam not found' });
   await logAudit((req as any).user?.id, 'admin.exam.delete', String(req.params.id));
   res.json({ message: 'Exam deleted' });
 };

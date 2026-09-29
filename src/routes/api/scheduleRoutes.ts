@@ -1,3 +1,6 @@
+import { isLegacyDataOwnerRequest } from '../../middlewares/orgScopeGates';
+import { staffHolds } from '../../middlewares/requirePermission';
+import { requireStaffPermission } from '../../middlewares/requirePermission';
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import {
@@ -13,7 +16,7 @@ import Batch from '../../models/Batch';
 import User from '../../models/User';
 import Leave from '../../models/Leave';
 import AppSetting from '../../models/AppSetting';
-import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
+import { authMiddleware} from '../../middlewares/authMiddleware';
 import { aiLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
 import { sendScheduleNotification, sendTeacherNotification } from '../../services/notificationService';
 import { initFirebaseAdmin, uploadToFirebase } from '../../services/firebaseService';
@@ -302,7 +305,10 @@ async function resolveTeacherNameAndSync(teacherId: string): Promise<string> {
   } catch (e) { console.error('Error finding teacher by firebaseUid:', e); }
 
   // 3. If still not found, try Firebase and sync to MongoDB
-  const admin = getFirebaseAdmin();
+  // Firestore holds ONE institute's people, with no organization on them: only
+    // the organization that owns that data reads it. Everyone else is served
+    // from their own MongoDB users below.
+    const admin = isLegacyDataOwnerRequest() ? getFirebaseAdmin() : null;
   if (admin) {
     try {
       const db = admin.firestore();
@@ -492,8 +498,7 @@ router.get('/batches', authMiddleware, async (req: Request, res: Response) => {
 // Create new batch
 router.post('/batches', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (user.role !== 'admin') {
+    if (!(await staffHolds(req, 'batches.manage'))) {
       return res.status(403).json({ error: 'Only admins can create batches' });
     }
 
@@ -516,8 +521,7 @@ router.post('/batches', authMiddleware, async (req: Request, res: Response) => {
 // Update batch
 router.put('/batches/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (user.role !== 'admin') {
+    if (!(await staffHolds(req, 'batches.manage'))) {
       return res.status(403).json({ error: 'Only admins can update batches' });
     }
 
@@ -552,8 +556,7 @@ router.put('/batches/:id', authMiddleware, async (req: Request, res: Response) =
 // Delete batch
 router.delete('/batches/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (user.role !== 'admin') {
+    if (!(await staffHolds(req, 'batches.manage'))) {
       return res.status(403).json({ error: 'Only admins can delete batches' });
     }
     
@@ -573,11 +576,14 @@ router.delete('/batches/:id', authMiddleware, async (req: Request, res: Response
 router.get('/firebase/students', authMiddleware, async (req: Request, res: Response) => {
   try {
     const { classLevel, batch } = req.query;
-    const admin = getFirebaseAdmin();
+    // Firestore holds ONE institute's people, with no organization on them: only
+    // the organization that owns that data reads it. Everyone else is served
+    // from their own MongoDB users below.
+    const admin = isLegacyDataOwnerRequest() ? getFirebaseAdmin() : null;
     
     if (!admin) {
       // Fallback to MongoDB users
-      const mongoQuery: any = { role: 'student', ...INSTITUTE_ACCOUNT_CLAUSE };
+      const mongoQuery: any = { role: 'student', ...INSTITUTE_ACCOUNT_CLAUSE, ...tenantScope() };
       if (classLevel) mongoQuery.classLevel = classLevel;
       if (batch) mongoQuery.batch = batch;
 
@@ -671,7 +677,10 @@ router.get('/firebase/students', authMiddleware, async (req: Request, res: Respo
 // Get teachers from Firebase Users collection
 router.get('/firebase/teachers', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const admin = getFirebaseAdmin();
+    // Firestore holds ONE institute's people, with no organization on them: only
+    // the organization that owns that data reads it. Everyone else is served
+    // from their own MongoDB users below.
+    const admin = isLegacyDataOwnerRequest() ? getFirebaseAdmin() : null;
     
     if (!admin) {
       // Fallback to MongoDB teachers
@@ -745,6 +754,11 @@ router.get('/firebase/batches', authMiddleware, async (req: Request, res: Respon
 // Get students from MongoDB only (Firebase removed due to auth issues)
 router.get('/students', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // A roster with phone numbers: staff only. The later duplicate of this
+    // route carried the check, but this one answers first.
+    if (!(await staffHolds(req, 'students.read'))) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
     const { classLevel, batch } = req.query;
     
     // Build query for MongoDB - handle both "9" and "Class 9" formats
@@ -843,7 +857,7 @@ router.get('/timeslots', authMiddleware, async (req: Request, res: Response) => 
 router.put('/timeslots', authMiddleware, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    if (user.role !== 'admin') {
+    if (!(await staffHolds(req, 'schedule.manage', 'classes.manage'))) {
       return res.status(403).json({ error: 'Only admins can update time slots' });
     }
 
@@ -1575,7 +1589,7 @@ router.get('/institute-view', authMiddleware, async (req: Request, res: Response
 router.post('/', authMiddleware, invalidateCacheOn(['schedule']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'schedule.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
@@ -1701,8 +1715,7 @@ router.post('/', authMiddleware, invalidateCacheOn(['schedule']), async (req: Re
 // Update schedule - Invalidates schedule caches
 router.put('/:scheduleId', authMiddleware, invalidateCacheOn(['schedule']), async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'schedule.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
@@ -1723,7 +1736,7 @@ router.put('/:scheduleId', authMiddleware, invalidateCacheOn(['schedule']), asyn
     }
 
     // Fetch current document to fill in any fields not present in updateData
-    const existing = await Schedule.findById(req.params.scheduleId);
+    const existing = await Schedule.findOne({ _id: req.params.scheduleId, ...tenantScope() });
     if (!existing) {
       return res.status(404).json({ error: 'Schedule not found' });
     }
@@ -1763,8 +1776,8 @@ router.put('/:scheduleId', authMiddleware, invalidateCacheOn(['schedule']), asyn
       return res.status(conflictResult.status).json(conflictResult.body);
     }
 
-    const schedule = await Schedule.findByIdAndUpdate(
-      req.params.scheduleId,
+    const schedule = await Schedule.findOneAndUpdate(
+      { _id: req.params.scheduleId, ...tenantScope() },
       updateData,
       { new: true }
     );
@@ -1791,8 +1804,7 @@ router.put('/:scheduleId', authMiddleware, invalidateCacheOn(['schedule']), asyn
 // Get students from both MongoDB and Firebase for targeting
 router.get('/students', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'students.read'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
 
@@ -1823,7 +1835,10 @@ router.get('/students', authMiddleware, async (req: Request, res: Response) => {
 
     // 2. Fetch from Firebase
     try {
-      const admin = getFirebaseAdmin();
+      // Firestore holds ONE institute's people, with no organization on them: only
+    // the organization that owns that data reads it. Everyone else is served
+    // from their own MongoDB users below.
+    const admin = isLegacyDataOwnerRequest() ? getFirebaseAdmin() : null;
       if (admin) {
         let firestoreQuery = admin.firestore().collection('users')
           .where('role', '==', 'student');
@@ -1894,7 +1909,7 @@ router.delete('/date/:date', authMiddleware, invalidateCacheOn(['schedule']), as
     const user = (req as any).user;
     // Admin only. The single-session delete allows teachers, but wiping a whole
     // day for every class at once is not the same authority.
-    if (user.role !== 'admin') {
+    if (!(await staffHolds(req, 'schedule.manage', 'classes.manage'))) {
       return res.status(403).json({ error: 'Only admins can clear a whole day of classes' });
     }
 
@@ -1931,12 +1946,11 @@ router.delete('/date/:date', authMiddleware, invalidateCacheOn(['schedule']), as
 
 router.delete('/:scheduleId', authMiddleware, invalidateCacheOn(['schedule']), async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'schedule.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
-    const schedule = await Schedule.findById(req.params.scheduleId);
+    const schedule = await Schedule.findOne({ _id: req.params.scheduleId, ...tenantScope() });
     if (!schedule) {
       return res.status(404).json({ error: 'Schedule not found' });
     }
@@ -1959,7 +1973,7 @@ router.delete('/:scheduleId', authMiddleware, invalidateCacheOn(['schedule']), a
     // ran and should not appear in any report.
     const hard = String(req.query.hard || '') === 'true';
     if (hard) {
-      await Schedule.findByIdAndDelete(req.params.scheduleId);
+      await Schedule.findOneAndDelete({ _id: req.params.scheduleId, ...tenantScope() });
     } else {
       const requested = String(req.query.effectiveTo || '').trim();
       let endDate = new Date();
@@ -2325,7 +2339,7 @@ async function visionExtractJSON<T = any>(
 router.post(
   '/extract-image',
   authMiddleware,
-  requireRole('admin'),
+  requireStaffPermission('schedule.manage', 'classes.manage'),
   aiLimiter,
   uploadLimiter,
   // ── Why the upload middleware is wrapped ──────────────────────────────
@@ -2861,7 +2875,7 @@ async function validateBulkEntries(
 }
 
 // Dry-run validation, called live as the admin edits the review screen. Never writes.
-router.post('/bulk/validate', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
+router.post('/bulk/validate', authMiddleware, requireStaffPermission('schedule.manage', 'classes.manage'), async (req: Request, res: Response) => {
   try {
     const { date, entries } = req.body || {};
     const result = await validateBulkEntries(date, entries);
@@ -2872,7 +2886,7 @@ router.post('/bulk/validate', authMiddleware, requireRole('admin'), async (req: 
 });
 
 // Confirm & Save Schedule — the only place a bulk import actually writes to Mongo.
-router.post('/bulk', authMiddleware, requireRole('admin'), invalidateCacheOn(['schedule']), async (req: Request, res: Response) => {
+router.post('/bulk', authMiddleware, requireStaffPermission('schedule.manage', 'classes.manage'), invalidateCacheOn(['schedule']), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const { date, entries } = req.body || {};

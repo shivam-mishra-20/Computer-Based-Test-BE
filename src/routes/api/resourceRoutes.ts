@@ -1,3 +1,5 @@
+import { requireTenantScope } from '../../core/tenancy';
+import { staffHolds } from '../../middlewares/requirePermission';
 import { Router, Request, Response } from 'express';
 import mongoose from 'mongoose';
 import multer from 'multer';
@@ -226,8 +228,7 @@ router.get('/meta/subjects', optionalAuthMiddleware, async (req: Request, res: R
 // Get YouTube metadata for autofill (admin/teacher only)
 router.get('/youtube/metadata', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'materials.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
 
@@ -269,7 +270,7 @@ router.get('/youtube/metadata', authMiddleware, async (req: Request, res: Respon
 router.post('/', authMiddleware, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'materials.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
 
@@ -292,7 +293,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
 router.post('/upload-pdf', authMiddleware, uploadLimiter, upload.single('file'), async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'materials.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
 
@@ -373,13 +374,11 @@ router.post('/upload-pdf', authMiddleware, uploadLimiter, upload.single('file'),
 // Update resource (admin/teacher only)
 router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'materials.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
 
-    const resource = await StudyResource.findByIdAndUpdate(
-      req.params.id,
+    const resource = await StudyResource.findOneAndUpdate({ _id: req.params.id, ...requireTenantScope('resources') },
       req.body,
       { new: true }
     );
@@ -398,12 +397,11 @@ router.put('/:id', authMiddleware, async (req: Request, res: Response) => {
 // Delete resource (admin/teacher only)
 router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'materials.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
 
-    const resource = await StudyResource.findByIdAndDelete(req.params.id);
+    const resource = await StudyResource.findOneAndDelete({ _id: req.params.id, ...requireTenantScope('resources') });
 
     if (!resource) {
       return res.status(404).json({ error: 'Resource not found' });
@@ -419,8 +417,7 @@ router.delete('/:id', authMiddleware, async (req: Request, res: Response) => {
 // Get all resources including drafts (admin/teacher only)
 router.get('/admin/all', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'materials.read'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
 
@@ -430,7 +427,7 @@ router.get('/admin/all', authMiddleware, async (req: Request, res: Response) => 
     if (type) query.type = type;
     if (status) query.status = status;
 
-    const resources = await StudyResource.find(query)
+    const resources = await StudyResource.find({ ...query, ...requireTenantScope('resources:admin') })
       .populate('uploadedBy', 'name email role')
       .sort({ createdAt: -1 })
       .lean();

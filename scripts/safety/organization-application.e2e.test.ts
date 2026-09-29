@@ -55,11 +55,11 @@ function check(label: string, ok: boolean, detail = '') {
   }
 }
 
-interface Res { status: number; json: any; raw: string }
+interface Res { status: number; json: any; raw: string; headers: http.IncomingHttpHeaders }
 
 function request(
   port: number, method: string, path: string,
-  opts: { token?: string; draftToken?: string; body?: unknown } = {},
+  opts: { token?: string; draftToken?: string; body?: unknown; headers?: Record<string, string> } = {},
 ): Promise<Res> {
   return new Promise((resolve, reject) => {
     const payload = opts.body !== undefined ? JSON.stringify(opts.body) : null;
@@ -70,6 +70,7 @@ function request(
           ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
           ...(opts.draftToken ? { 'X-Application-Token': opts.draftToken } : {}),
           ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
+          ...(opts.headers ?? {}),
         },
       },
       (res) => {
@@ -78,7 +79,7 @@ function request(
         res.on('end', () => {
           let parsed: any = null;
           try { parsed = raw ? JSON.parse(raw) : null; } catch { /* non-JSON */ }
-          resolve({ status: res.statusCode ?? 0, json: parsed, raw });
+          resolve({ status: res.statusCode ?? 0, json: parsed, raw, headers: res.headers });
         });
       },
     );
@@ -113,6 +114,19 @@ const APPLICATION = {
     secondaryColor: '#14B8A6',
     accentColor: '#042F2E',
     splashBackgroundColor: '#02201E',
+  },
+  // The App Experience step, in the FLAT shape the onboarding form sends. Until
+  // 2026-09-23 this whole section was mapped and then dropped at approval, so
+  // it is asserted below by reading the organization back.
+  appExperience: {
+    registrationPolicy: 'approval',
+    roles: { student: true, teacher: true, parent: true },
+    welcomeTitle: 'Welcome to Lakeside',
+    registerMessage: 'Join Lakeside Academy.',
+    supportEmail: `${MARKER}-join@lakeside.test`,
+    successColor: '#15803D',
+    // Not a key Org.appExperience declares — must not reach the tenant record.
+    injected: 'should-not-persist',
   },
   academic: {
     classLevels: [
@@ -214,6 +228,10 @@ async function main() {
   const cleanup = async () => {
     await withoutTenantScope('app-e2e:clean', async () => {
       const o = await Org.findOne({ slug: SLUG });
+      const store = (o as any)?.registrationStore?.collection;
+      if (store && /^reg_/.test(store)) {
+        await mongoose.connection.db.dropCollection(store).catch(() => undefined);
+      }
       if (o) {
         for (const M of [User, Role, Entitlement, ClassLevel, Subject, OrgRoom, Batch, OrgPolicy]) {
           await M.deleteMany({ orgId: o._id });
@@ -293,6 +311,23 @@ async function main() {
     const saved = await request(port, 'PATCH', `/api/public/organization-applications/${draftId}`, {
       draftToken, body: { application: APPLICATION },
     });
+    // ── The preflight, which is the part a browser does and curl does not ──
+    // Every call after the first carries `X-Application-Token`. A header that
+    // is not on the CORS allow-list fails the preflight, and a failed
+    // preflight surfaces in the form as "cannot reach server" — indis-
+    // tinguishable, to the applicant, from a backend that is down.
+    const preflight = await request(port, 'OPTIONS', `/api/public/organization-applications/${draftId}`, {
+      headers: {
+        Origin: 'http://localhost:5173',
+        'Access-Control-Request-Method': 'PATCH',
+        'Access-Control-Request-Headers': 'content-type,x-application-token',
+      },
+    });
+    const allowHeaders = String(preflight.headers['access-control-allow-headers'] ?? '');
+    check('the browser preflight for a draft save passes', preflight.status < 300, `got ${preflight.status}`);
+    check('...and the draft token header is allowed', /x-application-token/i.test(allowHeaders),
+      `allow-headers: ${allowHeaders}`);
+
     check('every section saves', saved.status === 200, `got ${saved.status} ${saved.raw.slice(0, 200)}`);
     check('and reads back', saved.json?.draft?.application?.branding?.appName === 'Lakeside Academy');
     check('the applicant never sees staff-only fields',
@@ -301,8 +336,36 @@ async function main() {
     const resumed = await request(port, 'GET', `/api/public/organization-applications/${draftId}`, { draftToken });
     check('a draft can be resumed later', resumed.json?.draft?.application?.academic?.subjects?.length === 3);
 
+    // The applicant has to be able to SEE the logo they uploaded, and the
+    // stored object is private — so the resume response carries a signed view
+    // of each asset beside the draft. With nothing uploaded it is empty, not
+    // missing: the form reads it unconditionally.
+    check('resuming returns an assets list', Array.isArray(resumed.json?.assets),
+      `got ${JSON.stringify(resumed.json?.assets)}`);
+    check('...empty when nothing has been uploaded', resumed.json?.assets?.length === 0);
+    check('the storage path is never handed to the applicant',
+      !/storagePath|applications\//.test(resumed.raw), resumed.raw.slice(0, 200));
+
     /* ══ 4. Asset validation ════════════════════════════════════════════ */
     console.log('\nasset validation (rejections only — storage is production)');
+
+    // ── The middleware gate, ahead of the service's own rules ─────────────
+    // The route used to sit behind the shared `upload` middleware, whose
+    // fileFilter accepts PDF and raster images and NOT image/svg+xml — while
+    // this service's ALLOWED_MIME does accept SVG and the onboarding form
+    // tells applicants an SVG is the best thing to send. The recommended file
+    // was refused with a 500 before the service that allows it ever ran.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { acceptsBrandAssetFile } = require('../../src/middlewares/uploadBrandAsset');
+    check('an SVG logo reaches the service', acceptsBrandAssetFile('logo.svg', 'image/svg+xml'));
+    check('...even when the client mislabels its type',
+      acceptsBrandAssetFile('logo.svg', 'application/octet-stream'));
+    check('a PNG logo reaches the service', acceptsBrandAssetFile('logo.png', 'image/png'));
+    check('a JPEG logo reaches the service', acceptsBrandAssetFile('logo.jpg', 'image/jpeg'));
+    check('a WebP logo reaches the service', acceptsBrandAssetFile('logo.webp', 'image/webp'));
+    check('a document is refused at the door', !acceptsBrandAssetFile('brochure.docx',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'));
+    check('...and so is a PDF, which is not a logo', !acceptsBrandAssetFile('logo.pdf', 'application/pdf'));
 
     // Multipart through a plain http client is awkward; the service-level
     // checks are exercised directly, which is where the rules actually live.
@@ -439,6 +502,26 @@ async function main() {
       !applied.entitlement?.modules?.includes('not-a-real-module'));
     check('SYSTEM ROLES were provisioned', applied.roles > 0, `${applied.roles} roles`);
     check('the ADMINISTRATOR was created', applied.admin?.role === 'admin' && applied.admin?.status === 'approved');
+    // ── The App Experience, persisted ─────────────────────────────────────
+    const x = applied.org?.appExperience ?? {};
+    const storedDraft = await withoutTenantScope('app-e2e:dbg', async () => Reg.findById(draftId).lean());
+    check('APP EXPERIENCE was applied — the registration policy', x.registrationPolicy === 'approval',
+      `org=${JSON.stringify(x)} draft=${JSON.stringify((storedDraft as any)?.application?.appExperience)} steps=${JSON.stringify(approve.json?.onboarding?.steps)}`);
+    check('...the roles, including the requested-but-unsupported Parent',
+      x.roles?.teacher === true && x.roles?.parent === true);
+    check('...the sign-in copy, nested as the organization stores it',
+      x.authCopy?.welcomeTitle === 'Welcome to Lakeside' && x.authCopy?.registerMessage === 'Join Lakeside Academy.');
+    check('...and the status colour', x.palette?.successColor === '#15803D');
+    check('an undeclared key did NOT reach the organization', !('injected' in x),
+      'the application stores this section as Mixed; the organization must not');
+    const store = applied.org?.registrationStore?.collection;
+    check('opening registration provisioned the app’s own collection',
+      typeof store === 'string' && store.startsWith('reg_'), String(store));
+    const exists = store
+      ? (await mongoose.connection.db.listCollections({ name: store }, { nameOnly: true }).toArray()).length === 1
+      : false;
+    check('...and it exists in the database', exists);
+
     check('the registration is linked to the organization',
       String((await withoutTenantScope('app-e2e:link', async () => Reg.findById(draftId).lean()))?.orgId) === orgId);
 

@@ -4,6 +4,7 @@
  */
 
 import mongoose from 'mongoose';
+import { databaseNameOf, isLegacyDatabase } from '../core/tenancy/dataSource';
 import User from '../models/User';
 import Exam from '../models/Exam';
 import Attempt from '../models/Attempt';
@@ -171,8 +172,23 @@ export async function analyzeIndexUsage() {
 // CLI commands
 if (require.main === module) {
   const command = process.argv[2];
-  
-  mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/cbt-exam')
+
+  // The same connection as the application — MONGO_URI from the environment —
+  // and no fallback. This used to read a different variable (MONGODB_URI) and,
+  // without it, silently connect to a hardcoded local database.
+  const uri = (process.env.MONGO_URI || '').trim();
+  if (!uri) {
+    console.error('MONGO_URI is not set. This script uses the same connection as the application.');
+    process.exit(1);
+  }
+  // Creating or dropping indexes changes the database. Never on a legacy one
+  // (LEGACY_DB_NAMES) — see core/tenancy/dataSource.ts.
+  if ((command === 'create' || command === 'drop') && isLegacyDatabase(uri)) {
+    console.error(`Refusing to ${command} indexes on "${databaseNameOf(uri)}": it is listed in LEGACY_DB_NAMES.`);
+    process.exit(1);
+  }
+
+  mongoose.connect(uri)
     .then(async () => {
       switch (command) {
         case 'create':

@@ -1,5 +1,6 @@
+import { requireStaffPermission } from '../../middlewares/requirePermission';
 import { Router } from 'express';
-import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
+import { authMiddleware} from '../../middlewares/authMiddleware';
 import { getStudentReport } from '../../controllers/adminAnalyticsController';
 
 const router = Router();
@@ -9,7 +10,7 @@ const router = Router();
 router.get(
   '/students/:studentId/report',
   authMiddleware,
-  requireRole('teacher', 'admin'),
+  requireStaffPermission('analytics.read'),
   getStudentReport
 );
 

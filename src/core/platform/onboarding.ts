@@ -22,7 +22,9 @@
  * silent rollback during a customer demo is not.
  */
 
+import { issueInvite, unusablePassword } from '../accounts/accountLinks';
 import { runWithTenant, withoutTenantScope } from '../tenancy/context';
+import { setAppExperience } from './appExperience';
 import {
   createOrganization,
   setOrganizationConfig,
@@ -42,6 +44,12 @@ export interface OnboardingInput {
     notes?: string;
   };
   branding?: Record<string, unknown>;
+  /**
+   * What the institute chose on the App Experience step. Persisted through
+   * core/platform/appExperience.ts, which validates it and — if it opens public
+   * registration — provisions the organization's registration collection.
+   */
+  appExperience?: object;
   locale?: Record<string, unknown>;
   configuration?: ConfigInput;
   policy?: Record<string, unknown>;
@@ -53,10 +61,16 @@ export interface OnboardingInput {
     status?: string;
   };
   customRoles?: { key: string; name: string; description?: string; permissions: string[] }[];
+  /**
+   * The first administrator. WITHOUT a password (the console's path), the
+   * account is created with none that anyone knows and `adminInvite` carries a
+   * one-time link for them to choose it — no staff member ever handles an
+   * institute's password. A password is still accepted from scripted callers.
+   */
   admin?: {
     name: string;
     email: string;
-    password: string;
+    password?: string;
   };
 }
 
@@ -71,6 +85,8 @@ export interface OnboardingResult {
   slug: string;
   steps: OnboardingStep[];
   adminUserId?: string;
+  /** Returned once, to the caller, and stored nowhere but as a hash. */
+  adminInvite?: { link: string; token: string; expiresAt: Date; delivery: 'manual' };
   roleIds: Record<string, string>;
   complete: boolean;
 }
@@ -79,6 +95,7 @@ export async function onboardOrganization(input: OnboardingInput): Promise<Onboa
   const steps: OnboardingStep[] = [];
   const roleIds: Record<string, string> = {};
   let adminUserId: string | undefined;
+  let adminInvite: OnboardingResult['adminInvite'];
 
   const record = (step: string, ok: boolean, detail?: string) => {
     steps.push({ step, ok, detail });
@@ -121,6 +138,26 @@ export async function onboardOrganization(input: OnboardingInput): Promise<Onboa
       record('branding', true);
     } catch (error) {
       record('branding', false, (error as Error).message);
+    }
+  }
+
+  // ── 2b. App experience ───────────────────────────────────────────────────
+  // This step did not exist, and that was a bug: the application's App
+  // Experience section was mapped into the onboarding input and then never
+  // written, so an institute's sign-in copy, roles and registration policy
+  // vanished at approval. A failure here is recorded rather than thrown — the
+  // organization exists either way, and an operator can finish it from the
+  // console — but it is a FAILED step, not a quiet one.
+  if (input.appExperience) {
+    try {
+      const saved = await setAppExperience(orgId, input.appExperience);
+      record(
+        'app-experience',
+        true,
+        saved.registrationCollection ? 'registration storage provisioned' : 'registration closed',
+      );
+    } catch (error) {
+      record('app-experience', false, (error as Error).message);
     }
   }
 
@@ -213,14 +250,21 @@ export async function onboardOrganization(input: OnboardingInput): Promise<Onboa
         const Role = require('../../models/Role').default;
 
         const found = await User.findOne({ orgId, email: input.admin!.email.toLowerCase() });
-        if (found) return String(found._id);
+        if (found) {
+          // Re-running approval for an administrator who never accepted: a
+          // fresh link, so staff are never stuck with one they did not copy.
+          if (found.inviteTokenHash && !input.admin!.password) {
+            adminInvite = await issueInvite(found._id, 'platform');
+          }
+          return String(found._id);
+        }
 
         const adminRole = await Role.findOne({ orgId, key: 'admin' });
 
         const user = await User.create({
           name: input.admin!.name,
           email: input.admin!.email.toLowerCase(),
-          password: input.admin!.password,
+          password: input.admin!.password || unusablePassword(),
           role: 'admin',
           status: 'approved',
           // Assigned explicitly rather than relying on the legacy-role
@@ -228,6 +272,7 @@ export async function onboardOrganization(input: OnboardingInput): Promise<Onboa
           // is eventually retired.
           roleIds: adminRole ? [adminRole._id] : [],
         });
+        if (!input.admin!.password) adminInvite = await issueInvite(user._id, 'platform');
         return String(user._id);
       });
       record('admin-user', true, adminUserId);
@@ -237,7 +282,7 @@ export async function onboardOrganization(input: OnboardingInput): Promise<Onboa
   }
 
   const complete = steps.every((s) => s.ok);
-  return { orgId, slug: input.organization.slug.toLowerCase(), steps, adminUserId, roleIds, complete };
+  return { orgId, slug: input.organization.slug.toLowerCase(), steps, adminUserId, adminInvite, roleIds, complete };
 }
 
 export { sanitizePermissions };

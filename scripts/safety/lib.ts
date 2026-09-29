@@ -59,6 +59,13 @@ export function redactUri(uri: string): string {
   return uri.replace(/\/\/[^@/]*@/, '//<credentials>@');
 }
 
+/**
+ * Databases no script may ever target, whatever MONGO_URI says: production is
+ * `abhigyangurukul`, and `abhigyangurukul_console` is the main database this
+ * repository's .env points at.
+ */
+export const PROTECTED_DATABASES: ReadonlySet<string> = new Set(['abhigyangurukul', 'abhigyangurukul_console']);
+
 /** `{ host, db }` for a mongodb:// or mongodb+srv:// URI, or null if unparseable. */
 export function describeUri(uri: string): { host: string; db: string } | null {
   const match = uri.match(/^mongodb(?:\+srv)?:\/\/(?:[^@/]*@)?([^/?]+)\/([^?]*)/);
@@ -98,6 +105,12 @@ export function assertNotProduction(targetUri: string, productionUri: string): v
       `Refusing to write: target is the production database.\n` +
         `  target: ${target.host}/${target.db}`,
     );
+  }
+
+  // Named explicitly: the scratch-marker rule below already refuses both, but
+  // this says why.
+  if (PROTECTED_DATABASES.has(target.db.toLowerCase())) {
+    throw new Error(`Refusing to write: "${target.db}" is a protected database and is never a tooling target.`);
   }
 
   const isScratch = /(^|[_-])(scratch|restore|rehearsal|verify)([_-]|$)/i.test(target.db);

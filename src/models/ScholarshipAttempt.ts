@@ -45,6 +45,29 @@ export interface IScholarshipAttempt extends Document {
   batchAssignedBy?: string; // Admin who assigned the batch
   questions: string[]; // Store which questions were in the test
   subjectQuestions: Record<string, string[]>; // Questions per subject
+
+  // ── AGTS (Abhigyan Gurukul Test Series) ──────────────────────────────────
+  // This collection is the test engine's attempt store and keeps its original
+  // name so no migration is needed. AGTS attempts are marked by `program`;
+  // everything below is optional, so legacy scholarship attempts are untouched.
+  program?: 'agts' | 'scholarship';
+  leadId?: mongoose.Types.ObjectId;
+  /** Server-computed scoring snapshot (assessmentScoring). Never client input. */
+  scoring?: {
+    correct: number;
+    incorrect: number;
+    skipped: number;
+    ungraded: number;
+    percentage: number;
+    accuracy: number;
+    timeTakenSec: number;
+    gradedAt: Date;
+    version: number;
+  };
+  /** Server-computed report (assessmentAnalytics.analyzeAttempt). */
+  analysis?: Record<string, unknown>;
+  autoSubmitted?: boolean;
+  submitReason?: 'candidate' | 'time-up' | 'expired' | 'focus-violations';
 }
 
 const ScholarshipAttemptSchema = new Schema(
@@ -95,6 +118,29 @@ const ScholarshipAttemptSchema = new Schema(
     batchAssignedBy: { type: String, default: '' },
     questions: [String],
     subjectQuestions: { type: Map, of: [String], default: new Map() },
+
+    program: { type: String, enum: ['agts', 'scholarship'], index: true },
+    leadId: { type: Schema.Types.ObjectId, ref: 'Lead', index: true },
+    scoring: {
+      type: new Schema(
+        {
+          correct: Number,
+          incorrect: Number,
+          skipped: Number,
+          ungraded: Number,
+          percentage: Number,
+          accuracy: Number,
+          timeTakenSec: Number,
+          gradedAt: Date,
+          version: Number,
+        },
+        { _id: false }
+      ),
+      default: undefined,
+    },
+    analysis: { type: Schema.Types.Mixed, default: undefined },
+    autoSubmitted: { type: Boolean },
+    submitReason: { type: String, enum: ['candidate', 'time-up', 'expired', 'focus-violations'] },
   },
   { timestamps: true }
 );

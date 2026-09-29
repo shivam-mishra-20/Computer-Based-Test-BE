@@ -22,6 +22,9 @@ export interface ISyllabusChapter {
   name: string;
   order: number;
   topics: ISyllabusTopic[];
+  /** Used only when the chapter has no topics (topics are optional). */
+  completed?: boolean;
+  completedDate?: Date;
 }
 
 export interface ISyllabus extends Document {
@@ -59,7 +62,11 @@ const syllabusTopicSchema = new Schema({
 const syllabusChapterSchema = new Schema({
   name: { type: String, required: true },
   order: { type: Number, required: true },
-  topics: [syllabusTopicSchema]
+  topics: [syllabusTopicSchema],
+  // Topics are optional. A chapter without topics is tracked as one item and
+  // marked complete on its own; with topics, its topics are what count.
+  completed: { type: Boolean, default: false },
+  completedDate: { type: Date }
 }, { _id: true });
 
 const syllabusSchema = new Schema<ISyllabus>({
@@ -81,10 +88,21 @@ const syllabusSchema = new Schema<ISyllabus>({
 syllabusSchema.pre('save', function(next) {
   // Calculate from new chapters structure if available
   if (this.chapters && this.chapters.length > 0) {
-    this.totalTopics = this.chapters.reduce((sum, chapter) => sum + (chapter.topics?.length || 0), 0);
-    this.completedTopics = this.chapters.reduce((sum, chapter) => {
-      return sum + (chapter.topics?.filter(topic => topic.completed).length || 0);
-    }, 0);
+    // Each topic is one item; a chapter with no topics is one item itself.
+    let total = 0;
+    let done = 0;
+    for (const chapter of this.chapters) {
+      const topics = chapter.topics || [];
+      if (topics.length > 0) {
+        total += topics.length;
+        done += topics.filter(topic => topic.completed).length;
+      } else {
+        total += 1;
+        if (chapter.completed) done += 1;
+      }
+    }
+    this.totalTopics = total;
+    this.completedTopics = done;
   } else if (this.items && this.items.length > 0) {
     // Fallback to legacy items structure
     this.totalTopics = this.items.length;

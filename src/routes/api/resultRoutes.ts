@@ -1,5 +1,6 @@
+import { requireStaffPermission } from '../../middlewares/requirePermission';
 import { Router } from 'express';
-import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
+import { authMiddleware} from '../../middlewares/authMiddleware';
 import {
   addResult,
   addBulkResults,
@@ -13,18 +14,18 @@ import {
 const router = Router();
 
 // Teacher/Admin routes - add results
-router.post('/add', authMiddleware, requireRole('teacher', 'admin'), addResult);
-router.post('/bulk-add', authMiddleware, requireRole('teacher', 'admin'), addBulkResults);
+router.post('/add', authMiddleware, requireStaffPermission('results.publish'), addResult);
+router.post('/bulk-add', authMiddleware, requireStaffPermission('results.publish'), addBulkResults);
 
 // View results - students can view their own, teachers/admin can view all
 router.get('/student', authMiddleware, getStudentResults);
-router.get('/all', authMiddleware, requireRole('teacher', 'admin'), getAllResults);
+router.get('/all', authMiddleware, requireStaffPermission('results.read'), getAllResults);
 
 // Statistics - teachers/admin only
-router.get('/stats', authMiddleware, requireRole('teacher', 'admin'), getResultStats);
+router.get('/stats', authMiddleware, requireStaffPermission('results.read'), getResultStats);
 
 // Update and delete - teachers/admin only
-router.put('/:id', authMiddleware, requireRole('teacher', 'admin'), updateResult);
-router.delete('/:id', authMiddleware, requireRole('teacher', 'admin'), deleteResult);
+router.put('/:id', authMiddleware, requireStaffPermission('results.override'), updateResult);
+router.delete('/:id', authMiddleware, requireStaffPermission('results.override'), deleteResult);
 
 export default router;

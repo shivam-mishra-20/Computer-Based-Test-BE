@@ -134,13 +134,115 @@ export const uploadLimiter = rateLimit({
  * since there is no user. Deliberately tight: a real person submits a handful
  * of these, so a low ceiling blunts scripted spam without affecting anyone.
  */
+/**
+ * Failed attempts to identify a ward, per device.
+ *
+ * A parent proves a relationship with a student code and the student's phone
+ * number. Each wrong guess is refused with the same message, but without a
+ * limit an attacker holding a seating chart could simply try phone numbers.
+ * Keyed by IP rather than account, because the attacker chooses the account
+ * email and would rotate it. Successful matches do not count, and requests that
+ * are not a parent's are not seen at all.
+ */
+export const guardianVerifyLimiter = rateLimit({
+  windowMs: envNumber('GUARDIAN_VERIFY_WINDOW_MS', 60 * 60 * 1000),
+  max: envNumber('GUARDIAN_VERIFY_MAX', 10),
+  message: { message: 'Too many attempts to verify a student from this device. Please try again later.', code: 'WARD_VERIFY_LIMITED' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: createRedisStore('rl:guardian-verify:'),
+  passOnStoreError: true,
+  skipSuccessfulRequests: true,
+  skip: (req) => {
+    const role = String((req.body as { role?: unknown } | undefined)?.role ?? '').toLowerCase();
+    return !(role === 'parent' || req.path.includes('link-request'));
+  },
+  validate: false,
+});
+
 export const publicFormLimiter = rateLimit({
   windowMs: envNumber('PUBLIC_FORM_RATE_LIMIT_WINDOW_MS', 60 * 60 * 1000),
   max: envNumber('PUBLIC_FORM_RATE_LIMIT_MAX', 20),
-  message: 'Too many submissions from this device, please try again later',
+  // JSON, not a bare string. express-rate-limit sends a string as text/plain,
+  // and every client here reads `data.message` from JSON — so the one message
+  // that most needs to be read ("you are rate limited, wait") arrived as an
+  // unparseable body and surfaced as the browser's own "Too Many Requests".
+  message: { message: 'Too many submissions from this device, please try again later' },
   standardHeaders: true,
   legacyHeaders: false,
   store: createRedisStore('rl:public-form:'),
+  passOnStoreError: true,
+  validate: false,
+});
+
+/**
+ * AGTS registration — the one AGTS route that creates rows (a lead and an
+ * attempt with its own question selection).
+ *
+ * Sized above `publicFormLimiter` on purpose: a school or coaching centre may
+ * run AGTS for a whole class from one Wi-Fi address (see the note at the top
+ * of this file). The per-phone ceiling in agtsService is the tighter control.
+ */
+export const agtsRegisterLimiter = rateLimit({
+  windowMs: envNumber('AGTS_REGISTER_RATE_LIMIT_WINDOW_MS', 60 * 60 * 1000),
+  max: envNumber('AGTS_REGISTER_RATE_LIMIT_MAX', 60),
+  message: { message: 'Too many test registrations from this network. Please try again in a little while.', code: 'AGTS_RATE_LIMITED' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: createRedisStore('rl:agts-register:'),
+  passOnStoreError: true,
+  validate: false,
+});
+
+/**
+ * AGTS answer traffic, keyed by ATTEMPT rather than by IP, so a hall of
+ * candidates on one address is never throttled together while a single
+ * attempt cannot be hammered. A real candidate saves each answer a handful of
+ * times; the ceiling is far above that.
+ */
+export const agtsAttemptLimiter = rateLimit({
+  windowMs: envNumber('AGTS_ATTEMPT_RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000),
+  max: envNumber('AGTS_ATTEMPT_RATE_LIMIT_MAX', 900),
+  message: { message: 'Too many requests for this test. Please slow down.', code: 'AGTS_RATE_LIMITED' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: createRedisStore('rl:agts-attempt:'),
+  passOnStoreError: true,
+  keyGenerator: (req: Request) => `attempt:${String(req.params?.attemptId || '').slice(0, 40)}`,
+  validate: false,
+});
+
+/**
+ * Working on a draft you already hold the token for.
+ *
+ * ── Why this is not `publicFormLimiter` ─────────────────────────────────────
+ * That limiter is sized for a SUBMISSION — "a real person submits a handful of
+ * these", which is true of the one-shot class-request and call-back forms it
+ * was written for. The institute onboarding application is not a submission;
+ * it is a nine-step form that autosaves on every step and re-reads the draft on
+ * every page load. One person filling it in once costs about a dozen requests:
+ * a create, eight saves, a submit, and a resume for each reload. Against a
+ * ceiling of twenty an hour, the SECOND honest attempt from the same address is
+ * refused — and on a coaching centre's office Wi-Fi or a CGNAT carrier, that
+ * address is shared by everyone in the building. See the note at the top of
+ * this file: this is the same failure mode, on the one route that was added
+ * after it was written.
+ *
+ * ── Why a high ceiling here is not a hole ───────────────────────────────────
+ * These three routes are guarded by the draft token, not by the limiter. An
+ * id without its token gets the same 404 as an id that does not exist, so
+ * there is nothing here to spam that possession of a 43-character secret does
+ * not already gate. The endpoints that CREATE a row — the call-back form and
+ * `POST /organization-applications` — keep the tight ceiling, because that is
+ * where the spam actually lands. `globalLimiter` still applies underneath.
+ */
+export const draftEditLimiter = rateLimit({
+  windowMs: envNumber('DRAFT_EDIT_RATE_LIMIT_WINDOW_MS', 60 * 60 * 1000),
+  max: envNumber('DRAFT_EDIT_RATE_LIMIT_MAX', 300),
+  message: { message: 'Too many changes from this device, please try again in a few minutes' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: createRedisStore('rl:draft-edit:'),
   passOnStoreError: true,
   validate: false,
 });

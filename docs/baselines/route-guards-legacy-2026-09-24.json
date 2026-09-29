@@ -1,0 +1,1809 @@
+{
+ "generatedFrom": "git HEAD, before the permission conversion (2026-09-24)",
+ "routes": [
+  {
+   "file": "adminAnalyticsRoutes.ts",
+   "method": "GET",
+   "path": "/students/:studentId/report",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "adminRoutes.ts",
+   "method": "GET",
+   "path": "/audit-logs",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "adminRoutes.ts",
+   "method": "GET",
+   "path": "/firebase/batches",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "adminRoutes.ts",
+   "method": "GET",
+   "path": "/firebase/classes",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "adminRoutes.ts",
+   "method": "GET",
+   "path": "/firebase/stats",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "adminRoutes.ts",
+   "method": "POST",
+   "path": "/firebase/sync/all",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "adminRoutes.ts",
+   "method": "POST",
+   "path": "/firebase/sync/batches",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "adminRoutes.ts",
+   "method": "POST",
+   "path": "/firebase/sync/students",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "adminRoutes.ts",
+   "method": "POST",
+   "path": "/firebase/sync/teachers",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "adminRoutes.ts",
+   "method": "GET",
+   "path": "/firebase/users",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "adminRoutes.ts",
+   "method": "GET",
+   "path": "/settings",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "adminRoutes.ts",
+   "method": "POST",
+   "path": "/settings",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "adminRoutes.ts",
+   "method": "DELETE",
+   "path": "/settings/:key",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "POST",
+   "path": "/ai-generate/image",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "POST",
+   "path": "/ai-generate/pdf",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "POST",
+   "path": "/ai-generate/text",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "POST",
+   "path": "/evaluate/subjective",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "POST",
+   "path": "/generate/image",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "POST",
+   "path": "/generate/paper",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "POST",
+   "path": "/generate/paper-image",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "POST",
+   "path": "/generate/paper-pdf",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "POST",
+   "path": "/generate/pdf",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "POST",
+   "path": "/generate/text",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "GET",
+   "path": "/guidance",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "POST",
+   "path": "/guidance",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "DELETE",
+   "path": "/guidance/:id",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "PUT",
+   "path": "/guidance/:id",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "GET",
+   "path": "/questions/class/:class",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "DELETE",
+   "path": "/questions/class/:class/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "PUT",
+   "path": "/questions/class/:class/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "POST",
+   "path": "/questions/class/:class/:id/solve",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "PUT",
+   "path": "/questions/class/:class/bulk-update",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "PUT",
+   "path": "/questions/class/:class/bulk-update-meta",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "GET",
+   "path": "/questions/class/:class/filters",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "POST",
+   "path": "/questions/class/:class/solve-batch",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "POST",
+   "path": "/refine",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "aiRoutes.ts",
+   "method": "POST",
+   "path": "/save-questions",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "analyticsRoutes.ts",
+   "method": "GET",
+   "path": "/exams/:examId/insights",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "analyticsRoutes.ts",
+   "method": "GET",
+   "path": "/me/progress",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "GET",
+   "path": "/:attemptId",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "PATCH",
+   "path": "/:attemptId/adjust",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "POST",
+   "path": "/:attemptId/answer",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "POST",
+   "path": "/:attemptId/answers/batch",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "POST",
+   "path": "/:attemptId/heartbeat",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "POST",
+   "path": "/:attemptId/log",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "POST",
+   "path": "/:attemptId/mark",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "POST",
+   "path": "/:attemptId/next",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "POST",
+   "path": "/:attemptId/publish",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "GET",
+   "path": "/:attemptId/questions/:questionId/explanation",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "GET",
+   "path": "/:attemptId/review",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "POST",
+   "path": "/:attemptId/submit",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "GET",
+   "path": "/:examId/preview",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "POST",
+   "path": "/:examId/start",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "GET",
+   "path": "/assigned",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "GET",
+   "path": "/mine",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "attemptRoutes.ts",
+   "method": "GET",
+   "path": "/review/pending",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "attendanceRoutes.ts",
+   "method": "GET",
+   "path": "/admin/by-date",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "attendanceRoutes.ts",
+   "method": "GET",
+   "path": "/admin/deduction-summary",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "attendanceRoutes.ts",
+   "method": "GET",
+   "path": "/admin/export",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "attendanceRoutes.ts",
+   "method": "GET",
+   "path": "/admin/summary",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "attendanceRoutes.ts",
+   "method": "GET",
+   "path": "/admin/today",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "attendanceRoutes.ts",
+   "method": "GET",
+   "path": "/admin/user/:userId",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "attendanceRoutes.ts",
+   "method": "GET",
+   "path": "/all",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "attendanceRoutes.ts",
+   "method": "POST",
+   "path": "/auto-sync",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "attendanceRoutes.ts",
+   "method": "POST",
+   "path": "/fetch-external",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "attendanceRoutes.ts",
+   "method": "GET",
+   "path": "/filters",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "attendanceRoutes.ts",
+   "method": "POST",
+   "path": "/sync",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "attendanceRoutes.ts",
+   "method": "POST",
+   "path": "/upload",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "attendanceRuleRoutes.ts",
+   "method": "GET",
+   "path": "/",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "attendanceRuleRoutes.ts",
+   "method": "POST",
+   "path": "/",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "attendanceRuleRoutes.ts",
+   "method": "DELETE",
+   "path": "/:id",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "attendanceRuleRoutes.ts",
+   "method": "PUT",
+   "path": "/:id",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "attendanceRuleRoutes.ts",
+   "method": "POST",
+   "path": "/upsert",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "attendanceRuleRoutes.ts",
+   "method": "GET",
+   "path": "/user/:userId",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "automation.ts",
+   "method": "GET",
+   "path": "/folders",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "automation.ts",
+   "method": "GET",
+   "path": "/stats",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "automation.ts",
+   "method": "GET",
+   "path": "/stats/:id",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "automation.ts",
+   "method": "GET",
+   "path": "/status",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "automation.ts",
+   "method": "POST",
+   "path": "/stop",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "automation.ts",
+   "method": "POST",
+   "path": "/toggle",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "automation.ts",
+   "method": "POST",
+   "path": "/trigger",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "classRequestRoutes.ts",
+   "method": "GET",
+   "path": "/",
+   "roles": [
+    "admin",
+    "developer"
+   ]
+  },
+  {
+   "file": "classRequestRoutes.ts",
+   "method": "DELETE",
+   "path": "/:id",
+   "roles": [
+    "admin",
+    "developer"
+   ]
+  },
+  {
+   "file": "classRequestRoutes.ts",
+   "method": "PATCH",
+   "path": "/:id/status",
+   "roles": [
+    "admin",
+    "developer"
+   ]
+  },
+  {
+   "file": "dailyHoursRoutes.ts",
+   "method": "GET",
+   "path": "/",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "PATCH",
+   "path": "/:examId/answer-key",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "POST",
+   "path": "/:examId/approve-subjective",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "POST",
+   "path": "/:examId/dedupe",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "GET",
+   "path": "/:examId/history",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "PATCH",
+   "path": "/:examId/marking-scheme",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "PATCH",
+   "path": "/:examId/question-marks",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "POST",
+   "path": "/:examId/recompute",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "POST",
+   "path": "/:examId/state",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "GET",
+   "path": "/:examId/summary",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "PATCH",
+   "path": "/:examId/total-marks",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "DELETE",
+   "path": "/attempts/:attemptId",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "PATCH",
+   "path": "/attempts/:attemptId/manual-score",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "PATCH",
+   "path": "/attempts/:attemptId/score",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "POST",
+   "path": "/backfill",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "POST",
+   "path": "/bulk/publish",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "POST",
+   "path": "/bulk/recompute",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "POST",
+   "path": "/cleanup-duplicates",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "examReviewRoutes.ts",
+   "method": "GET",
+   "path": "/tests",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "GET",
+   "path": "/",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "POST",
+   "path": "/",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "DELETE",
+   "path": "/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "GET",
+   "path": "/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "PUT",
+   "path": "/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "POST",
+   "path": "/:id/assign",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "GET",
+   "path": "/blueprints",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "POST",
+   "path": "/blueprints",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "DELETE",
+   "path": "/blueprints/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "PUT",
+   "path": "/blueprints/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "POST",
+   "path": "/from-paper",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "GET",
+   "path": "/questions",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "POST",
+   "path": "/questions",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "DELETE",
+   "path": "/questions/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "PUT",
+   "path": "/questions/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "GET",
+   "path": "/questions/chapters",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "GET",
+   "path": "/questions/for-paper",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "examRoutes.ts",
+   "method": "GET",
+   "path": "/questions/topics",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "guardianLinkRoutes.ts",
+   "method": "GET",
+   "path": "/",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "guardianLinkRoutes.ts",
+   "method": "POST",
+   "path": "/:id/revoke",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "guardianLinkRoutes.ts",
+   "method": "POST",
+   "path": "/:id/verify",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "holidayRoutes.ts",
+   "method": "POST",
+   "path": "/",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "holidayRoutes.ts",
+   "method": "DELETE",
+   "path": "/:id",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "holidayRoutes.ts",
+   "method": "PUT",
+   "path": "/:id",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "metricsRoutes.ts",
+   "method": "GET",
+   "path": "/queue",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "notificationRoutes.ts",
+   "method": "POST",
+   "path": "/",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "notificationRoutes.ts",
+   "method": "POST",
+   "path": "/bulk",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "paperRoutes.ts",
+   "method": "GET",
+   "path": "/",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "paperRoutes.ts",
+   "method": "POST",
+   "path": "/",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "paperRoutes.ts",
+   "method": "DELETE",
+   "path": "/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "paperRoutes.ts",
+   "method": "GET",
+   "path": "/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "paperRoutes.ts",
+   "method": "PUT",
+   "path": "/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "paperRoutes.ts",
+   "method": "GET",
+   "path": "/:id/export/doc",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "paperRoutes.ts",
+   "method": "GET",
+   "path": "/:id/export/pdf",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "paperRoutes.ts",
+   "method": "POST",
+   "path": "/:id/solutions",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "paperRoutes.ts",
+   "method": "POST",
+   "path": "/temp/export/doc",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "paperRoutes.ts",
+   "method": "POST",
+   "path": "/temp/export/pdf",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "playlistRoutes.ts",
+   "method": "POST",
+   "path": "/course/:courseId/sync",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "playlistRoutes.ts",
+   "method": "POST",
+   "path": "/import",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "playlistRoutes.ts",
+   "method": "POST",
+   "path": "/import-resources",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "playlistRoutes.ts",
+   "method": "POST",
+   "path": "/preview",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "practiceTestRoutes.ts",
+   "method": "POST",
+   "path": "/",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "practiceTestRoutes.ts",
+   "method": "GET",
+   "path": "/:id",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "practiceTestRoutes.ts",
+   "method": "POST",
+   "path": "/:id/answer",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "practiceTestRoutes.ts",
+   "method": "GET",
+   "path": "/:id/attempt",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "practiceTestRoutes.ts",
+   "method": "POST",
+   "path": "/:id/mark",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "practiceTestRoutes.ts",
+   "method": "GET",
+   "path": "/:id/result",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "practiceTestRoutes.ts",
+   "method": "POST",
+   "path": "/:id/start",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "practiceTestRoutes.ts",
+   "method": "POST",
+   "path": "/:id/submit",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "practiceTestRoutes.ts",
+   "method": "GET",
+   "path": "/history",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "practiceTestRoutes.ts",
+   "method": "GET",
+   "path": "/meta",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "practiceTestRoutes.ts",
+   "method": "GET",
+   "path": "/presets",
+   "roles": [
+    "student"
+   ]
+  },
+  {
+   "file": "publicTestAdminRoutes.ts",
+   "method": "GET",
+   "path": "/public-series",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "publicTestAdminRoutes.ts",
+   "method": "POST",
+   "path": "/public-series",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "publicTestAdminRoutes.ts",
+   "method": "DELETE",
+   "path": "/public-series/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "publicTestAdminRoutes.ts",
+   "method": "PATCH",
+   "path": "/public-series/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "publicTestAdminRoutes.ts",
+   "method": "GET",
+   "path": "/public-tests",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "publicTestAdminRoutes.ts",
+   "method": "POST",
+   "path": "/public-tests",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "publicTestAdminRoutes.ts",
+   "method": "DELETE",
+   "path": "/public-tests/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "publicTestAdminRoutes.ts",
+   "method": "GET",
+   "path": "/public-tests/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "publicTestAdminRoutes.ts",
+   "method": "PATCH",
+   "path": "/public-tests/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "publicTestAdminRoutes.ts",
+   "method": "POST",
+   "path": "/public-tests/:id/duplicate",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "publicTestAdminRoutes.ts",
+   "method": "POST",
+   "path": "/public-tests/:id/status",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "publicTestAdminRoutes.ts",
+   "method": "POST",
+   "path": "/public-tests/promote",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "reportRoutes.ts",
+   "method": "GET",
+   "path": "/exams/:examId/attendance",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "reportRoutes.ts",
+   "method": "GET",
+   "path": "/exams/:examId/logs",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "reportRoutes.ts",
+   "method": "GET",
+   "path": "/exams/:examId/results.csv",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "resultRoutes.ts",
+   "method": "DELETE",
+   "path": "/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "resultRoutes.ts",
+   "method": "PUT",
+   "path": "/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "resultRoutes.ts",
+   "method": "POST",
+   "path": "/add",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "resultRoutes.ts",
+   "method": "GET",
+   "path": "/all",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "resultRoutes.ts",
+   "method": "POST",
+   "path": "/bulk-add",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "resultRoutes.ts",
+   "method": "GET",
+   "path": "/stats",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "roomAllocationRoutes.ts",
+   "method": "GET",
+   "path": "/dates",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "roomAllocationRoutes.ts",
+   "method": "PUT",
+   "path": "/dates/:date",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "roomAllocationRoutes.ts",
+   "method": "POST",
+   "path": "/dates/:date/publish",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "roomAllocationRoutes.ts",
+   "method": "GET",
+   "path": "/dates/:date/roster",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "scheduleRoutes.ts",
+   "method": "POST",
+   "path": "/bulk",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "scheduleRoutes.ts",
+   "method": "POST",
+   "path": "/bulk/validate",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "scheduleRoutes.ts",
+   "method": "POST",
+   "path": "/extract-image",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "subjectRoutes.ts",
+   "method": "GET",
+   "path": "/",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "subjectRoutes.ts",
+   "method": "POST",
+   "path": "/",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "teacherActivityRoutes.ts",
+   "method": "GET",
+   "path": "/detail",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "teacherActivityRoutes.ts",
+   "method": "GET",
+   "path": "/summary",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "teacherRoutes.ts",
+   "method": "GET",
+   "path": "/ai/blueprint-templates",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "teacherRoutes.ts",
+   "method": "POST",
+   "path": "/ai/blueprint-templates",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "teacherRoutes.ts",
+   "method": "DELETE",
+   "path": "/ai/blueprint-templates/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "teacherRoutes.ts",
+   "method": "POST",
+   "path": "/ai/generate",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "teacherRoutes.ts",
+   "method": "GET",
+   "path": "/ai/history",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "teacherRoutes.ts",
+   "method": "DELETE",
+   "path": "/ai/history/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "teacherRoutes.ts",
+   "method": "GET",
+   "path": "/ai/history/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "teacherRoutes.ts",
+   "method": "POST",
+   "path": "/ai/history/:id/blueprint/approve",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "teacherRoutes.ts",
+   "method": "POST",
+   "path": "/ai/history/:id/cancel",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "teacherRoutes.ts",
+   "method": "POST",
+   "path": "/ai/history/:id/export-pdf",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "teacherRoutes.ts",
+   "method": "POST",
+   "path": "/ai/history/:id/regenerate",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "uploadRoutes.ts",
+   "method": "POST",
+   "path": "/image",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "userRoutes.ts",
+   "method": "GET",
+   "path": "/",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "userRoutes.ts",
+   "method": "POST",
+   "path": "/",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "userRoutes.ts",
+   "method": "DELETE",
+   "path": "/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "userRoutes.ts",
+   "method": "GET",
+   "path": "/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "userRoutes.ts",
+   "method": "PUT",
+   "path": "/:id",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  },
+  {
+   "file": "userRoutes.ts",
+   "method": "PUT",
+   "path": "/:id/approve",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "userRoutes.ts",
+   "method": "PUT",
+   "path": "/:id/reject",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "userRoutes.ts",
+   "method": "GET",
+   "path": "/dashboard",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "userRoutes.ts",
+   "method": "GET",
+   "path": "/pending",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "userRoutes.ts",
+   "method": "GET",
+   "path": "/registrations",
+   "roles": [
+    "admin"
+   ]
+  },
+  {
+   "file": "userRoutes.ts",
+   "method": "GET",
+   "path": "/student-batch-config",
+   "roles": [
+    "admin",
+    "teacher"
+   ]
+  }
+ ]
+}

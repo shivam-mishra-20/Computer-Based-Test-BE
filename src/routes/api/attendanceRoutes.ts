@@ -1,5 +1,7 @@
+import { requireLegacyDataOwner } from '../../middlewares/orgScopeGates';
+import { requireStaffPermission } from '../../middlewares/requirePermission';
 import { Router, Request, Response } from 'express';
-import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
+import { authMiddleware} from '../../middlewares/authMiddleware';
 import User from '../../models/User';
 import {
   getStudentAttendance,
@@ -20,7 +22,7 @@ const router = Router();
  * @desc    Get current student's attendance records (Legacy - uses name matching)
  * @access  Private (Student)
  */
-router.get('/my', authMiddleware, async (req: Request, res: Response) => {
+router.get('/my', authMiddleware, requireLegacyDataOwner('Student attendance'), async (req: Request, res: Response) => {
   try {
     const authUser = (req as any).user;
     
@@ -216,7 +218,7 @@ router.get('/me', authMiddleware, async (req: Request, res: Response) => {
  * @desc    Get current student's attendance summary
  * @access  Private (Student)
  */
-router.get('/summary', authMiddleware, async (req: Request, res: Response) => {
+router.get('/summary', authMiddleware, requireLegacyDataOwner('Student attendance'), async (req: Request, res: Response) => {
   try {
     const authUser = (req as any).user;
     
@@ -240,7 +242,7 @@ router.get('/summary', authMiddleware, async (req: Request, res: Response) => {
  * @desc    Get all students' attendance (admin/teacher view)
  * @access  Private (Admin, Teacher)
  */
-router.get('/all', authMiddleware, requireRole('admin', 'teacher'), async (req: Request, res: Response) => {
+router.get('/all', authMiddleware, requireStaffPermission('attendance.read'), requireLegacyDataOwner('Student attendance'), async (req: Request, res: Response) => {
   try {
     const { classLevel, batch } = req.query;
     
@@ -261,7 +263,7 @@ router.get('/all', authMiddleware, requireRole('admin', 'teacher'), async (req: 
  * @desc    Get available filter options (classes, batches)
  * @access  Private (Admin, Teacher)
  */
-router.get('/filters', authMiddleware, requireRole('admin', 'teacher'), async (req: Request, res: Response) => {
+router.get('/filters', authMiddleware, requireStaffPermission('attendance.read'), requireLegacyDataOwner('Student attendance'), async (req: Request, res: Response) => {
   try {
     const filters = await getAttendanceFilters();
     res.json(filters);
@@ -276,7 +278,7 @@ router.get('/filters', authMiddleware, requireRole('admin', 'teacher'), async (r
  * @desc    Upload attendance records from parsed Excel/CSV data
  * @access  Private (Admin, Teacher)
  */
-router.post('/upload', authMiddleware, requireRole('admin', 'teacher'), async (req: Request, res: Response) => {
+router.post('/upload', authMiddleware, requireStaffPermission('attendance.mark'), requireLegacyDataOwner('Student attendance'), async (req: Request, res: Response) => {
   try {
     const { records } = req.body;
     
@@ -350,7 +352,7 @@ router.post('/upload', authMiddleware, requireRole('admin', 'teacher'), async (r
  * @desc    Sync students from Users collection to studentLeaves
  * @access  Private (Admin)
  */
-router.post('/sync', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
+router.post('/sync', authMiddleware, requireStaffPermission('attendance.manage'), requireLegacyDataOwner('Student attendance'), async (req: Request, res: Response) => {
   try {
     const result = await syncStudentsToAttendance();
     res.json(result);
@@ -365,22 +367,22 @@ import AttendanceController from '../../controllers/AttendanceController';
 import ExternalAttendanceController from '../../controllers/ExternalAttendanceController';
 
 // Admin: Fetch External Sync (Admin only)
-router.post('/fetch-external', authMiddleware, requireRole('admin'), ExternalAttendanceController.fetchExternal);
+router.post('/fetch-external', authMiddleware, requireStaffPermission('attendance.manage'), requireLegacyDataOwner('Biometric attendance sync'), ExternalAttendanceController.fetchExternal);
 
 // Admin: Attendance APIs (Read-Only Views)
 // Full paths: /api/attendance/admin/today, /api/attendance/admin/by-date, etc.
 console.log('[AttendanceRoutes] Registering admin attendance routes...');
-router.get('/admin/today', authMiddleware, requireRole('admin'), AttendanceController.getAdminToday);
-router.get('/admin/by-date', authMiddleware, requireRole('admin'), AttendanceController.getAdminByDate);
-router.get('/admin/summary', authMiddleware, requireRole('admin'), AttendanceController.getAdminSummary);
-router.get('/admin/export', authMiddleware, requireRole('admin'), AttendanceController.getAdminExport);
-router.get('/admin/deduction-summary', authMiddleware, requireRole('admin'), AttendanceController.getAdminDeductionSummary);
-router.get('/admin/user/:userId', authMiddleware, requireRole('admin'), AttendanceController.getAdminUserAttendance);
+router.get('/admin/today', authMiddleware, requireStaffPermission('attendance.manage'), AttendanceController.getAdminToday);
+router.get('/admin/by-date', authMiddleware, requireStaffPermission('attendance.manage'), AttendanceController.getAdminByDate);
+router.get('/admin/summary', authMiddleware, requireStaffPermission('attendance.manage'), AttendanceController.getAdminSummary);
+router.get('/admin/export', authMiddleware, requireStaffPermission('attendance.manage'), AttendanceController.getAdminExport);
+router.get('/admin/deduction-summary', authMiddleware, requireStaffPermission('attendance.manage'), AttendanceController.getAdminDeductionSummary);
+router.get('/admin/user/:userId', authMiddleware, requireStaffPermission('attendance.manage'), AttendanceController.getAdminUserAttendance);
 
 // Auto-sync: Trigger immediate sync from start of month to today
 import AttendanceCron from '../../services/AttendanceCron';
 
-router.post('/auto-sync', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
+router.post('/auto-sync', authMiddleware, requireStaffPermission('attendance.manage'), requireLegacyDataOwner('Biometric attendance sync'), async (req: Request, res: Response) => {
   try {
     console.log('[AttendanceRoutes] Auto-sync triggered via API');
     

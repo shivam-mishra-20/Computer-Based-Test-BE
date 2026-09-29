@@ -22,6 +22,7 @@ import { getEntitlement } from '../../core/entitlements/resolve';
 import { getOrgConfiguration } from '../../core/config/orgConfig';
 import { getOrgPolicy } from '../../core/config/policy';
 import { resolveUserPermissions } from '../../core/rbac/resolve';
+import { deploymentKind } from '../../core/tenancy/dataSource';
 
 const router = Router();
 
@@ -36,6 +37,10 @@ router.get('/context', authMiddleware, async (req: Request, res: Response) => {
       // an error response here would need that branch forever.
       return res.json({
         organization: null,
+        // Which experience this deployment's accounts get: a legacy
+        // (pre-migration) deployment answers 'legacy', so a client that signed
+        // in here shows the legacy screens. See core/tenancy/dataSource.ts.
+        dataSource: deploymentKind(),
         user: user ?? null,
         permissions: [],
         modules: [],
@@ -68,6 +73,7 @@ router.get('/context', authMiddleware, async (req: Request, res: Response) => {
       status?: string;
       branding?: Record<string, unknown>;
       locale?: Record<string, unknown>;
+      isPlatformOwned?: boolean;
     } | null;
 
     return res.json({
@@ -79,6 +85,11 @@ router.get('/context', authMiddleware, async (req: Request, res: Response) => {
             status: organization.status,
             branding: organization.branding ?? {},
             locale: organization.locale ?? {},
+            // Additive. The platform's OWN organization (the one that authors
+            // the public catalogue). Clients hide platform-authored surfaces —
+            // Public Learning — from every other organization; the server
+            // refuses them regardless (requirePlatformOwnedOrg).
+            isPlatformOwned: Boolean(organization.isPlatformOwned),
           }
         : null,
       user: user
@@ -86,7 +97,10 @@ router.get('/context', authMiddleware, async (req: Request, res: Response) => {
             id: user.id,
             name: user.name,
             email: user.email,
-            role: user.role,
+            // The ACCOUNT's role, which decides which screens a client shows.
+            // What the account may do is `permissions` below; the effective
+            // role authorization checks use can be narrower (custom roles).
+            role: user.accountRole ?? user.role,
             classLevel: user.classLevel,
             batch: user.batch,
           }
@@ -105,6 +119,7 @@ router.get('/context', authMiddleware, async (req: Request, res: Response) => {
         usingDefaults: configuration.usingDefaults,
         policy,
       },
+      dataSource: deploymentKind(),
       subscriptionStatus: entitlement.status,
       writable: entitlement.writable,
       version: entitlement.version,

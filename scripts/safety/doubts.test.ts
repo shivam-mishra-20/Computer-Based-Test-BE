@@ -324,11 +324,23 @@ section('Unassigned doubts notify the eligible pool, tenant-scoped');
     (claimScope as { orgId?: string }).orgId === 'org_abc',
   );
 
-  const pinnedWarnScope = runWithTenant({ orgId: 'org_001', source: 'pinned' }, () => tenantScope());
+  // api-legacy (pinned to org 001, pre-backfill): still reaches documents
+  // with no orgId — the fan-out would otherwise notify nobody — but never
+  // another organization's stamped documents.
+  const saved = { mode: process.env.TENANT_MODE, org: process.env.ORG_ID, enf: process.env.TENANT_ENFORCEMENT };
+  Object.assign(process.env, { TENANT_MODE: 'pinned', ORG_ID: 'org_001', TENANT_ENFORCEMENT: 'warn' });
+  const pinnedWarnScope = runWithTenant({ orgId: 'org_001', source: 'pinned' }, () => tenantScope()) as {
+    orgId?: { $in?: unknown[] };
+  };
+  const accepted = pinnedWarnScope.orgId?.$in ?? [];
   check(
-    'pinned + warn (api-legacy, pre-backfill) does not narrow',
-    Object.keys(pinnedWarnScope).length === 0,
+    'pinned + warn (api-legacy, pre-backfill) still reaches un-stamped documents, and no other organization’s',
+    accepted.length === 2 && accepted.includes(null) && accepted.includes('org_001'),
   );
+  for (const [key, value] of [['TENANT_MODE', saved.mode], ['ORG_ID', saved.org], ['TENANT_ENFORCEMENT', saved.enf]] as const) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 
   // The fan-out audience must line up with who can actually SEE an unassigned
   // doubt, or teachers get paged about threads their list will not show.

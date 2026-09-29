@@ -59,6 +59,16 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
     justification: 'Account creation precedes any session; the org comes from the invite or host.',
   },
   {
+    method: 'GET',
+    path: '/api/auth/registration-policy',
+    classification: 'pre-auth',
+    reason: 'auth:registration-policy',
+    justification:
+      'Tells an app whether its register screen should show a form. Reached with no ' +
+      'organization only when the routing hint names none, and then answers "unknown ' +
+      'application" without reading any tenant data.',
+  },
+  {
     method: 'POST',
     path: '/api/auth/public-register',
     classification: 'pre-auth',
@@ -96,6 +106,34 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
     classification: 'pre-auth',
     reason: 'auth:reset-password',
     justification: 'Authorised by a single-use emailed token, not by a session.',
+  },
+  {
+    method: 'POST',
+    path: '/api/auth/reset-password-link',
+    classification: 'pre-auth',
+    reason: 'auth:reset-password-link',
+    justification:
+      'Authorised by a one-time 32-byte link token (stored only as its hash) that names ' +
+      'exactly one account; reached by someone who cannot sign in.',
+  },
+  {
+    method: 'POST',
+    path: '/api/auth/accept-invite',
+    classification: 'pre-auth',
+    reason: 'auth:accept-invite',
+    justification:
+      'An invited person setting their first password. Authorised by the one-time invite ' +
+      'token, which names exactly one account; there is no session yet by definition.',
+  },
+  {
+    method: 'POST',
+    path: '/api/auth/refresh',
+    classification: 'pre-auth',
+    reason: 'auth:refresh',
+    justification:
+      'Exchanges a refresh token for an access token. The refresh token is the credential ' +
+      '(audience "refresh", checked against the user\'s tokenVersion); the handler reads ' +
+      'only that one account and its organization\'s state.',
   },
   {
     method: 'GET',
@@ -171,6 +209,74 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
     classification: 'public-global',
     reason: 'public:scholarship-result',
     justification: 'Result link shared with the candidate; the token is the authorisation.',
+  },
+
+  // AGTS (Abhigyan Gurukul Test Series) — the scholarship flow above, renamed
+  // and hardened. Same audience: a prospective family with no account.
+  {
+    method: 'GET',
+    path: '/api/agts/tests',
+    classification: 'public-global',
+    reason: 'public:agts-browse',
+    justification: 'Active AGTS test names, classes, subjects and durations for the public landing page. No candidate data.',
+  },
+  {
+    method: 'GET',
+    path: '/api/agts/tests/:ref',
+    classification: 'public-global',
+    reason: 'public:agts-browse',
+    justification: 'One AGTS test resolved from a share link. Metadata only; never questions or answers.',
+  },
+  {
+    method: 'POST',
+    path: '/api/agts/register',
+    classification: 'public-global',
+    reason: 'public:agts-register',
+    justification:
+      'A family registers with consent and starts a test. Rate limited per network and per phone; ' +
+      'every stored field is validated and allow-listed server-side.',
+  },
+  {
+    method: 'GET',
+    path: '/api/agts/attempts/:attemptId',
+    classification: 'public-global',
+    reason: 'public:agts-attempt',
+    justification: 'The paper for an in-progress attempt. Authorised by the per-attempt key header; no answer key is returned.',
+  },
+  {
+    method: 'POST',
+    path: '/api/agts/attempts/:attemptId/answer',
+    classification: 'public-global',
+    reason: 'public:agts-attempt',
+    justification: 'Saves one answer to the attempt the per-attempt key names. The server enforces the deadline.',
+  },
+  {
+    method: 'POST',
+    path: '/api/agts/attempts/:attemptId/submit',
+    classification: 'public-global',
+    reason: 'public:agts-attempt',
+    justification: 'Closes the attempt the per-attempt key names. Scoring is computed server-side from the answer key.',
+  },
+  {
+    method: 'GET',
+    path: '/api/agts/attempts/:attemptId/result',
+    classification: 'public-global',
+    reason: 'public:agts-result',
+    justification: 'The candidate\'s own performance report, authorised by the per-attempt key. No contact details are returned.',
+  },
+  {
+    method: 'POST',
+    path: '/api/agts/attempts/:attemptId/guidance',
+    classification: 'public-global',
+    reason: 'public:agts-guidance',
+    justification: 'The candidate asks for academic guidance from their result. Authorised by the per-attempt key; rate limited.',
+  },
+  {
+    method: 'GET',
+    path: '/api/agts/shared/:token',
+    classification: 'public-global',
+    reason: 'public:agts-result',
+    justification: 'A result link an admin chose to share; the 160-bit token is the authorisation. No contact details are returned.',
   },
 
   // ── Diagnostics ──────────────────────────────────────────────────────────

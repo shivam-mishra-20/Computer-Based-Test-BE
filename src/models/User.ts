@@ -1,7 +1,12 @@
 import mongoose, { Document, Schema } from 'mongoose';
 import bcrypt from 'bcrypt';
 
-export type UserRole = 'admin' | 'teacher' | 'student';
+/**
+ * `parent` reads ONLY what core/guardians exposes about verified wards. It has
+ * no RBAC permissions, and authMiddleware refuses a parent token on every route
+ * outside the parent allow-list — see PARENT_ALLOWED_PATHS there.
+ */
+export type UserRole = 'admin' | 'teacher' | 'student' | 'parent';
 export type UserStatus = 'pending' | 'approved' | 'rejected';
 export type RegistrationSource = 'website' | 'app' | 'admin' | 'unknown';
 export type Board = 'CBSE' | 'ICSE' | 'GSEB' | 'IB' | 'IGCSE' | 'Other';
@@ -70,6 +75,8 @@ export interface IUser extends Document {
   learnerProfile?: ILearnerProfile;
   status: UserStatus;
   registrationSource?: RegistrationSource;
+  /** The public registration record that created this account, if any. */
+  registrationId?: mongoose.Types.ObjectId;
   phone?: string;
   empCode?: string; // For EtimeOffice mapping
   bio?: string; // Teacher/student bio
@@ -87,6 +94,12 @@ export interface IUser extends Document {
   // Password reset
   passwordResetToken?: string;
   passwordResetExpires?: Date;
+  // Invitation: the account exists, and its holder sets the password through a
+  // one-time link. Only the SHA-256 of the link's token is stored.
+  inviteTokenHash?: string;
+  inviteExpiresAt?: Date;
+  invitedBy?: string;
+  invitedAt?: Date;
   // Onboarding
   welcomeTutorialCompleted?: boolean;
   // User settings
@@ -108,7 +121,7 @@ const userSchema = new Schema<IUser>({
   name: { type: String, required: true },
   email: { type: String, unique: true, required: true, lowercase: true, trim: true },
   password: { type: String, required: true },
-  role: { type: String, enum: ['admin', 'teacher', 'student'], default: 'student', index: true },
+  role: { type: String, enum: ['admin', 'teacher', 'student', 'parent'], default: 'student', index: true },
   // Additive: absent on all 158 existing accounts, which keeps them on the
   // legacy-role permission mapping and therefore behaving exactly as today.
   roleIds: [{ type: Schema.Types.ObjectId, ref: 'Role' }],
@@ -140,6 +153,12 @@ const userSchema = new Schema<IUser>({
   },
   status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'approved', index: true },
   registrationSource: { type: String, enum: ['website', 'app', 'admin', 'unknown'], default: 'unknown', index: true },
+  // The public registration that created this account, when one did. The
+  // record lives in the application's own registration collection (see
+  // core/registration); only its id is kept here, never the collection name,
+  // because admin screens return user documents and a storage name is not
+  // something any client needs to see.
+  registrationId: { type: Schema.Types.ObjectId, index: true, sparse: true },
   phone: { type: String },
   empCode: { type: String, unique: true, sparse: true, index: true },
   bio: { type: String },
@@ -154,6 +173,10 @@ const userSchema = new Schema<IUser>({
   authProvider: { type: String, enum: ['local', 'firebase'], default: 'local' },
   passwordResetToken: { type: String },
   passwordResetExpires: { type: Date },
+  inviteTokenHash: { type: String, index: { sparse: true } },
+  inviteExpiresAt: { type: Date },
+  invitedBy: { type: String },
+  invitedAt: { type: Date },
   welcomeTutorialCompleted: { type: Boolean, default: false },
   settings: {
     type: {

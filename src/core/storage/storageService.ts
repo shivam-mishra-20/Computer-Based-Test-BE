@@ -355,6 +355,61 @@ export async function putApplicationAsset(input: {
 }
 
 /**
+ * One of an organization's five NATIVE assets — the images a mobile build
+ * compiles in.
+ *
+ * ── Why these are not `putTenantFile` ───────────────────────────────────────
+ * They are uploaded by platform staff from the console, which runs with no
+ * tenant context of its own, and they are consumed by a build worker that is
+ * likewise not serving a tenant. `putTenantFile` would fail closed on both
+ * counts, correctly — so these live in their own prefix keyed by organization
+ * id, exactly as application assets do, and are PRIVATE.
+ *
+ * ── Why the server holds them at all ────────────────────────────────────────
+ * Until now the five images lived only in the app repository, and whether they
+ * existed was a checkbox a human ticked. A build worker cannot see a developer's
+ * checkout, so an automated build needs the bytes somewhere it can reach. This
+ * is that somewhere.
+ */
+export async function putOrgNativeAsset(input: {
+  buffer: Buffer;
+  orgId: string;
+  fileName: string;
+  contentType: string;
+  kind: string;
+}): Promise<StoredFile> {
+  const fileId = newFileId();
+  const safeOrg = sanitizeSegment(input.orgId);
+  const safeKind = sanitizeSegment(input.kind);
+  const safeName = sanitizeSegment(input.fileName);
+  const storagePath = `organizations/${safeOrg}/native/${safeKind}/${fileId}_${safeName}`;
+
+  const file = getBucket().file(storagePath);
+  await file.save(input.buffer, {
+    contentType: input.contentType,
+    metadata: {
+      contentType: input.contentType,
+      metadata: { orgId: safeOrg, kind: safeKind, originalName: safeName },
+    },
+  });
+
+  return {
+    storagePath,
+    fileId,
+    fileName: input.fileName,
+    contentType: input.contentType,
+    size: input.buffer.length,
+    orgId: safeOrg,
+  };
+}
+
+/** Read one stored object back as bytes. The build worker's only download path. */
+export async function downloadUnchecked(storagePath: string): Promise<Buffer> {
+  const [contents] = await getBucket().file(storagePath).download();
+  return contents;
+}
+
+/**
  * Sign without an ownership check.
  *
  * For callers that have ALREADY authorized the file by another route — a
@@ -514,4 +569,66 @@ export async function putPublicTenantAsset(input: PutTenantFileInput): Promise<S
     orgId: orgId ? String(orgId) : '',
     url: `https://storage.googleapis.com/${bucket.name}/${storagePath}`,
   };
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Whole-prefix removal — organization deletion only
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The only prefixes a bulk delete may ever name.
+ *
+ * `organizations/<orgId>/` holds every tenant file, public tenant asset and
+ * native build asset; `applications/<registrationId>/` holds an onboarding
+ * application's uploads. Both ids are 24-hex ObjectIds, and the trailing slash
+ * is required — without it `organizations/abc` would also match
+ * `organizations/abcdef…`, another organization's files. Anything else — a
+ * legacy path, the bucket root, a `..` — is refused before the bucket is
+ * touched.
+ */
+const DELETABLE_PREFIX = /^(organizations|applications)\/[a-f0-9]{24}\/$/;
+
+export class StoragePrefixRefused extends Error {
+  constructor(prefix: string) {
+    super(`Refusing to touch storage prefix "${prefix}".`);
+    this.name = 'StoragePrefixRefused';
+  }
+}
+
+function assertDeletablePrefix(prefix: string): void {
+  if (!DELETABLE_PREFIX.test(prefix)) throw new StoragePrefixRefused(prefix);
+}
+
+/** How many objects live under one organization- or application-owned prefix. */
+export async function countStoragePrefix(prefix: string): Promise<number> {
+  assertDeletablePrefix(prefix);
+  const [files] = await getBucket().getFiles({ prefix, autoPaginate: true });
+  return files.length;
+}
+
+/**
+ * Delete every object under one organization- or application-owned prefix.
+ *
+ * Paged, and idempotent: a retry after a partial run finds fewer objects and
+ * deletes those. Returns how many it removed this call.
+ */
+export async function deleteStoragePrefix(prefix: string): Promise<number> {
+  assertDeletablePrefix(prefix);
+  let removed = 0;
+  for (;;) {
+    const [files] = await getBucket().getFiles({ prefix, maxResults: 200, autoPaginate: false });
+    if (!files.length) return removed;
+    let thisPage = 0;
+    for (const file of files as { name: string; delete: (o: unknown) => Promise<unknown> }[]) {
+      // Belt and braces: the listing is by prefix, but each name is checked
+      // again before deletion so a bucket quirk can never widen the scope.
+      if (!file.name.startsWith(prefix)) continue;
+      await file.delete({ ignoreNotFound: true });
+      thisPage++;
+    }
+    removed += thisPage;
+    // A page that yielded nothing deletable would come back identical for
+    // ever. Stop; the caller's verification reports what is left.
+    if (!thisPage) return removed;
+  }
 }

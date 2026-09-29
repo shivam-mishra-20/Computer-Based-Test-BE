@@ -1,3 +1,4 @@
+import { requireStaffPermission } from '../../middlewares/requirePermission';
 import { Router } from 'express';
 import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
 import { cacheMiddleware, invalidateCacheOn } from '../../utils/cacheHelpers';
@@ -48,9 +49,9 @@ router.get('/:attemptId/questions/:questionId/explanation', authMiddleware, requ
 });
 
 // Teacher/Admin: publish results
-router.post('/:attemptId/publish', authMiddleware, requireRole('teacher', 'admin'), publishResultCtrl);
-router.get('/review/pending', authMiddleware, requireRole('teacher','admin'), listPendingReviewCtrl);
-router.patch('/:attemptId/adjust', authMiddleware, requireRole('teacher','admin'), adjustAnswerScoreCtrl);
-router.get('/:attemptId/review', authMiddleware, requireRole('teacher','admin'), teacherAttemptViewCtrl);
+router.post('/:attemptId/publish', authMiddleware, requireStaffPermission('results.publish'), publishResultCtrl);
+router.get('/review/pending', authMiddleware, requireStaffPermission('attempts.grade'), listPendingReviewCtrl);
+router.patch('/:attemptId/adjust', authMiddleware, requireStaffPermission('attempts.grade'), adjustAnswerScoreCtrl);
+router.get('/:attemptId/review', authMiddleware, requireStaffPermission('attempts.grade'), teacherAttemptViewCtrl);
 
 export default router;

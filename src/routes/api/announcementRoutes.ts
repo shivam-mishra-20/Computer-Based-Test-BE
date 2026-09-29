@@ -1,3 +1,4 @@
+import { staffHolds } from '../../middlewares/requirePermission';
 import { Router, Request, Response } from 'express';
 import Announcement from '../../models/Announcement';
 import { authMiddleware } from '../../middlewares/authMiddleware';
@@ -56,7 +57,7 @@ router.get('/', authMiddleware, async (req: Request, res: Response) => {
 router.post('/', authMiddleware, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'announcements.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
@@ -75,8 +76,7 @@ router.post('/', authMiddleware, async (req: Request, res: Response) => {
 // Admin: Update announcement
 router.put('/:announcementId', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'announcements.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     
@@ -99,8 +99,7 @@ router.put('/:announcementId', authMiddleware, async (req: Request, res: Respons
 // Admin: Delete announcement
 router.delete('/:announcementId', authMiddleware, async (req: Request, res: Response) => {
   try {
-    const user = (req as any).user;
-    if (!['admin', 'teacher'].includes(user.role)) {
+    if (!(await staffHolds(req, 'announcements.manage'))) {
       return res.status(403).json({ error: 'Not authorized' });
     }
     

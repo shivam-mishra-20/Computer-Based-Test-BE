@@ -1,7 +1,13 @@
 import { Server as HttpServer } from 'http';
-import { currentOrgId } from '../core/tenancy';
+import mongoose from 'mongoose';
+import { currentOrgId, runWithTenant, withoutTenantScope } from '../core/tenancy';
 import { Server, Socket } from 'socket.io';
 import jwt from 'jsonwebtoken';
+import { credentialRefusal, effectiveLegacyRole, principalOf } from '../middlewares/authMiddleware';
+import { resolveUserPermissions } from '../core/rbac/resolve';
+import { canAccessDoubt, type DoubtViewerRole } from './doubtService';
+import User from '../models/User';
+import Doubt from '../models/Doubt';
 import { createAdapter } from '@socket.io/redis-adapter';
 import { isRedisEnabled, redisPublisher, redisSubscriber } from '../config/redis';
 
@@ -23,6 +29,47 @@ import { isRedisEnabled, redisPublisher, redisSubscriber } from '../config/redis
  */
 export function classRoom(orgId: string | null | undefined, classId: string): string {
   return orgId ? `class:${orgId}:${classId}` : `class:${classId}`;
+}
+
+/** Who a socket is, established once at the handshake. */
+interface SocketPrincipal {
+  id: string;
+  role: string;
+  /** Null only on a pre-tenancy (single-institute) deployment, or for a learner. */
+  orgId: string | null;
+}
+
+/**
+ * The same rules as authMiddleware, for a socket: a session credential (not a
+ * platform or refresh token), not revoked, for an account whose organization
+ * is the one the socket is then confined to.
+ *
+ * The handshake used to accept ANY token signed with the secret — a platform
+ * staff token, a refresh token, a token revoked by "sign out everywhere" — and
+ * the room names below were built from `currentOrgId()`, which is always null
+ * inside a socket event, so class rooms were not per-organization at all.
+ */
+export async function socketPrincipal(token: string): Promise<SocketPrincipal | null> {
+  let decoded: { id?: string; aud?: string; tv?: unknown };
+  try {
+    decoded = jwt.verify(token, process.env.JWT_SECRET as string) as typeof decoded;
+  } catch {
+    return null;
+  }
+  if (!decoded.id || (decoded.aud && decoded.aud !== 'tenant' && decoded.aud !== 'legacy')) return null;
+  const user = (await withoutTenantScope('socket:principal', async () =>
+    User.findById(decoded.id).select('role status orgId accountType tokenVersion roleIds').lean(),
+  )) as Record<string, unknown> | null;
+  if (!user || credentialRefusal(decoded, user)) return null;
+  const principal = principalOf(user as never);
+  if (principal.kind === 'foreign' || principal.kind === 'unattached') return null;
+  const orgId = principal.kind === 'tenant' ? principal.orgId : null;
+  // The role a narrowed custom role actually grants, as on every HTTP route.
+  const access = await withoutTenantScope('socket:access', async () =>
+    resolveUserPermissions({ ...(user as object), orgId } as never),
+  );
+  const role = effectiveLegacyRole(user.role as string | undefined, access) ?? 'student';
+  return { id: String(decoded.id), role, orgId };
 }
 
 class SocketService {
@@ -99,13 +146,13 @@ class SocketService {
         return next(new Error('Authentication error: No token provided'));
       }
 
-      jwt.verify(token, process.env.JWT_SECRET as string, (err: any, decoded: any) => {
-        if (err) {
-          return next(new Error('Authentication error: Invalid token'));
-        }
-        (socket as any).user = decoded;
-        next();
-      });
+      socketPrincipal(String(token))
+        .then((principal) => {
+          if (!principal) return next(new Error('Authentication error: Invalid token'));
+          (socket as any).user = { id: principal.id, role: principal.role, orgId: principal.orgId };
+          next();
+        })
+        .catch(() => next(new Error('Authentication error: Invalid token')));
     });
 
     this.io.on('connection', (socket: Socket) => {
@@ -113,6 +160,8 @@ class SocketService {
       
       const userId = (socket as any).user?.id;
       const role = (socket as any).user?.role;
+      // The socket's organization, fixed at the handshake. Never the event's.
+      const orgId: string | null = (socket as any).user?.orgId ?? null;
       let roomCount = 0;
 
       console.log(`[Socket] User connected: ${socket.id} | User: ${userId} | Total: ${this.connectionCount}`);
@@ -160,24 +209,27 @@ class SocketService {
           return socket.emit('error', { message: 'Maximum rooms joined' });
         }
         
-        socket.join(classRoom(currentOrgId(), classId));
+        socket.join(classRoom(orgId, classId));
         roomCount++;
         console.log(`[Socket] ${socket.id} joined class:${classId}`);
       });
       
       socket.on('leave_class', (classId: string) => {
         if (classId && typeof classId === 'string') {
-          socket.leave(classRoom(currentOrgId(), classId));
+          socket.leave(classRoom(orgId, classId));
           roomCount = Math.max(0, roomCount - 1);
         }
       });
 
-      // Join doubt room with rate limiting
-      socket.on('join_doubt', (doubtId: string) => {
+      // Join doubt room with rate limiting. Only a participant may listen: the
+      // room carries every message of the conversation, and it used to admit
+      // any signed-in socket that named the id — another student, or another
+      // organization's.
+      socket.on('join_doubt', async (doubtId: string) => {
         if (!doubtId || typeof doubtId !== 'string' || doubtId.length > 100) {
           return socket.emit('error', { message: 'Invalid doubt ID' });
         }
-        
+
         if (roomCount >= this.MAX_ROOMS_PER_SOCKET) {
           return socket.emit('error', { message: 'Maximum rooms joined' });
         }
@@ -185,7 +237,15 @@ class SocketService {
         if (!checkRateLimit()) {
           return socket.emit('error', { message: 'Rate limit exceeded' });
         }
-        
+
+        try {
+          if (!(await this.mayJoinDoubt(doubtId, userId, role, orgId))) {
+            return socket.emit('error', { message: 'Doubt not found' });
+          }
+        } catch {
+          return socket.emit('error', { message: 'Doubt not found' });
+        }
+
         socket.join(`doubt_${doubtId}`);
         roomCount++;
         console.log(`[Socket] ${socket.id} joined doubt_${doubtId}`);
@@ -202,7 +262,8 @@ class SocketService {
       socket.on('typing', (data: { doubtId: string; isTyping: boolean }) => {
         if (!checkRateLimit()) return;
         
-        if (data?.doubtId && typeof data.isTyping === 'boolean') {
+        // Only into a room this socket was admitted to.
+        if (data?.doubtId && typeof data.isTyping === 'boolean' && socket.rooms.has(`doubt_${data.doubtId}`)) {
           socket.to(`doubt_${data.doubtId}`).emit('user_typing', {
             userId,
             isTyping: data.isTyping
@@ -221,6 +282,17 @@ class SocketService {
     });
 
     console.log('Socket.IO initialized');
+  }
+
+  /** A participant of this conversation, in the socket's own organization. */
+  public async mayJoinDoubt(doubtId: string, userId: string, role: string, orgId: string | null): Promise<boolean> {
+    if (!mongoose.Types.ObjectId.isValid(doubtId)) return false;
+    if (role !== 'student' && role !== 'teacher' && role !== 'admin') return false;
+    const find = () => Doubt.findById(doubtId).select('student teacher messages.sender').lean();
+    // Looked up in the socket's organization, so the tenancy plugin applies
+    // exactly the scope an HTTP request from this account would get.
+    const doubt = orgId ? await runWithTenant({ orgId, userId, source: 'session' }, find) : await find();
+    return Boolean(doubt) && canAccessDoubt(doubt, { id: userId, role: role as DoubtViewerRole });
   }
 
   public getIO(): Server {

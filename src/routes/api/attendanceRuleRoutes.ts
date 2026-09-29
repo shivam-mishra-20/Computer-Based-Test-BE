@@ -1,11 +1,13 @@
 import { Router } from 'express';
-import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
+import { authMiddleware } from '../../middlewares/authMiddleware';
+import { requireStaffPermission } from '../../middlewares/requirePermission';
 import AttendanceRuleController from '../../controllers/AttendanceRuleController';
 
 const router = Router();
 
-// All endpoints require admin authentication
-router.use(authMiddleware, requireRole('admin'));
+// Deduction rules are institute attendance policy: attendance.manage, which the
+// legacy bridge grants to administrators only.
+router.use(authMiddleware, requireStaffPermission('attendance.manage'));
 
 router.get('/', AttendanceRuleController.listRules);
 router.get('/user/:userId', AttendanceRuleController.getRuleForUser);

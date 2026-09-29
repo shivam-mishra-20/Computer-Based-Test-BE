@@ -26,6 +26,45 @@ import {
   reconcileBuildConfig,
   updateMobileConfig,
 } from '../../core/platform/mobileBuild';
+import {
+  BuildNotAllowed,
+  BuildNotFound,
+  buildReadiness,
+  cancelBuild,
+  getBuild,
+  listBuilds,
+  markFailed,
+  publicBuildViewOf,
+  publicBuildViews,
+  startBuild,
+} from '../../core/platform/appBuilds';
+import { parseBuildProfile } from '../../core/platform/mobileBuildRules';
+import { RegistrationStorageFailed } from '../../core/platform/appExperience';
+import { GuardianLinkError, listLinks, revokeLink, verifyLink } from '../../core/guardians/guardians';
+import {
+  loadOrgForRegistration,
+  registrationView,
+  updateRegistrationSettings,
+} from '../../core/platform/registrationSettings';
+import {
+  buildDeletionPlan,
+  DeletionRefused,
+  deletionStatus,
+  finishWithoutExternal,
+  issuePlanToken,
+  resumeDeletion,
+  startDeletion,
+  type Staff as DeletionStaff,
+} from '../../core/platform/orgDeletion';
+import {
+  NativeAssetRejected,
+  nativeAssetState,
+  saveNativeAsset,
+  type NativeAssetKind,
+} from '../../core/platform/mobileAssets';
+import { BUILD_ARTIFACT_TYPES } from '../../models/AppBuildJob';
+import { enqueuePrepare } from '../../queues/appBuildQueue';
+import { uploadNativeAsset } from '../../middlewares/uploadNativeAsset';
 import { assessApplication, applicationToOnboardingInput } from '../../core/platform/applicationProvisioning';
 import { signAsset } from '../../core/platform/applications';
 import {
@@ -54,7 +93,12 @@ import {
   OrgSlugTaken,
 } from '../../core/platform/organizations';
 import type { PlatformRequestUser } from '../../middlewares/platformAuth';
-import { PLATFORM_ROLES, platformCapabilities } from '../../models/PlatformUser';
+import PlatformUserModel, { PLATFORM_ROLES, platformCapabilities } from '../../models/PlatformUser';
+import UserModel from '../../models/User';
+import { issueInvite, issueResetLink } from '../../core/accounts/accountLinks';
+import { runWithTenant } from '../../core/tenancy/context';
+import Org from '../../models/Org';
+import mongoose from 'mongoose';
 import { signPlatformToken } from '../../core/auth/tokens';
 import { authLimiter } from '../../middlewares/rateLimiter';
 import bcrypt from 'bcrypt';
@@ -168,6 +212,30 @@ router.post('/login', authLimiter, async (req: Request, res: Response) => {
 });
 
 router.use(platformAuthMiddleware);
+
+/**
+ * An organization that is being deleted accepts no other changes.
+ *
+ * Without this, a half-deleted organization could be reactivated, given a new
+ * build, or have its entitlement re-resolved — each of which writes new rows
+ * the deletion then has to chase. Reads still work, and the deletion's own
+ * routes are the only writes allowed.
+ */
+router.param('orgId', (req, res, next, orgId) => {
+  if (req.method === 'GET' || /^\/orgs\/[^/]+\/deletion(\/|$)/.test(req.path)) return next();
+  if (!mongoose.isValidObjectId(orgId)) return next();
+  withoutTenantScope('platform:deletion-guard', async () => Org.exists({ _id: orgId, deletion: { $exists: true, $ne: null } }))
+    .then((deleting) => {
+      if (deleting) {
+        return res.status(409).json({
+          code: 'ORG_DELETING',
+          message: 'This organization is being deleted. It cannot be changed.',
+        });
+      }
+      return next();
+    })
+    .catch(next);
+});
 
 /** Wrap a handler so a thrown error becomes a clean 500 rather than a hang. */
 function handle(fn: (req: Request, res: Response) => Promise<unknown>) {
@@ -299,7 +367,9 @@ router.post(
       orgId: result.orgId,
       entity: 'Org',
       entityId: result.orgId,
-      metadata: { slug: result.slug, complete: result.complete, steps: result.steps },
+      // Never the invite: it is a credential, returned once below and stored
+      // only as a hash.
+      metadata: { slug: result.slug, complete: result.complete, steps: result.steps, adminInvited: Boolean(result.adminInvite) },
     });
     // 207 when some step failed: the organization exists and is partially
     // configured, which is neither a success nor a clean failure, and the
@@ -332,6 +402,106 @@ router.patch(
       changes: req.body,
     });
     return res.json({ organization: updated });
+  }),
+);
+
+/* ── Deleting an organization ───────────────────────────────────────────────
+ * Preview → confirm → background run → verify. See core/platform/orgDeletion.
+ *
+ * `org.delete` is held by the owner role alone. The preview returns the plan
+ * the SERVER built plus a short-lived token bound to this staff member and
+ * organization; the start request must carry that token, the organization's
+ * slug typed out, and an explicit acknowledgement. Nothing in a request says
+ * what to delete — the plan is rebuilt from the database when the run starts.
+ */
+async function deletionStaff(req: Request): Promise<DeletionStaff> {
+  const staff = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+  const account = staff?.id
+    ? await withoutTenantScope('platform:deletion-staff', async () =>
+        PlatformUserModel.findById(staff.id).select('email').lean(),
+      )
+    : null;
+  return {
+    id: String(staff?.id ?? ''),
+    role: staff?.role,
+    email: (account as { email?: string } | null)?.email,
+    ip: req.ip,
+  };
+}
+
+function deletionRefusal(res: Response, err: unknown) {
+  if (err instanceof DeletionRefused) {
+    return res.status(err.httpStatus).json({ message: err.message, problems: err.problems });
+  }
+  throw err;
+}
+
+router.get(
+  '/orgs/:orgId/deletion/preview',
+  requirePlatformCapability('org.delete'),
+  handle(async (req, res) => {
+    try {
+      const staff = await deletionStaff(req);
+      const plan = await buildDeletionPlan(req.params.orgId);
+      return res.json({ plan, planToken: plan.blockers.length ? null : issuePlanToken(req.params.orgId, staff.id) });
+    } catch (err) {
+      return deletionRefusal(res, err);
+    }
+  }),
+);
+
+router.get(
+  '/orgs/:orgId/deletion',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    return res.json(await deletionStatus(req.params.orgId));
+  }),
+);
+
+router.post(
+  '/orgs/:orgId/deletion',
+  requirePlatformCapability('org.delete'),
+  handle(async (req, res) => {
+    try {
+      const staff = await deletionStaff(req);
+      const plan = await startDeletion(req.params.orgId, staff, {
+        confirmSlug: req.body?.confirmSlug,
+        acknowledge: req.body?.acknowledge,
+        planToken: req.body?.planToken,
+      });
+      return res.status(202).json({ state: 'running', plan });
+    } catch (err) {
+      return deletionRefusal(res, err);
+    }
+  }),
+);
+
+router.post(
+  '/orgs/:orgId/deletion/resume',
+  requirePlatformCapability('org.delete'),
+  handle(async (req, res) => {
+    try {
+      await resumeDeletion(req.params.orgId, await deletionStaff(req));
+      return res.status(202).json({ state: 'running' });
+    } catch (err) {
+      return deletionRefusal(res, err);
+    }
+  }),
+);
+
+router.post(
+  '/orgs/:orgId/deletion/finish',
+  requirePlatformCapability('org.delete'),
+  handle(async (req, res) => {
+    try {
+      await finishWithoutExternal(req.params.orgId, await deletionStaff(req), {
+        confirmSlug: req.body?.confirmSlug,
+        acknowledge: req.body?.acknowledge,
+      });
+      return res.status(202).json({ state: 'running' });
+    } catch (err) {
+      return deletionRefusal(res, err);
+    }
   }),
 );
 
@@ -589,6 +759,128 @@ router.get(
   }),
 );
 
+/* ── Public registration, per application ────────────────────────────────
+ *
+ * An operator's view of whether this organization's app takes sign-ups, which
+ * roles it offers, and where those registrations are stored. The store is
+ * SHOWN here — to platform staff, for tracing — and is never accepted as input:
+ * the PUT below takes a policy and roles, and the server assigns the collection.
+ */
+router.get(
+  '/orgs/:orgId/registration',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const org = await loadOrgForRegistration(req.params.orgId);
+    if (!org) return res.status(404).json({ message: 'Organization not found.' });
+    return res.json(registrationView(org, { includeStore: true }));
+  }),
+);
+
+router.put(
+  '/orgs/:orgId/registration',
+  requirePlatformCapability('app.manage'),
+  handle(async (req, res) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    // Only the policy, roles and support copy reach the organization — see
+    // core/platform/registrationSettings. The server owns where registrations go.
+    try {
+      const saved = await updateRegistrationSettings(req.params.orgId, body);
+      await recordPlatformAction(req, {
+        action: 'registration.update',
+        orgId: req.params.orgId,
+        entity: 'Org',
+        entityId: req.params.orgId,
+        changes: { policy: body.policy, roles: body.roles },
+        metadata: { storeProvisioned: Boolean(saved.registrationCollection) },
+      });
+      const org = await loadOrgForRegistration(req.params.orgId);
+      return res.json(registrationView(org, { includeStore: true }));
+    } catch (err) {
+      if (err instanceof RegistrationStorageFailed) {
+        return res.status(503).json({ message: err.message, code: 'REGISTRATION_STORAGE_FAILED' });
+      }
+      throw err;
+    }
+  }),
+);
+
+/* ── Parent ↔ student links, for platform staff ─────────────────────────────
+ * The same review an organization's own administrators do on
+ * /api/guardian-links, for institutes that have no administrator yet or ask the
+ * platform to act. The organization is the URL's, checked by capability; links
+ * are only ever looked up INSIDE it, so an id from another organization is a 404.
+ */
+router.get(
+  '/orgs/:orgId/guardian-links',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    return res.json({ links: await listLinks(req.params.orgId, String(req.query.status ?? '')) });
+  }),
+);
+
+function decideGuardianLink(action: 'verify' | 'revoke') {
+  return handle(async (req, res) => {
+    const staff = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+    try {
+      const actor = { id: String(staff?.id ?? ''), kind: 'platform' as const };
+      const link =
+        action === 'verify'
+          ? await verifyLink(req.params.orgId, req.params.linkId, actor)
+          : await revokeLink(req.params.orgId, req.params.linkId, actor);
+      await recordPlatformAction(req, {
+        action: `guardian.link.${action}`,
+        orgId: req.params.orgId,
+        entity: 'GuardianLink',
+        entityId: String(link._id),
+        metadata: { status: link.status },
+      });
+      return res.json({ id: String(link._id), status: link.status });
+    } catch (err) {
+      if (err instanceof GuardianLinkError) {
+        return res.status(err.httpStatus).json({ message: err.message, code: err.code });
+      }
+      throw err;
+    }
+  });
+}
+
+/* ── Helping an institute back in ────────────────────────────────────────────────────────────────────────
+ * A fresh invitation for an administrator who never set a password, or a
+ * reset link for one who is locked out. Returned once, audited without the
+ * link. The user is looked up INSIDE the URL's organization, so an id from
+ * another organization is a 404.
+ */
+function platformAccountLink(kind: 'invite' | 'reset') {
+  return handle(async (req, res) => {
+    const staff = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+    const user = (await withoutTenantScope('platform:account-link', async () =>
+      mongoose.isValidObjectId(req.params.userId)
+        ? UserModel.findOne({ _id: req.params.userId, orgId: req.params.orgId }).select('inviteTokenHash').lean()
+        : null,
+    )) as { _id: unknown; inviteTokenHash?: string } | null;
+    if (!user) return res.status(404).json({ message: 'User not found in this organization.' });
+    if (kind === 'invite' && !user.inviteTokenHash) {
+      return res.status(409).json({ message: 'This person has already set a password. Send a reset link instead.' });
+    }
+    const link = await runWithTenant({ orgId: req.params.orgId, source: 'script' }, async () =>
+      kind === 'invite' ? issueInvite(user._id, `platform:${staff?.id ?? ''}`) : issueResetLink(user._id),
+    );
+    await recordPlatformAction(req, {
+      action: `user.${kind}-link`,
+      orgId: req.params.orgId,
+      entity: 'User',
+      entityId: String(user._id),
+    });
+    return res.json({ link: link.link, token: link.token, expiresAt: link.expiresAt, delivery: link.delivery });
+  });
+}
+
+router.post('/orgs/:orgId/users/:userId/invite', requirePlatformCapability('org.manage'), platformAccountLink('invite'));
+router.post('/orgs/:orgId/users/:userId/reset-link', requirePlatformCapability('org.manage'), platformAccountLink('reset'));
+
+router.post('/orgs/:orgId/guardian-links/:linkId/verify', requirePlatformCapability('org.manage'), decideGuardianLink('verify'));
+router.post('/orgs/:orgId/guardian-links/:linkId/revoke', requirePlatformCapability('org.manage'), decideGuardianLink('revoke'));
+
 router.put(
   '/orgs/:orgId/mobile',
   requirePlatformCapability('app.manage'),
@@ -653,6 +945,237 @@ router.post(
       });
     }
     return res.json(result);
+  }),
+);
+
+// ── Mobile app builds ──────────────────────────────────────────────────────
+//
+// The console's whole build surface. Reading a build takes `org.read`, like
+// every other view of an organization; STARTING one takes `app.manage`, the
+// same narrow grant that lets someone set an Android package name — because
+// the two mistakes cost the same thing. A build is a store artifact wearing an
+// institute's name.
+//
+// Nothing here waits for a build. Every handler returns in milliseconds and
+// the work happens in the queue; see queues/appBuildQueue.ts for why the
+// polling is a separate short job rather than a handler that blocks.
+
+/**
+ * Is this organization buildable, and for what.
+ *
+ * `?profile=preview` asks about an internal-testing build, which relaxes one
+ * rule — a plaintext API address — and keeps every other. Anything else,
+ * including nothing, asks about a release. `parseBuildProfile` falls back to
+ * the strict answer, so a stale client or a typo can only tighten the rules.
+ */
+router.get(
+  '/orgs/:orgId/mobile/build-readiness',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const readiness = await buildReadiness(
+      req.params.orgId,
+      parseBuildProfile(req.query.profile),
+    );
+    return res.json(readiness);
+  }),
+);
+
+router.get(
+  '/orgs/:orgId/mobile/assets',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    return res.json({ assets: await nativeAssetState(req.params.orgId) });
+  }),
+);
+
+router.post(
+  '/orgs/:orgId/mobile/assets/:kind',
+  requirePlatformCapability('app.manage'),
+  uploadNativeAsset.single('file'),
+  handle(async (req, res) => {
+    const file = (req as Request & { file?: { buffer: Buffer; originalname: string } }).file;
+    if (!file) return res.status(400).json({ message: 'No file was received.' });
+    try {
+      const saved = await saveNativeAsset(
+        req.params.orgId,
+        req.params.kind as NativeAssetKind,
+        file,
+      );
+      await recordPlatformAction(req, {
+        action: 'mobile.asset.upload',
+        orgId: req.params.orgId,
+        entity: 'Org',
+        entityId: req.params.orgId,
+        metadata: { kind: saved.kind, bytes: saved.bytes },
+      });
+      return res.status(201).json({ asset: saved, assets: await nativeAssetState(req.params.orgId) });
+    } catch (err) {
+      if (err instanceof NativeAssetRejected) return res.status(400).json({ message: err.message });
+      throw err;
+    }
+  }),
+);
+
+router.get(
+  '/orgs/:orgId/mobile/builds',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const builds = await listBuilds(req.params.orgId, Number(req.query.limit) || 25);
+    return res.json({ builds: await publicBuildViews(builds) });
+  }),
+);
+
+/**
+ * Start a build.
+ *
+ * Answers 200 with `created: false` when an identical build is already
+ * running, rather than 409. A second click is not an error to correct — the
+ * person meant to start one build, and the honest reply is the build they
+ * started. `force: true` is the explicit rebuild, which supersedes it.
+ */
+router.post(
+  '/orgs/:orgId/mobile/builds',
+  requirePlatformCapability('app.manage'),
+  handle(async (req, res) => {
+    const artifactType = String(req.body?.artifactType ?? '').toLowerCase();
+    if (!BUILD_ARTIFACT_TYPES.includes(artifactType as never)) {
+      return res.status(400).json({
+        message: 'Choose APK or AAB.',
+      });
+    }
+
+    const actor = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+    try {
+      const { build, created } = await startBuild({
+        orgId: req.params.orgId,
+        platform: 'android',
+        artifactType: artifactType as 'apk' | 'aab',
+        requestedBy: String(actor?.id ?? ''),
+        force: req.body?.force === true,
+        appProfile: parseBuildProfile(req.body?.appProfile),
+      });
+
+      if (created) {
+        try {
+          await enqueuePrepare({
+            buildId: String(build._id),
+            orgId: req.params.orgId,
+            platform: 'android',
+            artifactType: artifactType as 'apk' | 'aab',
+          });
+        } catch (err) {
+          // The row exists but nothing will ever pick it up. Left alone it
+          // would sit in `queued` for ever AND hold the live-build slot, so
+          // the next click would be told a build is already running when none
+          // is. Failing it here keeps the record honest and the slot free.
+          await markFailed(String(build._id), {
+            errorCode: 'QUEUE_UNAVAILABLE',
+            errorMessage: 'The build could not be queued. The build service is unavailable — try again shortly.',
+            errorDetail: (err as Error)?.message,
+          });
+          return res.status(503).json({
+            message: 'The build could not be queued. The build service is unavailable — try again shortly.',
+          });
+        }
+        // Audited on creation only. Recording the duplicate clicks as well
+        // would bury the entries that matter under a person's mouse.
+        await recordPlatformAction(req, {
+          action: 'mobile.build.start',
+          orgId: req.params.orgId,
+          entity: 'AppBuildJob',
+          entityId: String(build._id),
+          metadata: {
+            buildNumber: build.buildNumber,
+            artifactType: build.artifactType,
+            appVersion: build.appVersion,
+            profile: build.buildProfile,
+            androidPackage: (build.resolvedIdentity as Record<string, string> | undefined)?.androidPackage,
+          },
+        });
+      }
+
+      return res.status(created ? 201 : 200).json({ build: await publicBuildViewOf(build), created });
+    } catch (err) {
+      if (err instanceof BuildNotAllowed) {
+        return res.status(422).json({ message: err.message, problems: err.problems });
+      }
+      if (err instanceof BuildConfigIncomplete) {
+        return res.status(422).json({
+          message: err.message,
+          problems: err.issues.map((i) => i.message),
+        });
+      }
+      throw err;
+    }
+  }),
+);
+
+router.get(
+  '/mobile/builds/:buildId',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    try {
+      return res.json({ build: await publicBuildViewOf(await getBuild(req.params.buildId)) });
+    } catch (err) {
+      if (err instanceof BuildNotFound) return res.status(404).json({ message: err.message });
+      throw err;
+    }
+  }),
+);
+
+router.post(
+  '/mobile/builds/:buildId/cancel',
+  requirePlatformCapability('app.manage'),
+  handle(async (req, res) => {
+    try {
+      const result = await cancelBuild(req.params.buildId);
+      const build = await getBuild(req.params.buildId);
+      if (result.cancelled) {
+        await recordPlatformAction(req, {
+          action: 'mobile.build.cancel',
+          orgId: String(build.orgId),
+          entity: 'AppBuildJob',
+          entityId: req.params.buildId,
+          metadata: { buildNumber: build.buildNumber },
+        });
+      }
+      return res.json({ ...result, build: await publicBuildViewOf(build) });
+    } catch (err) {
+      if (err instanceof BuildNotFound) return res.status(404).json({ message: err.message });
+      throw err;
+    }
+  }),
+);
+
+/**
+ * Where to download the finished artifact.
+ *
+ * The URL is EAS's own, not one this server invents, and the binary is not
+ * proxied: an APK is tens of megabytes and streaming it through the API buys
+ * nothing except a slower download and a busy Node process. The request is
+ * audited because who took a signed build out of the system is worth knowing.
+ */
+router.get(
+  '/mobile/builds/:buildId/artifact',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    try {
+      const build = await getBuild(req.params.buildId);
+      if (build.status !== 'completed' || !build.artifactUrl) {
+        return res.status(409).json({ message: 'This build has no downloadable file.' });
+      }
+      await recordPlatformAction(req, {
+        action: 'mobile.build.download',
+        orgId: String(build.orgId),
+        entity: 'AppBuildJob',
+        entityId: req.params.buildId,
+        metadata: { buildNumber: build.buildNumber, artifactType: build.artifactType },
+      });
+      return res.json({ url: build.artifactUrl, filename: build.artifactFilename });
+    } catch (err) {
+      if (err instanceof BuildNotFound) return res.status(404).json({ message: err.message });
+      throw err;
+    }
   }),
 );
 
