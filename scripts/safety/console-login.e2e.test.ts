@@ -23,6 +23,7 @@
 
 import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
+import { requireEnv } from './lib';
 
 const CONSOLE_URL = process.env.CONSOLE_URL || 'http://127.0.0.1:3100';
 const API_URL = process.env.API_URL || 'http://127.0.0.1:5055';
@@ -31,11 +32,11 @@ const TOKEN_KEY = 'platform.token';
 
 const OWNER = {
   email: (process.env.P10A_OWNER_EMAIL || 'p10a-owner@platform.test').toLowerCase(),
-  password: process.env.P10A_OWNER_PASSWORD || 'bootstrap-owner-password',
+  password: requireEnv('P10A_OWNER_PASSWORD'),
 };
 const SUPPORT = {
   email: (process.env.P10A_SUPPORT_EMAIL || 'p10a-support@platform.test').toLowerCase(),
-  password: process.env.P10A_SUPPORT_PASSWORD || 'support-account-password',
+  password: requireEnv('P10A_SUPPORT_PASSWORD'),
 };
 
 let failures = 0;
@@ -258,7 +259,7 @@ async function main() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         email: process.env.P10A_TENANT_EMAIL || 'p6.admin@abhigyan.fixture',
-        password: process.env.P10A_TENANT_PASSWORD || 'P6-fixture-abhigyan!',
+        password: process.env.P10A_TENANT_PASSWORD || requireEnv('P6_FIXTURE_PASSWORD_ABHIGYAN'),
       }),
     })
       .then((r) => r.json())

@@ -36,6 +36,7 @@ import 'dotenv/config';
 import { registerTenancy, verifyTenantPluginApplied } from './core/tenancy';
 import { applyDataSourcePolicy, configuredEnv, type DataSourcePolicy } from './core/tenancy/dataSource';
 import { serviceRealm } from './core/realm/realm';
+import { adminBootstrap } from './config/adminBootstrap';
 import {
   RUNTIME_LISTENING,
   RUNTIME_SHUTDOWN,
@@ -63,6 +64,23 @@ import {
       ` on database "${policy.database ?? '(none named in the URI)'}"`,
   );
   for (const change of policy.changes) console.log(`[realm]   ${change}`);
+}
+
+// ── The bootstrap administrator: the operator's credentials, or nothing ─────
+// Only the platform runtime creates one (config/db.ts). In production it must
+// come from ADMIN_EMAIL and ADMIN_PASSWORD — there is no default — so starting
+// without them is refused here, before anything connects. /api/* never creates
+// one and is not affected. See config/adminBootstrap.ts.
+if (serviceRealm() === 'platform') {
+  const bootstrap = adminBootstrap();
+  if (bootstrap.action === 'refuse') {
+    console.error(
+      `❌ [bootstrap-admin] ${bootstrap.reason}. In production the platform's bootstrap ` +
+        'administrator comes only from ADMIN_EMAIL and ADMIN_PASSWORD — there is no default. ' +
+        'Set both; the platform runtime will not start without them.',
+    );
+    process.exit(1);
+  }
 }
 registerTenancy();
 

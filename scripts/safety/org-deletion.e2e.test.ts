@@ -34,9 +34,11 @@
  */
 
 import { bootScratchApp, Checks, request } from './e2eHarness';
+import { randomBytes } from 'crypto';
 
 const RUN = `zz-del-${process.pid}`;
-const PASSWORD = 'Del!E2E-Passw0rd';
+// Generated per run — a throwaway account on a scratch database; never stored.
+const PASSWORD = `Tst-${randomBytes(9).toString('hex')}!9Aa`;
 const UNMODELLED = 'zz_del_unmodelled';
 const PROJECT_X = '1a2b3c4d-0000-4000-8000-00000000000a';
 const PROJECT_SHARED = '1a2b3c4d-0000-4000-8000-00000000000b';

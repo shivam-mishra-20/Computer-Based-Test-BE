@@ -39,6 +39,7 @@
  */
 
 import { existsSync, mkdirSync } from 'fs';
+import { randomBytes } from 'crypto';
 import { join } from 'path';
 import { config } from 'dotenv';
 import { assertNotProduction, configureDnsForSrv, requireEnv } from './lib';
@@ -52,7 +53,8 @@ const LEGACY_PORT = process.env.WL_LEGACY_PORT || '5072';
 const SHOTS =
   process.env.WL_SHOTS || join(process.cwd(), 'docs', 'single-login-screens');
 const RUN = `zz-wsl-${process.pid}`;
-const PASSWORD = 'Single-Login!2026';
+// Generated per run — a throwaway account on a scratch database; never stored.
+const PASSWORD = `Tst-${randomBytes(9).toString('hex')}!9Aa`;
 
 const ORG = {
   name: 'Lakeside Test Academy',

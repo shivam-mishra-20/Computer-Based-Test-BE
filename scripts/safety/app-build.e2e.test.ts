@@ -21,6 +21,7 @@
  */
 
 import http from 'http';
+import { randomBytes } from 'crypto';
 import type { AddressInfo } from 'net';
 import path from 'path';
 import { promises as fsp } from 'fs';
@@ -41,7 +42,8 @@ function deriveScratchUri(productionUri: string, suffix: string): string {
 }
 
 const MARKER = 'zz-build';
-const PASSWORD = 'AppBuildE2E!Passw0rd';
+// Generated per run — a throwaway account on a scratch database; never stored.
+const PASSWORD = `Tst-${randomBytes(9).toString('hex')}!9Aa`;
 
 let passed = 0;
 let failed = 0;

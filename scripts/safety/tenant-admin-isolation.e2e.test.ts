@@ -34,10 +34,12 @@
  */
 
 import jwt from 'jsonwebtoken';
+import { randomBytes } from 'crypto';
 import { bootScratchApp, Checks, request, type Res } from './e2eHarness';
 
 const RUN = `zz-tai-${process.pid}`;
-const PASSWORD = 'Isolate!E2E-Passw0rd';
+// Generated per run — a throwaway account on a scratch database; never stored.
+const PASSWORD = `Tst-${randomBytes(9).toString('hex')}!9Aa`;
 // `TAI_MODES=off` is the negative control: with tenancy off the probe MUST
 // fail, which is how we know it can see a leak at all.
 const MODES = (process.env.TAI_MODES ? process.env.TAI_MODES.split(',') : ['warn', 'enforce']) as ('warn' | 'enforce' | 'off')[];

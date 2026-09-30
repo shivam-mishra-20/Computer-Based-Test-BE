@@ -31,10 +31,12 @@
  */
 
 import { spawnSync } from 'child_process';
+import { randomBytes } from 'crypto';
 import { bootScratchApp, Checks, request } from './e2eHarness';
 
 const RUN = `zz-legacydb-${process.pid}`;
-const PASSWORD = 'Legacy-DB!2026';
+// Generated per run — a throwaway account on a scratch database; never stored.
+const PASSWORD = `Tst-${randomBytes(9).toString('hex')}!9Aa`;
 
 async function main() {
   const t = new Checks();

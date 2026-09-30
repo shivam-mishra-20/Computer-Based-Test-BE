@@ -97,7 +97,7 @@ async function main() {
     );
   }
 
-  setEnv({ ENABLE_ATTENDANCE_WEBHOOK: 'true', ATTENDANCE_WEBHOOK_SECRET: 's3cret' });
+  setEnv({ ENABLE_ATTENDANCE_WEBHOOK: 'true', ATTENDANCE_WEBHOOK_SECRET: crypto.randomBytes(16).toString('hex') });
   {
     const res = makeRes();
     await WebhookController.handleAttendance(makeReq(VALID_BODY), res as never);
@@ -112,7 +112,7 @@ async function main() {
   }
 
   // ── Fully configured: signature is mandatory ────────────────────────────
-  const SECRET = 'test-secret-value';
+  const SECRET = crypto.randomBytes(16).toString('hex');
   setEnv({
     ENABLE_ATTENDANCE_WEBHOOK: 'true',
     ATTENDANCE_WEBHOOK_SECRET: SECRET,

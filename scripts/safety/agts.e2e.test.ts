@@ -20,6 +20,7 @@
  */
 
 import { bootScratchApp, Checks, request, type Res } from './e2eHarness';
+import { randomBytes } from 'crypto';
 
 const RUN = `zz-agts-${process.pid}`;
 const NAME = 'Zzagts'; // student-name prefix (letters only: the validator refuses digits)
@@ -81,7 +82,7 @@ async function main() {
 
     const person = async (tag: string, role: string, orgId: string) => {
       const u = await unscoped(() =>
-        User.create({ name: `${NAME} ${tag}`, email: `${RUN}-${tag}@example.test`, password: 'Agts-E2E!2026', role, status: 'approved', orgId }),
+        User.create({ name: `${NAME} ${tag}`, email: `${RUN}-${tag}@example.test`, password: `Tst-${randomBytes(9).toString('hex')}!9Aa`, role, status: 'approved', orgId }),
       );
       userIds.push(String(u._id));
       return signSessionToken({ id: String(u._id), role, orgId, tokenVersion: 0 });

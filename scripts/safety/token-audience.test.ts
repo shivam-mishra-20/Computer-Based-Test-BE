@@ -26,6 +26,7 @@
  */
 
 import 'dotenv/config';
+import { randomBytes } from 'crypto';
 import mongoose from 'mongoose';
 import jwt from 'jsonwebtoken';
 import { registerTenancy, withoutTenantScope } from '../../src/core/tenancy';
@@ -80,7 +81,7 @@ async function main() {
     const created = await PlatformUser.create({
       name: 'P8 Audience Check',
       email: MARKER,
-      password: 'P8-audience-check!',
+      password: `Tst-${randomBytes(9).toString('hex')}!9Aa`,
       role: 'owner',
       isActive: true,
     });

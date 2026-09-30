@@ -18,6 +18,7 @@
  */
 
 import 'dotenv/config';
+import { randomBytes } from 'crypto';
 import mongoose from 'mongoose';
 import User from '../src/models/User';
 import { INSTITUTE_ACCOUNT_CLAUSE, instituteStudentFilter } from '../src/utils/instituteAudience';
@@ -61,7 +62,7 @@ async function main() {
   const probe = await User.create({
     name: 'Isolation Probe',
     email: PROBE_EMAIL,
-    password: 'probe-password-123',
+    password: `Tst-${randomBytes(9).toString('hex')}!9Aa`,
     role: 'student',
     accountType: 'PUBLIC_LEARNER',
     status: 'approved',

@@ -44,12 +44,15 @@ import { registerTenancy, withoutTenantScope } from '../../src/core/tenancy';
 import { CURRICULUM_SUBJECTS } from '../../src/config/subjects';
 import { ROOMS, ROOM_CAPACITY } from '../../src/models/RoomAllocation';
 import { assignRoles, createCustomRole, provisionSystemRoles } from '../../src/core/rbac/provisionRoles';
-import { assertNotProduction } from './lib';
+import { assertNotProduction, requireEnv } from './lib';
 
 export const ORG_001 = {
   slug: 'abhigyan',
   name: 'Abhigyan Gurukull',
-  password: 'P6-fixture-abhigyan!',
+  // Not in the repository: set P6_FIXTURE_PASSWORD_ABHIGYAN (docs/manual-testing.md).
+  get password(): string {
+    return requireEnv('P6_FIXTURE_PASSWORD_ABHIGYAN');
+  },
   emails: {
     admin: 'p6.admin@abhigyan.fixture',
     teacher: 'p6.teacher@abhigyan.fixture',
@@ -60,7 +63,10 @@ export const ORG_001 = {
 export const ORG_002 = {
   slug: 'abc-coaching',
   name: 'ABC Coaching Institute',
-  password: 'P6-fixture-abc!',
+  // Not in the repository: set P6_FIXTURE_PASSWORD_ABC (docs/manual-testing.md).
+  get password(): string {
+    return requireEnv('P6_FIXTURE_PASSWORD_ABC');
+  },
   emails: {
     admin: 'p6.admin@abc.fixture',
     teacher: 'p6.teacher@abc.fixture',

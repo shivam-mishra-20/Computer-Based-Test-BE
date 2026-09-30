@@ -9,11 +9,11 @@
  * cannot create. So these are seeded directly, the same way the P6 tenant
  * fixture users are.
  *
- * These credentials are FIXTURE credentials in a scratch database. They are in
- * source for the same reason `P6-fixture-abhigyan!` is: a test that reads its
- * own password from somewhere unrecorded is a test nobody else can run. Nothing
- * here may ever be seeded into production, and `assertNotProduction` enforces
- * that rather than trusting it.
+ * These are FIXTURE accounts in a scratch database. Their passwords are not in
+ * the repository: they come from P10A_OWNER_PASSWORD and P10A_SUPPORT_PASSWORD,
+ * the same variables the console login suite reads (docs/manual-testing.md).
+ * Nothing here may ever be seeded into production, and `assertNotProduction`
+ * enforces that rather than trusting it.
  *
  * Passwords are hashed by the model's pre-save hook — `new` + `save()`, never
  * `updateOne` with a plaintext value, which is how a raw password reaches a
@@ -27,21 +27,25 @@
 import 'dotenv/config';
 import mongoose from 'mongoose';
 import { registerTenancy, withoutTenantScope } from '../../src/core/tenancy';
-import { assertNotProduction } from './lib';
+import { assertNotProduction, requireEnv } from './lib';
 
 process.env.REDIS_ENABLED = process.env.REDIS_ENABLED ?? 'false';
 
 export const CONSOLE_OWNER = {
   name: 'P10A Console Owner',
   email: 'p10a-owner@platform.test',
-  password: 'bootstrap-owner-password',
+  get password(): string {
+    return requireEnv('P10A_OWNER_PASSWORD');
+  },
   role: 'owner' as const,
 };
 
 export const CONSOLE_SUPPORT = {
   name: 'P10A Console Support',
   email: 'p10a-support@platform.test',
-  password: 'support-account-password',
+  get password(): string {
+    return requireEnv('P10A_SUPPORT_PASSWORD');
+  },
   role: 'support' as const,
 };
 
@@ -66,7 +70,7 @@ async function main() {
       await withoutTenantScope('console-fixture', async () => {
         // Deleted and recreated rather than updated: the password must go
         // through the pre-save hook, and a re-run must produce an account whose
-        // password is the one documented here even if a previous suite bumped
+        // password is the one set in the environment even if a previous suite bumped
         // tokenVersion or disabled it.
         await PlatformUser.deleteOne({ email: account.email });
         const created = new PlatformUser({

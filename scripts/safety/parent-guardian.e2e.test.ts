@@ -25,9 +25,11 @@
  */
 
 import { bootScratchApp, Checks, request, type Res } from './e2eHarness';
+import { randomBytes } from 'crypto';
 
 const RUN = `zz-guard-${process.pid}`;
-const PASSWORD = 'Guard!E2E-Passw0rd';
+// Generated per run — a throwaway account on a scratch database; never stored.
+const PASSWORD = `Tst-${randomBytes(9).toString('hex')}!9Aa`;
 
 async function main() {
   const t = new Checks();

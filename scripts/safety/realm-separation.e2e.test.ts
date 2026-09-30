@@ -35,6 +35,7 @@
  */
 
 import { spawn, spawnSync, type ChildProcess } from 'child_process';
+import { randomBytes } from 'crypto';
 import fs from 'fs';
 import net from 'net';
 import path from 'path';
@@ -44,9 +45,10 @@ import { assertNotProduction, configureDnsForSrv, requireEnv } from './lib';
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const RUN = `zz-realm-${process.pid}`;
-const PW_EXISTING = 'Realm-Existing!2026';
-const PW_PLATFORM = 'Realm-Platform!2026';
-const PW_TWIN = 'Realm-Twin!2026';
+// Generated per run — throwaway accounts on a scratch database; never stored.
+const PW_EXISTING = `Tst-${randomBytes(9).toString('hex')}!9Aa`;
+const PW_PLATFORM = `Tst-${randomBytes(9).toString('hex')}!9Aa`;
+const PW_TWIN = `Tst-${randomBytes(9).toString('hex')}!9Aa`;
 const EXISTING_DB = process.env.REALM_E2E_EXISTING_DB || 'abhigyangurukul_console_scratch_app';
 const PLATFORM_DB = process.env.REALM_E2E_PLATFORM_DB || 'p6_client_platform_web_scratch';
 

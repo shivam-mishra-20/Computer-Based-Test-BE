@@ -22,6 +22,7 @@
  */
 
 import http from 'http';
+import { randomBytes } from 'crypto';
 import type { AddressInfo } from 'net';
 
 // Registered before app import — models compile on require.
@@ -239,7 +240,7 @@ async function main() {
       // all, so it gets its own check rather than riding on the loop above.
       const login = await post(port, '/api/platform/login', {
         email: 'someone@platform.test',
-        password: 'whatever',
+        password: `Tst-${randomBytes(9).toString('hex')}!9Aa`,
       });
       check('POST /api/platform/login -> 404', login.status === 404, `got ${login.status}`);
       check(

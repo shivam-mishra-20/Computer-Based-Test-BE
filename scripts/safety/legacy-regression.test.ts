@@ -26,6 +26,7 @@
  */
 
 import http from 'http';
+import { randomBytes } from 'crypto';
 import type { AddressInfo } from 'net';
 import { config } from 'dotenv';
 import { assertNotProduction, configureDnsForSrv, redactUri, requireEnv } from './lib';
@@ -44,7 +45,8 @@ function deriveScratchUri(productionUri: string, suffix: string): string {
 }
 
 const PROBE_EMAIL = 'zz-legacy-regression-probe@internal.test';
-const PROBE_PASSWORD = 'Probe!Passw0rd-2026';
+// Generated per run — a throwaway account on a scratch database; never stored.
+const PROBE_PASSWORD = `Tst-${randomBytes(9).toString('hex')}!9Aa`;
 
 let failures = 0;
 let checks = 0;

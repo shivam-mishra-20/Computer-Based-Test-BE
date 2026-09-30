@@ -24,6 +24,7 @@
  */
 
 import http from 'http';
+import { randomBytes } from 'crypto';
 import type { AddressInfo } from 'net';
 import { config } from 'dotenv';
 import { assertNotProduction, configureDnsForSrv, redactUri, requireEnv } from './lib';
@@ -42,7 +43,8 @@ function deriveScratchUri(productionUri: string, suffix: string): string {
 }
 
 const MARKER = 'zz-reg';
-const PASSWORD = 'RegistrationE2E!Passw0rd';
+// Generated per run — a throwaway account on a scratch database; never stored.
+const PASSWORD = `Tst-${randomBytes(9).toString('hex')}!9Aa`;
 const INSTITUTE = 'Northgate Science Academy';
 const APPLICANT_EMAIL = `${MARKER}-principal@northgate.test`;
 

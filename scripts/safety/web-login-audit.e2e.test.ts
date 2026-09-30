@@ -39,6 +39,7 @@
  */
 
 import { existsSync, mkdirSync } from 'fs';
+import { randomBytes } from 'crypto';
 import { join } from 'path';
 import { config } from 'dotenv';
 import { assertNotProduction, configureDnsForSrv, requireEnv } from './lib';
@@ -53,7 +54,8 @@ const PHASE = (process.env.WL_PHASE || 'two-backends').trim();
 const SHOTS =
   process.env.WL_SHOTS || join(process.cwd(), 'docs', 'login-audit-screens');
 const RUN = `zz-wla-${process.pid}`;
-const PASSWORD = 'Login-Audit!2026';
+// Generated per run — a throwaway account on a scratch database; never stored.
+const PASSWORD = `Tst-${randomBytes(9).toString('hex')}!9Aa`;
 
 /** The neutral palette (lib/brand.ts NEUTRAL_BRAND) and the legacy one (tenant/branding.ts DEFAULT_BRAND). */
 const NEUTRAL_PRIMARY = '#4F46E5';

@@ -3,10 +3,22 @@
 Everything here runs against **scratch databases**. Nothing in this document
 touches `abhigyangurukul`, and the two helper scripts refuse to when asked.
 
-The credentials below are **fixture credentials that exist only in scratch
-databases**. They are in source (`seed-p6-fixture.ts`,
-`seed-console-login-fixture.ts`) so that anyone can re-run these tests. None of
-them exist in production, and none of them should ever be created there.
+The accounts below are **fixture accounts that exist only in scratch
+databases**. None of them exist in production, and none of them should ever be
+created there. Their passwords are **not in the repository**: choose your own
+values and set them in the environment (or your untracked `.env`) before
+seeding, and before running any suite that signs in with them:
+
+```powershell
+$env:P6_FIXTURE_PASSWORD_ABHIGYAN = "<choose one>"   # Org 001 tenant accounts
+$env:P6_FIXTURE_PASSWORD_ABC      = "<choose one>"   # Org 002 tenant accounts
+$env:P10A_OWNER_PASSWORD          = "<choose one>"   # console owner
+$env:P10A_SUPPORT_PASSWORD        = "<choose one>"   # console support
+```
+
+Re-running the two seed scripts below sets the fixture accounts' passwords to
+these values. Every other suite makes throwaway accounts with a password
+generated fresh for that run.
 
 Commands are written for PowerShell, which is the shell in use here. In Git Bash
 the only difference is `export VAR=value` instead of `$env:VAR = value`.
@@ -26,7 +38,7 @@ node -r ./scripts/safety/dns-preload.js -r ts-node/register/transpile-only scrip
 # Content: exams, questions, an attempt to review
 node -r ./scripts/safety/dns-preload.js -r ts-node/register/transpile-only scripts/safety/seed-p7-content.ts
 
-# Platform staff with known passwords
+# Platform staff (passwords from P10A_OWNER_PASSWORD / P10A_SUPPORT_PASSWORD)
 $env:CONSOLE_FIXTURE_MONGO_URI = $env:P6_MONGO_URI
 node -r ./scripts/safety/dns-preload.js -r ts-node/register/transpile-only scripts/safety/seed-console-login-fixture.ts
 ```
@@ -69,15 +81,15 @@ npm run p6:serve
 
 | Role | Email | Password | Holds |
 |---|---|---|---|
-| owner | `p10a-owner@platform.test` | `bootstrap-owner-password` | everything |
-| support | `p10a-support@platform.test` | `support-account-password` | `org.read`, `impersonate`, `audit.read` |
+| owner | `p10a-owner@platform.test` | `$env:P10A_OWNER_PASSWORD` | everything |
+| support | `p10a-support@platform.test` | `$env:P10A_SUPPORT_PASSWORD` | `org.read`, `impersonate`, `audit.read` |
 
 Two accounts on purpose: support is what tells a screen that is *hidden by
 capability* from one that is *broken*.
 
 ### Tenant users — the web and mobile clients
 
-**Org 001 — Abhigyan Gurukull** (`abhigyan`), password `P6-fixture-abhigyan!`
+**Org 001 — Abhigyan Gurukull** (`abhigyan`), password `$env:P6_FIXTURE_PASSWORD_ABHIGYAN`
 
 | Role | Email |
 |---|---|
@@ -86,7 +98,7 @@ capability* from one that is *broken*.
 | student | `p6.student@abhigyan.fixture` (Class 11, batch Aarambh) |
 | front desk | `p6.frontdesk@abhigyan.fixture` |
 
-**Org 002 — ABC Coaching Institute** (`abc-coaching`), password `P6-fixture-abc!`
+**Org 002 — ABC Coaching Institute** (`abc-coaching`), password `$env:P6_FIXTURE_PASSWORD_ABC`
 
 | Role | Email |
 |---|---|
@@ -188,7 +200,7 @@ Sign out, sign in as **support**:
 The hidden nav item is a convenience. This is the control:
 
 ```powershell
-$S = (curl.exe -s -X POST http://127.0.0.1:5055/api/platform/login -H "Content-Type: application/json" -d '{\"email\":\"p10a-support@platform.test\",\"password\":\"support-account-password\"}' | ConvertFrom-Json).token
+$S = (Invoke-RestMethod -Method Post -Uri http://127.0.0.1:5055/api/platform/login -ContentType "application/json" -Body (@{ email = "p10a-support@platform.test"; password = $env:P10A_SUPPORT_PASSWORD } | ConvertTo-Json)).token
 
 # the call the UI hides
 curl.exe -s -w "`nHTTP %{http_code}`n" http://127.0.0.1:5055/api/platform/staff -H "Authorization: Bearer $S"
@@ -219,7 +231,7 @@ Five properties, each of which is a decision rather than a default:
 # ── 1. Login needs NO credential of its own -> 200 ────────────────────────
 # If this ever 401s, the route has been mounted below its own auth guard,
 # which would mean signing in requires already being signed in.
-$P = (curl.exe -s -X POST http://127.0.0.1:5055/api/platform/login -H "Content-Type: application/json" -d '{\"email\":\"p10a-owner@platform.test\",\"password\":\"bootstrap-owner-password\"}' | ConvertFrom-Json).token
+$P = (Invoke-RestMethod -Method Post -Uri http://127.0.0.1:5055/api/platform/login -ContentType "application/json" -Body (@{ email = "p10a-owner@platform.test"; password = $env:P10A_OWNER_PASSWORD } | ConvertTo-Json)).token
 $P.Length   # a token, not an error
 
 # ── 2. Wrong password and unknown account are INDISTINGUISHABLE ───────────
@@ -235,7 +247,7 @@ $pad = $mid.PadRight([int][Math]::Ceiling($mid.Length/4)*4,'=')
 #    No orgId. Platform staff belong to no organization, by definition.
 
 # ── 4. A TENANT token cannot reach the platform surface ───────────────────
-$T = (curl.exe -s -X POST http://127.0.0.1:5055/api/auth/login -H "Content-Type: application/json" -d '{\"email\":\"p6.admin@abhigyan.fixture\",\"password\":\"P6-fixture-abhigyan!\"}' | ConvertFrom-Json).token
+$T = (Invoke-RestMethod -Method Post -Uri http://127.0.0.1:5055/api/auth/login -ContentType "application/json" -Body (@{ email = "p6.admin@abhigyan.fixture"; password = $env:P6_FIXTURE_PASSWORD_ABHIGYAN } | ConvertTo-Json)).token
 curl.exe -s -w "`nHTTP %{http_code}`n" http://127.0.0.1:5055/api/platform/orgs -H "Authorization: Bearer $T"
 # -> {"message":"This credential cannot be used for platform administration.",
 #     "code":"TOKEN_AUDIENCE_MISMATCH"}

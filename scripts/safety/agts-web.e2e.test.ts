@@ -14,6 +14,7 @@
  */
 
 import http from 'http';
+import { randomBytes } from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import { spawnSync } from 'child_process';
@@ -103,7 +104,7 @@ async function main() {
   try {
     // ── Fixtures ───────────────────────────────────────────────────────────
     const admin = await unscoped(() =>
-      User.create({ name: `${NAME} Admin`, email: `${RUN}-admin@example.test`, password: 'Agts-Web!2026', role: 'admin', status: 'approved' }),
+      User.create({ name: `${NAME} Admin`, email: `${RUN}-admin@example.test`, password: `Tst-${randomBytes(9).toString('hex')}!9Aa`, role: 'admin', status: 'approved' }),
     );
     adminId = String(admin._id);
     const adminToken = signSessionToken({ id: adminId, role: 'admin', tokenVersion: 0 });

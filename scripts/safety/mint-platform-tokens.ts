@@ -22,6 +22,7 @@
  */
 
 import 'dotenv/config';
+import { randomBytes } from 'crypto';
 import { writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
@@ -55,7 +56,7 @@ async function main() {
         account = await PlatformUser.create({
           name: `P6 ${role}`,
           email,
-          password: 'not-used-tokens-are-minted-directly',
+          password: `Tst-${randomBytes(9).toString('hex')}!9Aa`, // never used: tokens are minted directly
           role,
           isActive: true,
         });

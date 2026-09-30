@@ -5,6 +5,7 @@ import User from '../models/User';
 import { withoutTenantScope } from '../core/tenancy/context';
 import { isLegacyDatabase } from '../core/tenancy/dataSource';
 import { serviceRealm } from '../core/realm/realm';
+import { adminBootstrap } from './adminBootstrap';
 
 dotenv.config();
 
@@ -110,14 +111,18 @@ export const connectDB = async (): Promise<void> => {
       console.log('ℹ️ Existing-system database: bootstrap administrator not seeded');
       return;
     }
-    const adminEmail = process.env.ADMIN_EMAIL || 'admin@cbt.local';
-    const adminPassword = process.env.ADMIN_PASSWORD || 'Admin@123';
-    const adminName = process.env.ADMIN_NAME || 'System Admin';
+    // Only from ADMIN_EMAIL / ADMIN_PASSWORD — never a default (config/adminBootstrap.ts).
+    // In production a missing one has already stopped this process (server.ts).
+    const bootstrap = adminBootstrap();
+    if (bootstrap.action !== 'create') {
+      console.warn(`⚠️ Bootstrap administrator not created: ${bootstrap.reason}. Set both to create one.`);
+      return;
+    }
     await withoutTenantScope('bootstrap:seed-default-admin', async () => {
-      const existingAdmin = await User.findOne({ email: adminEmail, role: 'admin' });
+      const existingAdmin = await User.findOne({ email: bootstrap.email, role: 'admin' });
       if (!existingAdmin) {
-        await User.create({ name: adminName, email: adminEmail, password: adminPassword, role: 'admin' });
-        console.log(`👤 Default admin seeded: ${adminEmail}`);
+        await User.create({ name: bootstrap.name, email: bootstrap.email, password: bootstrap.password, role: 'admin' });
+        console.log(`👤 Default admin seeded: ${bootstrap.email}`);
       }
     });
   } catch (error) {

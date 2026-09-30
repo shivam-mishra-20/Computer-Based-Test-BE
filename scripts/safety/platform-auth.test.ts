@@ -28,6 +28,7 @@
  */
 
 import http from 'http';
+import { randomBytes } from 'crypto';
 import type { AddressInfo } from 'net';
 import { execFileSync } from 'child_process';
 import 'dotenv/config';
@@ -48,12 +49,13 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const MARKER = 'p10a';
+// Generated per run — throwaway accounts on a scratch database; never stored.
 const OWNER = {
   email: `${MARKER}-owner@platform.test`,
   name: 'P10A Owner',
-  password: 'a-long-enough-bootstrap-password',
+  password: `Tst-${randomBytes(9).toString('hex')}!9Aa`,
 };
-const SUPPORT = { email: `${MARKER}-support@platform.test`, password: 'support-password-long' };
+const SUPPORT = { email: `${MARKER}-support@platform.test`, password: `Tst-${randomBytes(9).toString('hex')}!9Aa` };
 
 let failures = 0;
 let checks = 0;
@@ -333,7 +335,7 @@ async function main() {
       {
         PLATFORM_OWNER_EMAIL: `${MARKER}-other@platform.test`,
         PLATFORM_OWNER_NAME: 'Other',
-        PLATFORM_OWNER_PASSWORD: 'another-long-password',
+        PLATFORM_OWNER_PASSWORD: `Tst-${randomBytes(9).toString('hex')}!9Aa`,
       },
       ['--scratch-suffix', suffix],
     );
@@ -388,7 +390,7 @@ async function main() {
     // ══════════════════════════════════════════════════════════════════════
 
     const wrongPassword = await request(port, 'POST', '/api/platform/login', {
-      body: { email: OWNER.email, password: 'not-the-password' },
+      body: { email: OWNER.email, password: `${OWNER.password}-wrong` },
     });
     eq('wrong password -> 401', wrongPassword.status, 401);
 

@@ -36,6 +36,7 @@
  */
 
 import http from 'http';
+import { randomBytes } from 'crypto';
 import type { AddressInfo } from 'net';
 import { config } from 'dotenv';
 import jwt from 'jsonwebtoken';
@@ -127,7 +128,8 @@ function request(
 /** A marker unique to this run, so concurrent or crashed runs never collide. */
 const RUN = `zz-reg-${process.pid}`;
 const MARK_EMAIL = `${RUN}`;
-const PASSWORD = 'RegE2E!Passw0rd';
+// Generated per run — a throwaway account on a scratch database; never stored.
+const PASSWORD = `Tst-${randomBytes(9).toString('hex')}!9Aa`;
 
 async function main() {
   const productionUri = requireEnv('MONGO_URI');

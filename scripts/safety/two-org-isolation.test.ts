@@ -20,6 +20,7 @@
  */
 
 import { config } from 'dotenv';
+import { randomBytes } from 'crypto';
 import { registerTenancy } from '../../src/core/tenancy';
 import { assertNotProduction, configureDnsForSrv, redactUri, requireEnv } from './lib';
 
@@ -114,7 +115,7 @@ async function main() {
         await User.create({
           name: `ABC Student ${i}`,
           email: `${ORG_002_MARKER}-${i}@abc-coaching.test`,
-          password: 'not-a-real-password',
+          password: `Tst-${randomBytes(9).toString('hex')}!9Aa`,
           role: 'student',
           classLevel: 'Dropper', // non-numeric on purpose — Org 002 differs
         });

@@ -39,16 +39,22 @@
 
 import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
+import { requireEnv } from './lib';
 
 const WEB_BASE = process.env.P6_WEB_BASE || 'http://127.0.0.1:3200';
 const API_BASE = process.env.P6_API_BASE || 'http://127.0.0.1:5055/api';
 const SHOTS = join(process.cwd(), 'docs', 'p6-screens');
 
+// Fixture passwords are not in the repository — set them in the environment
+// (docs/manual-testing.md). The seed scripts give the fixture accounts these values.
+const ABHIGYAN_PASSWORD = requireEnv('P6_FIXTURE_PASSWORD_ABHIGYAN');
+const ABC_PASSWORD = requireEnv('P6_FIXTURE_PASSWORD_ABC');
+
 const ORG_001 = {
   label: 'Abhigyan Gurukull',
   slug: 'abhigyan',
-  admin: { email: 'p6.admin@abhigyan.fixture', password: 'P6-fixture-abhigyan!' },
-  frontDesk: { email: 'p6.frontdesk@abhigyan.fixture', password: 'P6-fixture-abhigyan!' },
+  admin: { email: 'p6.admin@abhigyan.fixture', password: ABHIGYAN_PASSWORD },
+  frontDesk: { email: 'p6.frontdesk@abhigyan.fixture', password: ABHIGYAN_PASSWORD },
   classKeys: ['7', '8', '9', '10', '11', '12'],
   subjectCount: 15,
   rooms: ['Room 1', 'Room 11'],
@@ -59,8 +65,8 @@ const ORG_001 = {
 const ORG_002 = {
   label: 'ABC Coaching Institute',
   slug: 'abc-coaching',
-  admin: { email: 'p6.admin@abc.fixture', password: 'P6-fixture-abc!' },
-  frontDesk: { email: 'p6.frontdesk@abc-coaching.fixture', password: 'P6-fixture-abc!' },
+  admin: { email: 'p6.admin@abc.fixture', password: ABC_PASSWORD },
+  frontDesk: { email: 'p6.frontdesk@abc-coaching.fixture', password: ABC_PASSWORD },
   classKeys: ['9', '10', '11', '12', 'dropper'],
   subjectCount: 4,
   rooms: ['Hall A', 'Hall B', 'Lab 1', 'Lab 2'],

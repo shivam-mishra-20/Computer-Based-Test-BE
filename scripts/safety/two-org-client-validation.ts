@@ -27,6 +27,8 @@
  *          scripts/safety/two-org-client-validation.ts
  */
 
+import { requireEnv } from './lib';
+
 const API = process.env.API || 'http://127.0.0.1:5000';
 
 let failures = 0;
@@ -48,11 +50,16 @@ interface Account {
   password: string;
 }
 
+// Fixture passwords are not in the repository — set them in the environment
+// (docs/manual-testing.md). The seed scripts give the fixture accounts these values.
+const ABHIGYAN_PASSWORD = requireEnv('P6_FIXTURE_PASSWORD_ABHIGYAN');
+const ABC_PASSWORD = requireEnv('P6_FIXTURE_PASSWORD_ABC');
+
 const ACCOUNTS: Account[] = [
-  { org: 'Org 001', role: 'student', email: 'p6.student@abhigyan.fixture', password: 'P6-fixture-abhigyan!' },
-  { org: 'Org 001', role: 'admin', email: 'p6.admin@abhigyan.fixture', password: 'P6-fixture-abhigyan!' },
-  { org: 'Org 002', role: 'student', email: 'p6.student@abc.fixture', password: 'P6-fixture-abc!' },
-  { org: 'Org 002', role: 'admin', email: 'p6.admin@abc.fixture', password: 'P6-fixture-abc!' },
+  { org: 'Org 001', role: 'student', email: 'p6.student@abhigyan.fixture', password: ABHIGYAN_PASSWORD },
+  { org: 'Org 001', role: 'admin', email: 'p6.admin@abhigyan.fixture', password: ABHIGYAN_PASSWORD },
+  { org: 'Org 002', role: 'student', email: 'p6.student@abc.fixture', password: ABC_PASSWORD },
+  { org: 'Org 002', role: 'admin', email: 'p6.admin@abc.fixture', password: ABC_PASSWORD },
 ];
 
 async function call(path: string, token?: string): Promise<{ status: number; body: any }> {

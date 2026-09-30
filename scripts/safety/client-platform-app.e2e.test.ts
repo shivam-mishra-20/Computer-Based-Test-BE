@@ -32,10 +32,16 @@
 
 import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
+import { requireEnv } from './lib';
 
 const APP_BASE = process.env.P7_APP_BASE || 'http://127.0.0.1:3300';
 const API_BASE = process.env.P7_API_BASE || 'http://127.0.0.1:5055/api';
 const SHOTS = join(process.cwd(), 'docs', 'p7-screens');
+
+// Fixture passwords are not in the repository — set them in the environment
+// (docs/manual-testing.md). The seed scripts give the fixture accounts these values.
+const ABHIGYAN_PASSWORD = requireEnv('P6_FIXTURE_PASSWORD_ABHIGYAN');
+const ABC_PASSWORD = requireEnv('P6_FIXTURE_PASSWORD_ABC');
 
 const ORG_001 = {
   label: 'Abhigyan Gurukull',
@@ -48,10 +54,10 @@ const ORG_001 = {
   marking: { correct: 1, incorrect: 0, unattempted: 0 },
   violationThreshold: 10,
   branded: false,
-  admin: { email: 'p6.admin@abhigyan.fixture', password: 'P6-fixture-abhigyan!' },
-  teacher: { email: 'p6.teacher@abhigyan.fixture', password: 'P6-fixture-abhigyan!' },
-  student: { email: 'p6.student@abhigyan.fixture', password: 'P6-fixture-abhigyan!' },
-  frontDesk: { email: 'p6.frontdesk@abhigyan.fixture', password: 'P6-fixture-abhigyan!' },
+  admin: { email: 'p6.admin@abhigyan.fixture', password: ABHIGYAN_PASSWORD },
+  teacher: { email: 'p6.teacher@abhigyan.fixture', password: ABHIGYAN_PASSWORD },
+  student: { email: 'p6.student@abhigyan.fixture', password: ABHIGYAN_PASSWORD },
+  frontDesk: { email: 'p6.frontdesk@abhigyan.fixture', password: ABHIGYAN_PASSWORD },
 };
 
 const ORG_002 = {
@@ -66,10 +72,10 @@ const ORG_002 = {
   violationThreshold: 3,
   branded: true,
   primaryColor: 'rgb(232, 89, 12)',
-  admin: { email: 'p6.admin@abc.fixture', password: 'P6-fixture-abc!' },
-  teacher: { email: 'p6.teacher@abc.fixture', password: 'P6-fixture-abc!' },
-  student: { email: 'p6.student@abc.fixture', password: 'P6-fixture-abc!' },
-  frontDesk: { email: 'p6.frontdesk@abc-coaching.fixture', password: 'P6-fixture-abc!' },
+  admin: { email: 'p6.admin@abc.fixture', password: ABC_PASSWORD },
+  teacher: { email: 'p6.teacher@abc.fixture', password: ABC_PASSWORD },
+  student: { email: 'p6.student@abc.fixture', password: ABC_PASSWORD },
+  frontDesk: { email: 'p6.frontdesk@abc-coaching.fixture', password: ABC_PASSWORD },
 };
 
 let failures = 0;
