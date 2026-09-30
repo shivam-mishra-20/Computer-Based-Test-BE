@@ -33,7 +33,9 @@ const createRedisStore = (prefix: string) => {
         console.error(`⚠️ Rate limit store unavailable (${prefix}):`, error?.message);
         throw error;
       }),
-    prefix,
+    // The platform runtime counts its own traffic (REDIS_KEY_NAMESPACE, empty
+    // for the existing system — its counters keep their names).
+    prefix: `${(process.env.REDIS_KEY_NAMESPACE || '').trim()}${prefix}`,
   });
 };
 

@@ -8,9 +8,22 @@
  * instead of above it — which would make login itself require a login. Only the
  * assembled app can catch that, so the app is what runs.
  *
- * Scratch database only. `assertNotProduction` refuses anything else.
+ * Scratch database only. `assertNotProduction` refuses anything else — including
+ * both protected databases: `abhigyangurukul` (the existing system, the
+ * protected legacy database) and `abhigyangurukul_console` (the platform).
  *
- *   P10A_MONGO_URI=<scratch> node -r ./scripts/safety/dns-preload.js \
+ * The bootstrap script targets the PLATFORM database (PLATFORM_MONGODB_URI,
+ * `abhigyangurukul_console`) and derives its rehearsal database from it —
+ * `<platform database>_<suffix>` — never from MONGO_URI. So this suite's scratch
+ * must be named that way, on the platform database's cluster, e.g.
+ * `abhigyangurukul_console_p10a_scratch`. The environment must also be the
+ * realm-separated one the script insists on (PLATFORM_MONGODB_URI set,
+ * LEGACY_DB_NAMES naming `abhigyangurukul`, MONGO_URI naming a different
+ * database than PLATFORM_MONGODB_URI), or the script refuses before the checks
+ * below can run.
+ *
+ *   P10A_MONGO_URI=<cluster>/abhigyangurukul_console_p10a_scratch \
+ *     node -r ./scripts/safety/dns-preload.js \
  *     -r ts-node/register/transpile-only scripts/safety/platform-auth.test.ts
  */
 
@@ -27,7 +40,7 @@ process.env.TENANT_MODE = 'claim';
 process.env.TENANT_ENFORCEMENT = 'warn';
 
 import { registerTenancy, withoutTenantScope } from '../../src/core/tenancy';
-import { assertNotProduction } from './lib';
+import { assertNotProduction, describeUri, requireEnv } from './lib';
 import { signPlatformToken, signLegacyToken } from '../../src/core/auth/tokens';
 
 process.on('unhandledRejection', (reason) => {
@@ -140,7 +153,35 @@ async function main() {
   if (!uri) throw new Error('P10A_MONGO_URI must name a scratch database.');
   assertNotProduction(uri, process.env.MONGO_URI as string);
 
-  const suffix = uri.split('/').pop()!.split('?')[0].replace(/^[^_]*_/, '');
+  // The bootstrap derives its rehearsal database from the PLATFORM database
+  // (`<platform database>_<suffix>`, on its cluster), never from MONGO_URI — so
+  // the suffix is what follows the platform database's name in this scratch's.
+  const platformUri = requireEnv('PLATFORM_MONGODB_URI');
+  assertNotProduction(uri, platformUri);
+  const platformDb = describeUri(platformUri);
+  const scratchDb = describeUri(uri);
+  if (!platformDb || !scratchDb || scratchDb.host !== platformDb.host || !scratchDb.db.startsWith(`${platformDb.db}_`)) {
+    throw new Error(
+      'P10A_MONGO_URI must name a scratch copy of the platform database, on its cluster: ' +
+        `${platformDb?.db ?? '<platform database>'}_<suffix> (e.g. ${platformDb?.db ?? 'abhigyangurukul_console'}_p10a_scratch).`,
+    );
+  }
+  const suffix = scratchDb.db.slice(platformDb.db.length + 1);
+
+  // The script refuses before any check below can run unless the realms are
+  // configured the way it requires — say that once, here.
+  const legacyNames = (process.env.LEGACY_DB_NAMES || '')
+    .split(',')
+    .map((name) => name.trim().toLowerCase())
+    .filter(Boolean);
+  const existingDb = describeUri(process.env.MONGODB_URI || process.env.MONGO_URI || '')?.db.toLowerCase();
+  if (!legacyNames.length || legacyNames.includes(platformDb.db.toLowerCase()) || existingDb === platformDb.db.toLowerCase()) {
+    throw new Error(
+      'This suite needs the realm-separated environment the bootstrap requires: LEGACY_DB_NAMES ' +
+        'naming the protected legacy database (abhigyangurukul), and MONGO_URI (…/abhigyangurukul) and ' +
+        'PLATFORM_MONGODB_URI (…/abhigyangurukul_console) naming different databases.',
+    );
+  }
 
   registerTenancy();
   await mongoose.connect(uri, { serverSelectionTimeoutMS: 30000 });

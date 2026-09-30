@@ -289,8 +289,8 @@ export function validateMobileIdentity(
     if (profile === 'production' && /^http:\/\//i.test(apiBaseUrl)) {
       fail('apiBaseUrl', 'A production build must use https.');
     }
-    if (!/\/api$/.test(apiBaseUrl)) {
-      fail('apiBaseUrl', `"${apiBaseUrl}" should end with /api — the suffix is part of the base, not something the client appends.`);
+    if (!/\/(?:platform-)?api$/.test(apiBaseUrl)) {
+      fail('apiBaseUrl', `"${apiBaseUrl}" should end with /platform-api (or /api on a host that serves only the platform) — the suffix is part of the base, not something the client appends.`);
     }
   }
 

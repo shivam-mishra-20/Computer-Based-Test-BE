@@ -7,10 +7,13 @@
  * with TENANT_REQUIRED ("This account is not attached to an organization"),
  * because claim mode demands an organization and legacy accounts have none.
  *
- * What must hold once the database is listed in LEGACY_DB_NAMES:
+ * Since the realm split (core/realm/realm.ts) the EXISTING system — the main
+ * process, /api/* — never runs claim mode, whether or not its database is
+ * listed in LEGACY_DB_NAMES. What must hold for it:
  *
  *   · claim mode is overridden to legacy (pre-migration) mode at boot, and
- *     nothing is created, indexed, seeded or scheduled;
+ *     nothing is created, indexed or seeded — while its own cron and PPT
+ *     worker keep running exactly as configured;
  *   · legacy accounts sign in and use the API — no TENANT_REQUIRED;
  *   · organization accounts are refused: at sign-in, on refresh, and with a
  *     token issued elsewhere (ORGANIZATION_ACCOUNT);
@@ -101,9 +104,14 @@ async function main() {
         },
       });
 
-    /* ══ 0. The bug, as reported ═════════════════════════════════════════ */
+    /* ══ 0. The organization rule, where it belongs ═════════════════════ */
+    // The harness boots the PLATFORM realm (claim mode through /api/*): there,
+    // an account with no organization is refused. That rule is correct on
+    // /platform-api/* and must never reach the existing system — which is
+    // exactly what reached it after the merge. Section 2 switches this process
+    // to the existing system.
     t.section(
-      'before: claim mode on a legacy-style database (what was reported)',
+      'platform realm: an account with no organization is refused (TENANT_REQUIRED)',
     );
     delete process.env.LEGACY_DB_NAMES;
     const before = await login('legacy');
@@ -120,6 +128,7 @@ async function main() {
     t.section(
       'nothing is hardcoded: the classification comes from the environment',
     );
+    delete process.env.LEGACY_DB_NAMES;
     t.check(
       'LEGACY_DB_NAMES unset → the real legacy name is NOT treated as legacy',
       !dataSource.isLegacyDatabase(
@@ -141,7 +150,11 @@ async function main() {
     );
 
     /* ══ 2. The boot policy ══════════════════════════════════════════════ */
-    t.section('boot policy on a listed database');
+    // From here on this process is the EXISTING system — what the main
+    // process serving /api/* always is (core/realm/realm.ts).
+    t.section('boot policy of the existing system (/api/*)');
+    process.env.SERVICE_REALM = 'existing';
+    delete process.env.LEGACY_DB_NAMES; // the realm decides, not the database's name
     process.env.TENANT_MODE = 'claim';
     process.env.TENANT_ENFORCEMENT = 'warn';
     process.env.ENABLE_CRON = 'true';
@@ -149,17 +162,18 @@ async function main() {
     const policy = dataSource.applyDataSourcePolicy();
     clearOrgStateCache();
     t.check(
-      'it is recognised as legacy',
-      policy.legacy === true && policy.database === dbName,
+      'it is the existing system, on this database',
+      policy.realm === 'existing' && policy.legacy === true && policy.database === dbName,
     );
     t.check(
-      'claim mode is overridden to legacy mode',
+      'claim mode is not applied to /api/* — with LEGACY_DB_NAMES unset',
       process.env.TENANT_MODE === '' && process.env.TENANT_ENFORCEMENT === '',
     );
     t.check(
-      'cron and embedded workers are off',
-      process.env.ENABLE_CRON === 'false' &&
-        process.env.PPT_WORKER_EMBEDDED === 'false',
+      "the existing system's cron and PPT worker are NOT turned off",
+      process.env.ENABLE_CRON === 'true' &&
+        process.env.PPT_WORKER_EMBEDDED === 'true',
+      `ENABLE_CRON=${process.env.ENABLE_CRON} PPT_WORKER_EMBEDDED=${process.env.PPT_WORKER_EMBEDDED}`,
     );
     t.check(
       'collections and indexes are not created',

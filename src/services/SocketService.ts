@@ -126,7 +126,12 @@ class SocketService {
      * worker and is a far better outcome than refusing to start.
      */
     if (isRedisEnabled) {
-      this.io.adapter(createAdapter(redisPublisher, redisSubscriber));
+      // The platform runtime shares Redis with the existing system; its own
+      // key keeps a room name such as `class:11` from carrying one system's
+      // events to the other's sockets. The existing system keeps the default.
+      this.io.adapter(
+        createAdapter(redisPublisher, redisSubscriber, { key: process.env.SOCKET_ADAPTER_KEY || 'socket.io' }),
+      );
       console.log('✅ Socket.IO Redis adapter initialized');
     } else {
       console.warn(

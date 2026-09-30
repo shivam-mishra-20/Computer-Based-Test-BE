@@ -67,6 +67,8 @@ import { requireModule } from './middlewares/requireModule';
 import orgPublicRoutes from './routes/api/orgPublicRoutes';
 import platformRoutes from './routes/api/platformRoutes';
 import { requirePlatformDeployment } from './middlewares/requirePlatformDeployment';
+import { serviceRealm } from './core/realm/realm';
+import { createPlatformGateway, platformRuntimeEntry } from './core/realm/platformGateway';
 import path from 'path';
 // Use require to avoid transient module resolution issues in some TS setups
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -82,6 +84,29 @@ app.disable('x-powered-by');
 
 // Trust proxy for proper IP detection behind load balancers
 app.set('trust proxy', 1);
+
+/*
+ * ── Two systems, one server ─────────────────────────────────────────────────
+ * /api/*           the existing system, served by THIS app in the main process,
+ *                  on the existing database, with the existing authentication
+ *                  and roles. No organization is required anywhere under it.
+ * /platform-api/*  the organization platform: forwarded, before anything below
+ *                  runs, to the platform runtime — the same application in its
+ *                  own process, on the platform database, where organization
+ *                  resolution and org-scoped authorization apply
+ *                  (core/realm/realm.ts).
+ *
+ * Nothing of the platform's request pipeline runs for /api/*, and nothing of
+ * the existing system's (CORS, limits, parsing) runs twice for /platform-api/*.
+ */
+if (serviceRealm() === 'platform') {
+  app.use(platformRuntimeEntry);
+} else {
+  // The gateway's own answers (a 503 while the platform runtime is not
+  // serving) carry this server's CORS headers, so a browser can read why;
+  // what it forwards is answered under the runtime's own CORS.
+  app.use('/platform-api', createPlatformGateway({ cors: (req, res, next) => cors(corsOptions)(req, res, next) }));
+}
 
 // CORS configuration - allow credentials and Authorization header
 // When credentials is true, origin cannot be '*', so we use a function to dynamically allow origins
@@ -380,7 +405,9 @@ app.use('/api/admin-assessments', publicTestAdminRoutes); // Staff authoring for
 app.use('/api/users', userRoutes);
 app.use('/api/parent', parentRoutes); // Parent-scoped: verified wards only
 app.use('/api/guardian-links', guardianLinkRoutes); // Org admins review parent links
-app.use('/api/org-admin', orgAdminRoutes); // An institute's admins manage their OWN organization
+// An institute's admins manage their OWN organization. Platform only: the
+// existing system has no organizations, so there it is not served at all.
+app.use('/api/org-admin', requirePlatformDeployment, orgAdminRoutes);
 app.use('/api/tests', testRoutes);
 app.use('/api/exams', examRoutes);
 app.use('/api/attempts', attemptRoutes);

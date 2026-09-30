@@ -22,6 +22,10 @@ const ownsSyllabus = (syllabus: any, user: any) =>
   syllabus.teacherId === user.firebaseUid;
 const mayChange = (syllabus: any, user: any) => isAdmin(user) || ownsSyllabus(syllabus, user);
 
+/** What makes two active syllabi "the same one" — the rule creating a syllabus enforces. */
+const identityOf = (s: any) =>
+  [s.teacherId, s.subject, s.classLevel, s.batch || '', s.academicYear].map((v) => String(v ?? '')).join('|');
+
 /**
  * Chapters as the client sent them, with the one change topics being optional
  * needs: blank topics are dropped (a chapter may have none), and a chapter
@@ -288,6 +292,23 @@ router.put('/:syllabusId', authMiddleware, async (req: Request, res: Response) =
 
     const { subject, classLevel, batch, academicYear, items } = req.body;
     const chapters = cleanChapters(req.body?.chapters, (syllabus.chapters || []) as any[]);
+    const identityBefore = identityOf(syllabus);
+
+    // An admin may hand the syllabus to another teacher — the same rule as
+    // creating one on a teacher's behalf. A teacherId from anyone else is
+    // ignored, exactly as before.
+    const reassignTo = isAdmin(user) ? String(req.body?.teacherId || '').trim() : '';
+    if (reassignTo && reassignTo !== syllabus.teacherId) {
+      if (!mongoose.Types.ObjectId.isValid(reassignTo)) {
+        return res.status(400).json({ error: 'Invalid teacher' });
+      }
+      const teacher = await User.findOne({ _id: reassignTo, role: 'teacher' });
+      if (!teacher) {
+        return res.status(404).json({ error: 'Teacher not found' });
+      }
+      syllabus.teacherId = teacher.firebaseUid || teacher._id?.toString();
+      syllabus.teacherName = teacher.name;
+    }
 
     if (subject) syllabus.subject = subject;
     if (classLevel) syllabus.classLevel = classLevel;
@@ -295,6 +316,27 @@ router.put('/:syllabusId', authMiddleware, async (req: Request, res: Response) =
     if (academicYear) syllabus.academicYear = academicYear;
     if (items) syllabus.items = items; // Legacy support
     if (chapters) syllabus.chapters = chapters as any; // New structure (topics optional)
+
+    // An edit may not turn this into a copy of another active syllabus — the
+    // rule creating one follows. Checked only when what identifies it changed,
+    // so progress updates to syllabi that already clash keep working.
+    if (identityOf(syllabus) !== identityBefore) {
+      const clash = await Syllabus.findOne({
+        _id: { $ne: syllabus._id },
+        teacherId: syllabus.teacherId,
+        subject: syllabus.subject,
+        classLevel: syllabus.classLevel,
+        batch: syllabus.batch || null,
+        academicYear: syllabus.academicYear,
+        isActive: true,
+      });
+      if (clash) {
+        return res.status(400).json({
+          error: 'A syllabus for this teacher, subject, class, batch and academic year already exists',
+          existingId: clash._id,
+        });
+      }
+    }
 
     await syllabus.save();
 

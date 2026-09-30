@@ -24,6 +24,7 @@
 import { NextFunction, Request, Response } from 'express';
 import { currentOrgId, withoutTenantScope } from '../core/tenancy/context';
 import { legacyDataOrgId, tenancyConfigured } from '../core/tenancy/config';
+import { serviceRealm } from '../core/realm/realm';
 
 function notAvailable(res: Response, feature: string) {
   return res.status(404).json({
@@ -34,6 +35,9 @@ function notAvailable(res: Response, feature: string) {
 
 /** True when the current request's organization owns the legacy, un-partitioned data. */
 export function isLegacyDataOwnerRequest(): boolean {
+  // /api/* IS the institute these systems belong to — the gate is the
+  // platform's question, not the existing system's.
+  if (serviceRealm() === 'existing') return true;
   if (!tenancyConfigured()) return true;
   const orgId = currentOrgId();
   const owner = legacyDataOrgId();
@@ -70,6 +74,7 @@ async function isPlatformOwnedOrg(orgId: string): Promise<boolean> {
  */
 export function requirePlatformOwnedOrg(feature: string) {
   return async (_req: Request, res: Response, next: NextFunction) => {
+    if (serviceRealm() === 'existing') return next();
     if (!tenancyConfigured()) return next();
     const orgId = currentOrgId();
     try {

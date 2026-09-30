@@ -168,7 +168,10 @@ async function main() {
     t.check('a paper the bank cannot fill (20 per subject) is not offered', !listed.includes(P5.shareLink));
     const p1View = (tests.json?.tests || []).find((x: any) => x.ref === P1.shareLink);
     t.check('a paper stored as "Scholarship Test" is shown as an AGTS paper', p1View?.name === 'AGTS · Class 11 · 30 questions · 60 min', p1View?.name);
-    t.check('no scholarship wording anywhere in the paper list', !/scholarship/i.test(JSON.stringify(tests.json?.tests || [])));
+    // What a family reads — everything but `ref`, the stored record's own opaque
+    // share link (existing records are read-only and keep theirs).
+    const shown = (tests.json?.tests || []).map(({ ref: _ref, ...visible }: any) => visible);
+    t.check('no scholarship wording anywhere a family reads in the paper list', !/scholarship/i.test(JSON.stringify(shown)), JSON.stringify(shown).slice(0, 200));
     const tooBig = await call('POST', '/api/agts/register', { body: reg(8, { testRef: P5.shareLink }) });
     t.check('starting the unfillable paper → 503, and no lead is written', tooBig.status === 503 && !(await leadOf(phone(8))), brief(tooBig));
     const badRef = await call('GET', '/api/agts/tests/..%2Fetc');
@@ -234,11 +237,11 @@ async function main() {
     t.check('no key → 404', noKey.status === 404, brief(noKey));
     const wrongKey = await call('GET', `/api/agts/attempts/${att1}`, { key: r2.json?.attemptAccessKey });
     t.check('another attempt\'s key → 404 (same as not found)', wrongKey.status === 404, brief(wrongKey));
-    const paper = await call('GET', `/api/agts/attempts/${att1}`, { key: key1 });
-    t.check('right key → 200 with 30 questions', paper.status === 200 && paper.json?.questions?.length === 30, brief(paper));
-    t.check('no answer key anywhere in the paper', !/isCorrect|correctAnswerText|integerAnswer|explanation/.test(paper.raw));
-    t.check('no phone number in the paper', !paper.raw.includes(phone(1)));
-    const qs: string[] = (paper.json?.questions || []).map((q: any) => q._id);
+    const paperView = await call('GET', `/api/agts/attempts/${att1}`, { key: key1 });
+    t.check('right key → 200 with 30 questions', paperView.status === 200 && paperView.json?.questions?.length === 30, brief(paperView));
+    t.check('no answer key anywhere in the paper', !/isCorrect|correctAnswerText|integerAnswer|explanation/.test(paperView.raw));
+    t.check('no phone number in the paper', !paperView.raw.includes(phone(1)));
+    const qs: string[] = (paperView.json?.questions || []).map((q: any) => q._id);
 
     // ── 6. Answering ───────────────────────────────────────────────────────
     t.section('answering');

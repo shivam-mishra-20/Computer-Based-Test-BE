@@ -255,6 +255,20 @@ It creates the very first platform account, and it is the only way in — `POST
 /api/platform/staff` requires an authenticated platform user holding
 `staff.manage`, which is a deadlock on an empty collection.
 
+**Which database.** Platform staff live in the PLATFORM database, and the
+script targets only that one: `PLATFORM_MONGODB_URI` → `abhigyangurukul_console`
+— never `MONGO_URI`, and with no fallback (unset, it stops). `abhigyangurukul` is
+the protected legacy database: the script refuses any target listed in
+`LEGACY_DB_NAMES` or named by `MONGO_URI`, before connecting and again on the
+live connection, and prints the database it is about to use. So `.env` (or the
+terminal) needs:
+
+```
+MONGO_URI=<cluster>/abhigyangurukul                  # /api — the existing system
+PLATFORM_MONGODB_URI=<cluster>/abhigyangurukul_console   # platform staff live here
+LEGACY_DB_NAMES=abhigyangurukul                      # required for --production
+```
+
 **Rehearse the refusals first.** Each should refuse and say why:
 
 ```powershell
@@ -269,8 +283,10 @@ npx ts-node --transpile-only scripts/bootstrap-platform-owner.ts --production
 npx ts-node --transpile-only scripts/bootstrap-platform-owner.ts --production --remove
 ```
 
-**Then the real thing, on a scratch database with no owner.**
-`abhigyangurukul_p10a_scratch` is kept empty for exactly this:
+**Then the real thing, on a scratch database with no owner.** The rehearsal
+database is derived from the platform database — `<platform database>_<suffix>`
+— so `--scratch-suffix p10a_scratch` targets `abhigyangurukul_console_p10a_scratch`,
+kept empty for exactly this:
 
 ```powershell
 $env:PLATFORM_OWNER_EMAIL = "you@example.com"
@@ -284,14 +300,17 @@ npx ts-node --transpile-only scripts/bootstrap-platform-owner.ts --scratch-suffi
 Then confirm the account it made can actually sign in:
 
 ```powershell
-$env:P6_MONGO_URI = npm run --silent platform:uri abhigyangurukul_p10a_scratch
+$env:P6_MONGO_URI = npm run --silent platform:uri abhigyangurukul_console_p10a_scratch
 $env:P6_PORT = "5056"
 npm run p6:serve
 
 curl.exe -s -X POST http://127.0.0.1:5056/api/platform/login -H "Content-Type: application/json" -d '{\"email\":\"you@example.com\",\"password\":\"<what you typed>\"}'
 ```
 
-**Production — Step 25 of the cutover runbook — is yours to run, not mine:**
+**Production — Step 25 of the cutover runbook — is yours to run, not mine.** It
+writes to `PLATFORM_MONGODB_URI` (`abhigyangurukul_console`) and needs
+`LEGACY_DB_NAMES=abhigyangurukul`; check the printed target database before
+typing the password:
 
 ```powershell
 $env:PLATFORM_OWNER_EMAIL = "..."
@@ -372,7 +391,8 @@ If something looks wrong by hand, these say whether it is new:
 ```powershell
 npm run safety:all                      # 14 suites, no servers needed
 
-$env:P10A_MONGO_URI = npm run --silent platform:uri abhigyangurukul_p10a_scratch
+# a scratch copy of the PLATFORM database; needs PLATFORM_MONGODB_URI and LEGACY_DB_NAMES (§5)
+$env:P10A_MONGO_URI = npm run --silent platform:uri abhigyangurukul_console_p10a_scratch
 npm run safety:platform-auth            # 61 — login + bootstrap
 
 # with p6:serve on 5055 and the console on 3100 (both suites default to those):

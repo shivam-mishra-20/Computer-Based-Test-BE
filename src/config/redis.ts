@@ -78,6 +78,15 @@ export const closeRedis = async () => {
   console.log('Redis connections closed');
 };
 
+/**
+ * The key namespace of this process's realm. Empty for the existing system, so
+ * its keys are exactly what they always were; the platform runtime sets its own
+ * (core/realm/realm.ts), because both share one Redis and a response cached
+ * for `/api/schedule/teachers` by one system must never be served by the other.
+ */
+export const REDIS_KEY_NAMESPACE = (process.env.REDIS_KEY_NAMESPACE || '').trim();
+const namespaced = (key: string): string => `${REDIS_KEY_NAMESPACE}${key}`;
+
 // Cache helper functions
 export const cacheService = {
   /**
@@ -85,7 +94,7 @@ export const cacheService = {
    */
   async get<T>(key: string): Promise<T | null> {
     try {
-      const value = await redisClient.get(key);
+      const value = await redisClient.get(namespaced(key));
       return value ? JSON.parse(value) : null;
     } catch (error) {
       console.error(`Cache GET error for key ${key}:`, error);
@@ -98,7 +107,7 @@ export const cacheService = {
    */
   async set(key: string, value: any, ttl: number = 300): Promise<void> {
     try {
-      await redisClient.setex(key, ttl, JSON.stringify(value));
+      await redisClient.setex(namespaced(key), ttl, JSON.stringify(value));
     } catch (error) {
       console.error(`Cache SET error for key ${key}:`, error);
     }
@@ -109,7 +118,7 @@ export const cacheService = {
    */
   async del(key: string): Promise<void> {
     try {
-      await redisClient.del(key);
+      await redisClient.del(namespaced(key));
     } catch (error) {
       console.error(`Cache DEL error for key ${key}:`, error);
     }
@@ -120,7 +129,8 @@ export const cacheService = {
    */
   async delPattern(pattern: string): Promise<void> {
     try {
-      const keys = await redisClient.keys(pattern);
+      // KEYS returns full key names, which are deleted as they are.
+      const keys = await redisClient.keys(namespaced(pattern));
       if (keys.length > 0) {
         await redisClient.del(...keys);
       }
@@ -134,7 +144,7 @@ export const cacheService = {
    */
   async exists(key: string): Promise<boolean> {
     try {
-      return (await redisClient.exists(key)) === 1;
+      return (await redisClient.exists(namespaced(key))) === 1;
     } catch (error) {
       console.error(`Cache EXISTS error for key ${key}:`, error);
       return false;

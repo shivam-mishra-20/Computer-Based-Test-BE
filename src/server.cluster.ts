@@ -10,7 +10,11 @@ import os from 'os';
  * - Multiple servers: Use PM2 or Kubernetes for orchestration
  */
 
-if (cluster.isPrimary) {
+// A platform runtime forked from a worker runs this same bundle (its entry is
+// this file). It is one server process, never another cluster.
+const isPlatformRuntime = (process.env.SERVICE_REALM || '').trim().toLowerCase() === 'platform';
+
+if (cluster.isPrimary && !isPlatformRuntime) {
   const numCPUs = os.cpus().length;
   const numWorkers = parseInt(process.env.WORKER_PROCESSES || String(numCPUs), 10);
 

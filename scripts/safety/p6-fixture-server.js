@@ -62,6 +62,13 @@ if (mode !== 'platform' && mode !== 'legacy') {
 }
 
 process.env.MONGO_URI = uri;
+// One scratch database per fixture, whatever `.env` names: never a second one
+// (MONGODB_URI) and never a platform runtime beside it (PLATFORM_MONGODB_URI).
+process.env.MONGODB_URI = '';
+process.env.PLATFORM_MONGODB_URI = '';
+// Platform mode IS the platform runtime (standalone: it answers /api/* and
+// /platform-api/* itself); legacy mode is the existing system.
+process.env.SERVICE_REALM = mode === 'legacy' ? '' : 'platform';
 if (mode === 'legacy') {
   // Empty, not deleted: `.env` sets TENANT_MODE, and a later dotenv load would
   // restore a DELETED key — it never overwrites one that is present. Empty

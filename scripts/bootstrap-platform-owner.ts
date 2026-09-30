@@ -17,6 +17,17 @@
  * their own collection with their own token audience, and a bootstrap that
  * blurred it would undo the whole point.
  *
+ * ── Which database ──────────────────────────────────────────────────────────
+ * Platform staff live in the PLATFORM database: `PLATFORM_MONGODB_URI`
+ * (`abhigyangurukul_console` in production), the one the platform runtime reads
+ * at `/platform-api/platform/login`. Never `MONGO_URI`: since `/api` and
+ * `/platform-api` were separated, that names the EXISTING system's database
+ * (`abhigyangurukul`), where an owner would be written into production and never
+ * seen by the console. There is no fallback — without PLATFORM_MONGODB_URI the
+ * script stops. A target listed in LEGACY_DB_NAMES, or naming the existing
+ * system's database, is refused before connecting and re-checked after;
+ * `--production` also requires LEGACY_DB_NAMES, so that refusal is always armed.
+ *
  * ── Safety ──────────────────────────────────────────────────────────────────
  *   • Refuses a target it cannot prove is intended.
  *   • Production requires BOTH `--production` and a typed acknowledgement.
@@ -30,7 +41,9 @@
  *     will not quietly mint a second account with total authority.
  *
  * ── Usage ───────────────────────────────────────────────────────────────────
- *   # Scratch / rehearsal
+ *   # PLATFORM_MONGODB_URI (and LEGACY_DB_NAMES) come from .env or the shell.
+ *
+ *   # Scratch / rehearsal — targets <platform database>_<suffix>
  *   PLATFORM_OWNER_EMAIL=you@example.com \
  *   PLATFORM_OWNER_NAME="Your Name" \
  *   PLATFORM_OWNER_PASSWORD='…' \
@@ -54,8 +67,10 @@
 import 'dotenv/config';
 import mongoose from 'mongoose';
 import { createInterface } from 'readline';
-import { configureDnsForSrv, redactUri, requireEnv, describeUri } from './safety/lib';
+import { configureDnsForSrv, redactUri, describeUri } from './safety/lib';
 import { registerTenancy } from '../src/core/tenancy';
+import { databaseNameOf, existingDatabaseUri } from '../src/core/realm/realm';
+import { legacyDatabaseNames } from '../src/core/tenancy/dataSource';
 import { recordPlatformEvent } from '../src/core/platform/audit';
 
 process.env.REDIS_ENABLED = process.env.REDIS_ENABLED ?? 'false';
@@ -68,9 +83,9 @@ function arg(flag: string): string | null {
   return i > -1 ? process.argv[i + 1] ?? null : null;
 }
 
-function deriveScratchUri(productionUri: string, suffix: string): string {
-  const m = productionUri.match(/^(mongodb(?:\+srv)?:\/\/(?:[^@/]*@)?[^/?]+\/)([^?]*)(\?.*)?$/);
-  if (!m) throw new Error('MONGO_URI could not be parsed.');
+function deriveScratchUri(platformUri: string, suffix: string): string {
+  const m = platformUri.match(/^(mongodb(?:\+srv)?:\/\/(?:[^@/]*@)?[^/?]+\/)([^?]*)(\?.*)?$/);
+  if (!m) throw new Error('PLATFORM_MONGODB_URI could not be parsed.');
   return `${m[1]}${m[2]}_${suffix}${m[3] ?? ''}`;
 }
 
@@ -118,7 +133,16 @@ function fail(message: string): never {
 }
 
 async function main() {
-  const productionUri = requireEnv('MONGO_URI');
+  // The platform database — never MONGO_URI (see "Which database" above).
+  const platformUri = (process.env.PLATFORM_MONGODB_URI || '').trim();
+  if (!platformUri) {
+    fail(
+      'PLATFORM_MONGODB_URI is not set.\n' +
+        '  Platform staff live in the platform database (…/abhigyangurukul_console), the one\n' +
+        '  /platform-api reads. This script never falls back to MONGO_URI, which names the\n' +
+        "  existing system's database.",
+    );
+  }
   const suffix = arg('--scratch-suffix');
   const wantsProduction = process.argv.includes('--production');
   const remove = process.argv.includes('--remove');
@@ -126,9 +150,9 @@ async function main() {
   // ── Target resolution: never guessed ──────────────────────────────────────
   let uri: string;
   if (suffix) {
-    uri = deriveScratchUri(productionUri, suffix);
+    uri = deriveScratchUri(platformUri, suffix);
   } else if (wantsProduction) {
-    uri = productionUri;
+    uri = platformUri;
   } else {
     fail(
       'Refusing to guess a target.\n' +
@@ -140,6 +164,40 @@ async function main() {
 
   const described = describeUri(uri);
   if (!described) fail('The target URI could not be parsed, so it cannot be proven safe.');
+
+  // ── Never the existing system's database ──────────────────────────────────
+  // The same two refusals the platform runtime applies to itself
+  // (core/realm/realm.ts, core/tenancy/dataSource.ts): a database listed in
+  // LEGACY_DB_NAMES, or the one MONGO_URI / MONGODB_URI names.
+  const target = described.db;
+  const legacyNames = legacyDatabaseNames();
+  if (wantsProduction && legacyNames.size === 0) {
+    fail(
+      "LEGACY_DB_NAMES must name the existing system's database (abhigyangurukul) for --production,\n" +
+        '  so this script can prove it is not writing there.',
+    );
+  }
+  if (legacyNames.has(target.toLowerCase())) {
+    fail(
+      `The target "${target}" is listed in LEGACY_DB_NAMES — the existing system's database.\n` +
+        '  Platform staff are never written there. PLATFORM_MONGODB_URI must name the platform\n' +
+        '  database (abhigyangurukul_console).',
+    );
+  }
+  let existingDb: string | null = null;
+  try {
+    existingDb = databaseNameOf(existingDatabaseUri());
+  } catch (error) {
+    fail((error as Error).message);
+  }
+  if (existingDb && existingDb.toLowerCase() === target.toLowerCase()) {
+    fail(
+      `The target "${target}" is also the existing system's database (MONGO_URI).\n` +
+        '  The two must name different databases:\n' +
+        '    MONGO_URI            → …/abhigyangurukul\n' +
+        '    PLATFORM_MONGODB_URI → …/abhigyangurukul_console',
+    );
+  }
 
   if (remove && wantsProduction) {
     fail(
@@ -179,13 +237,24 @@ async function main() {
   configureDnsForSrv();
   await mongoose.connect(uri, { serverSelectionTimeoutMS: 15_000 });
 
+  // Proven again on the live connection, before anything is read or written.
+  const connectedDb = mongoose.connection.db?.databaseName ?? '';
+  if (
+    connectedDb.toLowerCase() !== target.toLowerCase() ||
+    legacyNames.has(connectedDb.toLowerCase()) ||
+    (existingDb && existingDb.toLowerCase() === connectedDb.toLowerCase())
+  ) {
+    await mongoose.connection.close();
+    fail(`Connected to "${connectedDb}", not the intended platform database "${target}". Nothing was changed.`);
+  }
+
   // Required after the connection so the model compiles with the tenancy
   // plugin registered — PlatformUser is `tenantScoped: false`, and the audit
   // asserts that rather than assuming it.
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const PlatformUser = require('../src/models/PlatformUser').default;
 
-  console.log(`[bootstrap-platform-owner] target: ${redactUri(uri)}`);
+  console.log(`[bootstrap-platform-owner] target: ${redactUri(uri)} (database "${connectedDb}", from PLATFORM_MONGODB_URI)`);
   if (wantsProduction) console.log('[bootstrap-platform-owner] ⚠ PRODUCTION');
 
   try {

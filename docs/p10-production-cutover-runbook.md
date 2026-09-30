@@ -441,7 +441,9 @@ like data corruption.
 **UNBLOCKED by P10A** — see the addendum at the end of this document. The
 console now signs in with an email and a password against
 `POST /api/platform/login`, and `scripts/bootstrap-platform-owner.ts` creates
-the first account.
+the first account — in the platform database, `PLATFORM_MONGODB_URI` →
+`abhigyangurukul_console`. It never targets `MONGO_URI`, and it refuses
+`abhigyangurukul`, the protected legacy database.
 
 Configuration: `NEXT_PUBLIC_API_BASE_URL` → api-platform's hostname; deploy
 privately (the repo already sets noindex / DENY / no-referrer).
@@ -570,7 +572,7 @@ flipping Storage ACLs without a recorded list. Everything else is reversible.
 | 22 | PLATFORM | Deploy api-platform | 21 | `/api/health` 200 | Error | Stop service |
 | 23 | PLATFORM | Move cron; disable on old | 22 | Runs once | Twice | Re-enable old |
 | 24 | PLATFORM | `/api/me/context` resolves Org 001 | 22 | Name correct | Null | Rollback 22 |
-| 25 | PLATFORM | **Create first platform staff account** (`bootstrap-platform-owner.ts --production`) | 22 | Can log in at the console | Refusal | `--remove` on scratch only; disable via console in production |
+| 25 | PLATFORM | **Create first platform staff account** (`bootstrap-platform-owner.ts --production`, into `PLATFORM_MONGODB_URI` → `abhigyangurukul_console`; needs `LEGACY_DB_NAMES=abhigyangurukul`) | 22 | Can log in at the console | Refusal | `--remove` on scratch only; disable via console in production |
 | 26 | PLATFORM | Deploy platform-console | 25 | Console loads | Error | Stop service |
 | 27 | ORG 002 | Onboard via console | 26 | 8 steps complete | Any fail | Delete Org |
 | 28 | ORG 002 | Isolation suites | 27 | web 109, mobile 99 | Any fail | **STOP** |
@@ -601,7 +603,8 @@ rehearsed and verified. What is not ready is the platform half.
 
 2. ~~**No way to create the first platform staff account.**~~ **RESOLVED —
    P10A.** `scripts/bootstrap-platform-owner.ts` creates exactly one
-   `PlatformUser` and refuses once an owner exists.
+   `PlatformUser`, in the platform database (`PLATFORM_MONGODB_URI` →
+   `abhigyangurukul_console`), and refuses once an owner exists.
 
 3. **Production deployment state is unverified.** I could not reach Railway,
    Vercel, Firebase or DNS. Step 5 depends on knowing the current environment
@@ -695,6 +698,8 @@ user, no tenant role. Guarded like `seed-org-001`, and then harder:
 
 | Guard | Behaviour |
 |---|---|
+| Which database | `PLATFORM_MONGODB_URI` — the platform database, `abhigyangurukul_console` — and only that: never `MONGO_URI`, no fallback. Unset, it stops. `--scratch-suffix` derives the rehearsal database from it: `<platform database>_<suffix>`. |
+| Protected legacy database | `abhigyangurukul` is never a target: a database listed in `LEGACY_DB_NAMES`, or the one `MONGO_URI` names, is refused before connecting and again on the live connection. `--production` also requires `LEGACY_DB_NAMES`, so that refusal is always armed. |
 | No target named | Refuses. `--scratch-suffix` or `--production`, never a guess. |
 | `--production` | Also requires `PLATFORM_BOOTSTRAP_ACK='I am creating a platform owner account'`. |
 | An owner already exists | Refuses and points at the console, which checks `staff.manage` and records who acted. |
@@ -772,13 +777,18 @@ reach the console.
 ## Running it
 
 ```bash
+# Needs (.env or shell): PLATFORM_MONGODB_URI=<cluster>/abhigyangurukul_console,
+# MONGO_URI=<cluster>/abhigyangurukul, LEGACY_DB_NAMES=abhigyangurukul
+
 # 1. Scratch rehearsal — bootstrap the first owner
+#    targets abhigyangurukul_console_restore_YYYY_MM_DD (platform database + suffix)
 PLATFORM_OWNER_EMAIL=you@example.com PLATFORM_OWNER_NAME="Your Name" \
   npx ts-node --transpile-only scripts/bootstrap-platform-owner.ts \
     --scratch-suffix restore_YYYY_MM_DD
 
-# 2. Auth + bootstrap suite (needs a scratch DB with NO platform users)
-P10A_MONGO_URI=<scratch> npm run safety:platform-auth
+# 2. Auth + bootstrap suite (needs a scratch copy of the PLATFORM database with
+#    NO platform users, named <platform database>_<suffix>, on its cluster)
+P10A_MONGO_URI=<cluster>/abhigyangurukul_console_<suffix> npm run safety:platform-auth
 
 # 3. Console login suite (needs api-platform + console running)
 npm run safety:seed-console-login   # CONSOLE_FIXTURE_MONGO_URI=<scratch>
@@ -786,7 +796,9 @@ API_URL=http://127.0.0.1:5055 CONSOLE_URL=http://127.0.0.1:3100 \
   npm run safety:console-login
 ```
 
-Production (Step 25) is yours to run:
+Production (Step 25) is yours to run. It writes to `PLATFORM_MONGODB_URI`
+(`abhigyangurukul_console`) and prints that database before asking for the
+password; `abhigyangurukul` is refused:
 
 ```bash
 PLATFORM_OWNER_EMAIL=… PLATFORM_OWNER_NAME=… \

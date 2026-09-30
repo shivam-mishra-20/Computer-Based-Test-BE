@@ -135,6 +135,13 @@ export async function bootScratchApp(extraEnv: Record<string, string> = {}): Pro
   configureDnsForSrv();
   Object.assign(process.env, {
     MONGO_URI: uri,
+    // Claim mode through /api/* is the platform runtime's behaviour (the
+    // existing system never runs it — core/realm/realm.ts). Suites that drive
+    // the existing system pass SERVICE_REALM: 'existing'.
+    SERVICE_REALM: 'platform',
+    // Never inherit a second database from .env into a scratch run.
+    MONGODB_URI: '',
+    PLATFORM_MONGODB_URI: '',
     TENANT_MODE: 'claim',
     TENANT_ENFORCEMENT: 'warn',
     ENABLE_CRON: 'false',

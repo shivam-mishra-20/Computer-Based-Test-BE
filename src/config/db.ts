@@ -4,6 +4,7 @@ import dns from 'node:dns';
 import User from '../models/User';
 import { withoutTenantScope } from '../core/tenancy/context';
 import { isLegacyDatabase } from '../core/tenancy/dataSource';
+import { serviceRealm } from '../core/realm/realm';
 
 dotenv.config();
 
@@ -48,11 +49,13 @@ export const connectDB = async (): Promise<void> => {
       configureMongoDnsServers();
     }
 
-    // The legacy database is never created in or indexed from here — see
-    // core/tenancy/dataSource.ts. (Also set globally at boot; stated again at
-    // the connection so no call path can miss it.)
-    const legacy = isLegacyDatabase(uri);
-    const options = legacy ? { autoCreate: false, autoIndex: false } : {};
+    // The existing system's database (the one /api/* serves) is never created
+    // in or indexed from here, and neither is any database listed in
+    // LEGACY_DB_NAMES — see core/tenancy/dataSource.ts. (Also set globally at
+    // boot; stated again at the connection so no call path can miss it.)
+    const legacy = serviceRealm() === 'existing' || isLegacyDatabase(uri);
+    const options =
+      legacy || process.env.DB_BOOT_SCHEMA_SYNC === 'false' ? { autoCreate: false, autoIndex: false } : {};
 
     try {
       await mongoose.connect(uri, options);
@@ -100,10 +103,11 @@ export const connectDB = async (): Promise<void> => {
      * template for request-path code: anything serving a request has a
      * context and must be scoped to it.
      */
-    // Never on the legacy database: starting a process must not write to it,
-    // and a seeded administrator there would be an account nobody created.
+    // Never on the existing system's database: starting a process must not
+    // write to it, and a seeded administrator there would be an account nobody
+    // created. The platform database keeps its bootstrap administrator.
     if (legacy) {
-      console.log('ℹ️ Legacy database: bootstrap administrator not seeded');
+      console.log('ℹ️ Existing-system database: bootstrap administrator not seeded');
       return;
     }
     const adminEmail = process.env.ADMIN_EMAIL || 'admin@cbt.local';
