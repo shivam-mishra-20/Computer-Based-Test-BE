@@ -29,6 +29,7 @@
 
 process.env.TENANT_MODE = process.env.TENANT_MODE || 'claim';
 process.env.TENANT_ENFORCEMENT = 'warn';
+process.env.FIREBASE_STORAGE_BUCKET = 'test-bucket';
 
 import { readFileSync } from 'fs';
 import { join } from 'path';
@@ -37,9 +38,30 @@ import {
   signDoubtListAttachments,
   signDoubtMessageAttachments,
 } from '../../src/core/storage/serialize';
-import { LEGACY_PREFIX, TENANT_PREFIX } from '../../src/core/storage/paths';
+import {
+  isBareDoubtPath,
+  isDoubtFolderPath,
+  LEGACY_PREFIX,
+  pathBelongsToOrg,
+  TENANT_PREFIX,
+} from '../../src/core/storage/paths';
+import * as storageService from '../../src/core/storage/storageService';
+import { resolveStorageTarget } from '../../src/core/storage/storageService';
 
 const ORG_A = '6a8441e8c4c17e061913e297';
+const DOUBT_ID = '68d5a1f2c4c17e061913e2aa';
+const OTHER_DOUBT = '68d5a1f2c4c17e061913e2bb';
+
+// Firebase is never contacted. `serialize.ts` reads `signUnchecked` off the
+// module at call time, so replacing the export stands in for the bucket, and
+// every path it is asked to sign is recorded.
+const signed: string[] = [];
+let signingFails = false;
+(storageService as { signUnchecked: unknown }).signUnchecked = async (path: string) => {
+  if (signingFails) throw new Error('no credential');
+  signed.push(path);
+  return `https://signed.example/${path}?X-Goog-Signature=x`;
+};
 
 let failures = 0;
 let checks = 0;
@@ -222,7 +244,7 @@ async function main() {
   );
   check(
     'getDoubtFiles resolves rather than constructs',
-    /resolveFileUrl\(file\.storagePath \|\| file\.url/.test(fileSrc),
+    /resolveDoubtFileUrl\(file\.storagePath \|\| file\.url, doubtId/.test(fileSrc),
   );
 
   // The upload response must keep returning the PATH. Returning a signed URL
@@ -244,13 +266,180 @@ async function main() {
     readFileSync(
       join(process.cwd(), 'src', 'core', 'storage', 'serialize.ts'),
       'utf8',
-    ).includes('resolveFileUrl(stored, { orgId })'),
+    ).includes('return resolveFileUrl(stored, { orgId })'),
   );
   check(
     'and that namespace is not treated as publicly readable',
     !new RegExp(`storage\\.googleapis\\.com[^\\n]*${LEGACY_PREFIX}`).test(
       stripComments(doubtSrc) + stripComments(fileSrc),
     ),
+  );
+
+
+  // ══════════════════════════════════════════════════════════════════════════
+  console.log("\nthe app's own uploads (bare doubts/{doubtId}/…) are signed, not published");
+  // ══════════════════════════════════════════════════════════════════════════
+
+  // The second report of the same symptom. The app uploads through
+  // `/upload-url`, which issued `doubts/{doubtId}/…`; P9A stopped making those
+  // objects public but `resolveFileUrl` still treats a bare path as a public
+  // pre-tenant object, so the client got an unsigned URL that 403s.
+  const barePath = `doubts/${DOUBT_ID}/1758817518078_photo.jpg`;
+  const unsignedPublic = `https://storage.googleapis.com/test-bucket/${barePath}`;
+
+  const appUpload = {
+    _id: { toString: () => DOUBT_ID }, // what a populated document carries
+    messages: [
+      {
+        message: '📎 Image',
+        attachments: [{ url: barePath, storagePath: barePath, fileType: 'image/jpeg' }],
+      },
+    ],
+  };
+  await signDoubtAttachments(appUpload, null);
+  const appAtt = appUpload.messages[0].attachments[0];
+  check(
+    "an attachment in this doubt's folder gets a signed URL",
+    signed.includes(barePath) && appAtt.url.includes('X-Goog-Signature'),
+    appAtt.url,
+  );
+  check(
+    'and never the unsigned public URL that 403s',
+    appAtt.url !== unsignedPublic,
+    appAtt.url,
+  );
+
+  const urlOnly: any = doubtWith([{ url: barePath, fileType: 'image/jpeg' }]);
+  urlOnly._id = DOUBT_ID;
+  await signDoubtAttachments(urlOnly, null);
+  check(
+    'a row that only carries `url` is signed the same way',
+    urlOnly.messages[0].attachments[0].url.includes('X-Goog-Signature'),
+    urlOnly.messages[0].attachments[0].url,
+  );
+
+  // A client can put any path into a message. Naming another conversation's
+  // file must not get it signed on the strength of THIS conversation.
+  signed.length = 0;
+  const foreign = `doubts/${OTHER_DOUBT}/1758817518078_theirs.jpg`;
+  const borrowed: any = doubtWith([{ url: foreign, storagePath: foreign, fileType: 'image/jpeg' }]);
+  borrowed._id = DOUBT_ID;
+  await signDoubtAttachments(borrowed, null);
+  check(
+    "another doubt's file is not signed through this one",
+    !signed.includes(foreign) &&
+      !String(borrowed.messages[0].attachments[0].url).includes('X-Goog-Signature'),
+    borrowed.messages[0].attachments[0].url,
+  );
+
+  const inboxOfTwo: any[] = [
+    { _id: DOUBT_ID, messages: [{ attachments: [{ storagePath: barePath }] }] },
+    {
+      _id: OTHER_DOUBT,
+      messages: [{ attachments: [{ storagePath: `doubts/${OTHER_DOUBT}/1_x.jpg` }] }],
+    },
+  ];
+  await signDoubtListAttachments(inboxOfTwo, null);
+  check(
+    'an inbox signs each doubt against its own id',
+    inboxOfTwo.every((d) =>
+      String(d.messages[0].attachments[0].url).includes('X-Goog-Signature'),
+    ),
+  );
+
+  signingFails = true;
+  const unsignable: any = doubtWith([{ storagePath: barePath, fileType: 'image/jpeg' }]);
+  unsignable._id = DOUBT_ID;
+  await signDoubtAttachments(unsignable, null);
+  eq(
+    'a signing failure is a missing image, not a failed conversation',
+    unsignable.messages[0].attachments[0].url,
+    '',
+  );
+  signingFails = false;
+
+  // ══════════════════════════════════════════════════════════════════════════
+  console.log('\nwhich paths belong to a doubt');
+  // ══════════════════════════════════════════════════════════════════════════
+
+  const folderCases: Array<[string, string, boolean]> = [
+    [`doubts/${DOUBT_ID}/f.jpg`, 'bare', true],
+    [`/doubts/${DOUBT_ID}/f.jpg`, 'bare, leading slash', true],
+    [`doubts/${DOUBT_ID}/msg1/f.jpg`, 'bare, with the old message folder', true],
+    [`doubts/${DOUBT_ID}`, 'bare, no file', false],
+    [`doubts/${OTHER_DOUBT}/f.jpg`, 'bare, another doubt', false],
+    [`doubts/${DOUBT_ID}x/f.jpg`, 'bare, id prefix only', false],
+    [`${LEGACY_PREFIX}/doubts/${DOUBT_ID}/abc_f.jpg`, 'no-organization', true],
+    [`${LEGACY_PREFIX}/doubts/${DOUBT_ID}_m1/abc_f.jpg`, 'no-organization, per message', true],
+    [`${LEGACY_PREFIX}/doubts/${OTHER_DOUBT}/abc_f.jpg`, 'no-organization, another doubt', false],
+    [`${LEGACY_PREFIX}/homework/${DOUBT_ID}/abc_f.jpg`, 'no-organization, another module', false],
+    [`${TENANT_PREFIX}/${ORG_A}/doubts/${DOUBT_ID}/abc_f.jpg`, 'tenant', true],
+    [`${TENANT_PREFIX}/${ORG_A}/homework/${DOUBT_ID}/abc_f.jpg`, 'tenant, another module', false],
+    [`https://storage.googleapis.com/b/doubts/${DOUBT_ID}/f.jpg`, 'an absolute URL', false],
+    ['', 'empty', false],
+  ];
+  for (const [path, label, expected] of folderCases) {
+    eq(`isDoubtFolderPath — ${label}`, isDoubtFolderPath(path, DOUBT_ID), expected);
+  }
+  eq('a non-ObjectId doubt id matches nothing', isDoubtFolderPath('doubts/x/f.jpg', 'x'), false);
+  eq('isBareDoubtPath — bare', isBareDoubtPath(`doubts/${DOUBT_ID}/f.jpg`, DOUBT_ID), true);
+  eq(
+    'isBareDoubtPath — the private namespaces are not "bare"',
+    isBareDoubtPath(`${LEGACY_PREFIX}/doubts/${DOUBT_ID}/abc_f.jpg`, DOUBT_ID) ||
+      isBareDoubtPath(`${TENANT_PREFIX}/${ORG_A}/doubts/${DOUBT_ID}/abc_f.jpg`, DOUBT_ID),
+    false,
+  );
+
+  // ══════════════════════════════════════════════════════════════════════════
+  console.log('\n/upload-url issues the same private paths as /upload');
+  // ══════════════════════════════════════════════════════════════════════════
+
+  const noOrgTarget = resolveStorageTarget({
+    fileName: 'photo 1.jpg',
+    module: 'doubts',
+    entityId: DOUBT_ID,
+    orgId: null,
+  });
+  check(
+    'without an organization it lands in the private namespace, in the doubt folder',
+    noOrgTarget.storagePath.startsWith(`${LEGACY_PREFIX}/doubts/${DOUBT_ID}/`) &&
+      isDoubtFolderPath(noOrgTarget.storagePath, DOUBT_ID),
+    noOrgTarget.storagePath,
+  );
+  const orgTarget = resolveStorageTarget({
+    fileName: 'photo.jpg',
+    module: 'doubts',
+    entityId: DOUBT_ID,
+    orgId: ORG_A,
+  });
+  check(
+    'with one it is tenant-owned, in the doubt folder',
+    pathBelongsToOrg(orgTarget.storagePath, ORG_A) &&
+      isDoubtFolderPath(orgTarget.storagePath, DOUBT_ID),
+    orgTarget.storagePath,
+  );
+
+  const uploadUrlSrc = stripComments(fileSrc).split('export const generateUploadUrl')[1] || '';
+  check(
+    'generateUploadUrl takes its path from resolveStorageTarget',
+    /resolveStorageTarget\(\{[\s\S]{0,120}module: 'doubts'/.test(uploadUrlSrc),
+  );
+  check(
+    'and no longer builds a bare doubts/ path',
+    !/`doubts\/\$\{/.test(uploadUrlSrc),
+  );
+  // These two hand out SIGNED URLs for private objects, so a doubt id or a
+  // file id alone must not be enough — the caller has to be in the doubt.
+  for (const handler of ['getFileSignedUrl', 'getDoubtFiles']) {
+    const body = stripComments(fileSrc).split(`export const ${handler}`)[1]?.split('export const')[0] || '';
+    check(
+      `${handler} checks the caller is in the doubt before signing`,
+      /callerCanReadDoubt\(req, doubtId\)[\s\S]*resolveDoubtFileUrl\(/.test(body),
+    );
+  }
+  check(
+    "save-file-metadata only records a path from the doubt's own folder",
+    /isDoubtFolderPath\(storagePath, String\(doubtId\)\)/.test(stripComments(doubtSrc)),
   );
 
   console.log(

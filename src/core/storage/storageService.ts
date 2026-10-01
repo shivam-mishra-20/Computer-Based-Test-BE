@@ -139,7 +139,10 @@ export interface StorageTarget {
  * Throws `StorageAccessDenied` in exactly the cases the old `putTenantFile`
  * did — an absent organization where no legacy surface exists to accommodate.
  */
-export function resolveStorageTarget(input: PutTenantFileInput): StorageTarget {
+export function resolveStorageTarget(
+  // No bytes needed: `/upload-url` decides the path before the client uploads.
+  input: Pick<PutTenantFileInput, 'fileName' | 'module' | 'entityId' | 'orgId' | 'requireOrg'>,
+): StorageTarget {
   const orgId = input.orgId ?? currentOrgId();
   const fileId = newFileId();
 

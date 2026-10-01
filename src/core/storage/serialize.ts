@@ -19,7 +19,8 @@
  */
 
 import { currentOrgId } from '../tenancy';
-import { resolveFileUrl } from './storageService';
+import { isBareDoubtPath } from './paths';
+import { resolveFileUrl, signUnchecked } from './storageService';
 
 export interface AttachmentLike {
   fileUrl?: string;
@@ -89,6 +90,34 @@ export async function signHomeworkList(
 }
 
 /**
+ * One stored doubt-file reference, as something the client can fetch.
+ *
+ * Everything goes through `resolveFileUrl` except a bare `doubts/{doubtId}/…`
+ * path, which `resolveFileUrl` would hand back as an unsigned public URL. Since
+ * P9A those objects are private and that URL 403s, which is why images sent
+ * from the app showed a broken-image tile. They are signed here instead.
+ *
+ * Signing skips the organization check on purpose: a bare path names no
+ * organization, so it is authorized through the doubt that references it. The
+ * caller has already been let into that doubt, and `isBareDoubtPath` requires
+ * the object to be inside that doubt's own folder.
+ */
+export async function resolveDoubtFileUrl(
+  stored: string,
+  doubtId: string | null | undefined,
+  orgId: string | null = currentOrgId(),
+): Promise<string | null> {
+  if (!isBareDoubtPath(stored, doubtId)) return resolveFileUrl(stored, { orgId });
+  try {
+    return await signUnchecked(stored);
+  } catch (error) {
+    // Same contract as `resolveFileUrl`: log it, render a missing image.
+    console.error('[storage] failed to sign', stored, (error as Error).message);
+    return null;
+  }
+}
+
+/**
  * Doubt-chat attachments, made fetchable.
  *
  * ── The bug this fixes ──────────────────────────────────────────────────────
@@ -108,7 +137,8 @@ export async function signHomeworkList(
  * `resolveFileUrl` already knows the right answer for each kind of stored
  * value — a legacy absolute URL passes through, a private path is signed, a
  * pre-tenant bare path keeps its public URL — so this is only a matter of
- * calling it, on the field doubts actually use.
+ * calling it, on the field doubts actually use. The one exception, bare
+ * `doubts/{doubtId}/…` objects that only look public, is `resolveDoubtFileUrl`.
  *
  * Mutates in place: these are `.lean()` documents already being walked by the
  * callers, and rebuilding a populated doubt just to replace one string per
@@ -117,6 +147,7 @@ export async function signHomeworkList(
 export async function signDoubtMessageAttachments(
   messages: unknown,
   orgId: string | null = currentOrgId(),
+  doubtId?: string | null,
 ): Promise<void> {
   if (!Array.isArray(messages)) return;
 
@@ -138,7 +169,7 @@ export async function signDoubtMessageAttachments(
       if (!stored) continue;
 
       pending.push(
-        resolveFileUrl(stored, { orgId })
+        resolveDoubtFileUrl(stored, doubtId, orgId)
           .then((url) => {
             a.url = url ?? '';
           })
@@ -161,9 +192,11 @@ export async function signDoubtAttachments<T>(
   orgId: string | null = currentOrgId(),
 ): Promise<T> {
   if (doubt && typeof doubt === 'object') {
+    const id = (doubt as { _id?: unknown })._id;
     await signDoubtMessageAttachments(
       (doubt as { messages?: unknown }).messages,
       orgId,
+      id ? String(id) : null,
     );
   }
   return doubt;

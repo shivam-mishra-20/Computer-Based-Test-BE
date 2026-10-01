@@ -20,8 +20,13 @@ import {
 } from '../../core/storage/serialize';
 import SocketService from '../../services/SocketService';
 import { createAndSendNotification } from '../../services/notificationService';
-import { currentOrgId } from '../../core/tenancy';
-import { isLegacyPath, pathBelongsToOrg } from '../../core/storage/paths';
+import { currentOrgId, legacyStorageCompatEnabled } from '../../core/tenancy';
+import {
+  isDoubtFolderPath,
+  isLegacyNamespacePath,
+  isLegacyPath,
+  pathBelongsToOrg,
+} from '../../core/storage/paths';
 import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
 import {
   canAccessDoubt,
@@ -186,7 +191,17 @@ router.post('/save-file-metadata', authMiddleware, uploadLimiter, async (req: Au
     // supplied by the caller is now checked against the caller's organization
     // before it is recorded at all — otherwise a client could register, and
     // then read, an arbitrary object belonging to someone else.
-    if (!isLegacyPath(storagePath) && !pathBelongsToOrg(storagePath, currentOrgId())) {
+    //
+    // It must also sit in THIS doubt's folder — the only place `/upload-url`
+    // issues paths for it. Reads sign doubt files on the strength of the
+    // doubt that references them, so a path from anywhere else is refused.
+    if (!isDoubtFolderPath(storagePath, String(doubtId))) {
+      return res.status(403).json({ error: 'That file was not uploaded for this doubt.' });
+    }
+    const ownedHere = isLegacyNamespacePath(storagePath)
+      ? legacyStorageCompatEnabled()
+      : isLegacyPath(storagePath) || pathBelongsToOrg(storagePath, currentOrgId());
+    if (!ownedHere) {
       return res.status(403).json({ error: 'That file does not belong to your organization.' });
     }
 

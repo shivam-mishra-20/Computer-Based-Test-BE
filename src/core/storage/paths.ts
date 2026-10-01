@@ -232,3 +232,60 @@ export function storagePathFromPublicUrl(url: string, bucket: string): string | 
   }
   return null;
 }
+
+/**
+ * Is `path` inside the folder of doubt `doubtId`, in any namespace a doubt
+ * upload has ever been written to?
+ *
+ *   doubts/{doubtId}/…                                  bare — every
+ *                                                       `/upload-url` path
+ *                                                       before it moved onto
+ *                                                       `resolveStorageTarget`
+ *   legacy/doubts/{doubtId}[_{messageId}]/…             no organization
+ *   organizations/{orgId}/doubts/{doubtId}[_{messageId}]/…
+ *
+ * It says nothing about the ORGANIZATION — callers still check that. What it
+ * pins is that a path a client hands back for this doubt was issued for this
+ * doubt, so a caller who may read one conversation cannot name a file from
+ * another one and have it signed.
+ */
+export function isDoubtFolderPath(
+  path: string | null | undefined,
+  doubtId: string | null | undefined,
+): boolean {
+  if (!path || !doubtId || isAbsoluteUrl(path)) return false;
+  const id = String(doubtId);
+  if (!/^[a-f0-9]{24}$/i.test(id)) return false;
+
+  const segments = String(path).replace(/^\/+/, '').split('/');
+  const ownsFolder = (segment: string | undefined) =>
+    segment === id || (!!segment && segment.startsWith(`${id}_`));
+
+  // The folder segment must be followed by at least the file name.
+  if (segments[0] === 'doubts') {
+    return segments.length >= 3 && segments[1] === id;
+  }
+  if (segments[0] === LEGACY_PREFIX) {
+    return segments.length >= 4 && segments[1] === 'doubts' && ownsFolder(segments[2]);
+  }
+  if (segments[0] === TENANT_PREFIX) {
+    return segments.length >= 5 && segments[2] === 'doubts' && ownsFolder(segments[3]);
+  }
+  return false;
+}
+
+/**
+ * A bare `doubts/{doubtId}/…` object — what `/upload-url` issued before it was
+ * moved onto `resolveStorageTarget`.
+ *
+ * `isLegacyPath` calls these "pre-tenant public objects", and until P9A they
+ * were: `save-file-metadata` made each one public. P9A removed that call
+ * without moving the path, so every one uploaded since is PRIVATE under a name
+ * the read path still believes is public. They have to be signed.
+ */
+export function isBareDoubtPath(
+  path: string | null | undefined,
+  doubtId: string | null | undefined,
+): boolean {
+  return isDoubtFolderPath(path, doubtId) && String(path).replace(/^\/+/, '').startsWith('doubts/');
+}

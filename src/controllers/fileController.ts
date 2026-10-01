@@ -2,9 +2,21 @@ import { Request, Response } from 'express';
 import { bucket } from '../config/firebase';
 import FileMetadata from '../models/FileMetadata';
 import { currentOrgId, tenantScope } from '../core/tenancy';
-import { isLegacyPath, pathBelongsToOrg } from '../core/storage/paths';
-import { putTenantFile, resolveFileUrl } from '../core/storage/storageService';
+import {
+  isBareDoubtPath,
+  isLegacyNamespacePath,
+  isLegacyPath,
+  pathBelongsToOrg,
+} from '../core/storage/paths';
+import { resolveDoubtFileUrl } from '../core/storage/serialize';
+import {
+  putTenantFile,
+  resolveStorageTarget,
+  StorageAccessDenied,
+} from '../core/storage/storageService';
 import mongoose from 'mongoose';
+import Doubt from '../models/Doubt';
+import { canAccessDoubt, type DoubtViewerRole } from '../services/doubtService';
 
 // Allowed MIME types
 const ALLOWED_MIME_TYPES = [
@@ -23,6 +35,24 @@ interface AuthRequest extends Request {
     role: string;
     id: string;
   };
+}
+
+/**
+ * Is the caller a participant in doubt `doubtId`?
+ *
+ * The same rule every `/:id` doubt route applies (`canAccessDoubt`). The file
+ * handlers below hand out SIGNED URLs for private objects, and a doubt file is
+ * authorized through the doubt that references it — so the doubt id alone, or
+ * a file id, must grant nothing.
+ */
+async function callerCanReadDoubt(req: AuthRequest, doubtId: unknown): Promise<boolean> {
+  const id = String(req.user?._id || req.user?.id || '');
+  const role = req.user?.role;
+  if (!id || (role !== 'student' && role !== 'teacher' && role !== 'admin')) return false;
+  if (!mongoose.Types.ObjectId.isValid(String(doubtId))) return false;
+
+  const doubt = await Doubt.findById(String(doubtId)).select('student teacher messages.sender').lean();
+  return !!doubt && canAccessDoubt(doubt as never, { id, role: role as DoubtViewerRole });
 }
 
 /**
@@ -168,18 +198,32 @@ export const getFileSignedUrl = async (req: AuthRequest, res: Response) => {
     }
 
     // Defence in depth: the row was already scoped, and the PATH is checked
-    // too, so a mis-stamped row cannot leak an object it does not own.
-    if (!isLegacyPath(fileMetadata.storagePath) && !pathBelongsToOrg(fileMetadata.storagePath, orgId)) {
+    // too, so a mis-stamped row cannot leak an object it does not own. The
+    // no-organization namespace names no owner; signing it re-checks that
+    // legacy compatibility is on.
+    const storagePath = fileMetadata.storagePath;
+    if (
+      !isLegacyPath(storagePath) &&
+      !isLegacyNamespacePath(storagePath) &&
+      !pathBelongsToOrg(storagePath, orgId)
+    ) {
       return res.status(403).json({ error: 'This file does not belong to your organization.' });
     }
 
-    const url = await resolveFileUrl(fileMetadata.storagePath, { orgId });
+    const doubtId = String(fileMetadata.relatedDoubtId);
+    if (!(await callerCanReadDoubt(req, doubtId))) {
+      return res.status(403).json({ error: 'You do not have access to this conversation' });
+    }
+    const url = await resolveDoubtFileUrl(storagePath, doubtId, orgId);
     if (!url) return res.status(404).json({ error: 'File not available' });
 
     return res.json({
       success: true,
       url,
-      expiresIn: isLegacyPath(fileMetadata.storagePath) ? 'never (legacy public object)' : '7d',
+      expiresIn:
+        isLegacyPath(storagePath) && !isBareDoubtPath(storagePath, doubtId)
+          ? 'never (legacy public object)'
+          : '7d',
     });
   } catch (error) {
     console.error('Error generating signed URL:', error);
@@ -247,6 +291,10 @@ export const getDoubtFiles = async (req: AuthRequest, res: Response) => {
   try {
     const { doubtId } = req.params;
 
+    if (!(await callerCanReadDoubt(req, doubtId))) {
+      return res.status(403).json({ error: 'You do not have access to this conversation' });
+    }
+
     const files = await FileMetadata.find({
       relatedDoubtId: new mongoose.Types.ObjectId(doubtId),
     })
@@ -259,12 +307,14 @@ export const getDoubtFiles = async (req: AuthRequest, res: Response) => {
     // stored value that was not already a URL. That was correct while every
     // object carried a public ACL; against the PRIVATE objects `putTenantFile`
     // now writes it is a link that 403s. `resolveFileUrl` signs a private path
-    // and passes a genuinely public legacy URL through untouched.
+    // and passes a genuinely public legacy URL through untouched;
+    // `resolveDoubtFileUrl` adds the bare `doubts/{doubtId}/…` objects that
+    // only look public.
     const orgId = currentOrgId();
     const filesWithUrls = await Promise.all(
       files.map(async (file: any) => {
         try {
-          const url = await resolveFileUrl(file.storagePath || file.url, { orgId });
+          const url = await resolveDoubtFileUrl(file.storagePath || file.url, doubtId, orgId);
           return { ...file, url: url ?? '' };
         } catch {
           // One unreadable file must not fail the whole listing.
@@ -309,13 +359,21 @@ export const generateUploadUrl = async (req: AuthRequest, res: Response) => {
       });
     }
 
-    const timestamp = Date.now();
-    const sanitizedFilename = `${timestamp}_${fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
-
-    // Storage path structure: /doubts/{doubtId}/{messageId}/{timestamp}_{originalFileName}
-    const storagePath = messageId
-      ? `doubts/${doubtId}/${messageId}/${sanitizedFilename}`
-      : `doubts/${doubtId}/${sanitizedFilename}`;
+    // ── Same place, and the same privacy, as `/upload` ──────────────────
+    // This issued a bare `doubts/{doubtId}/…` path, and `save-file-metadata`
+    // then made the object public. P9A removed the second half and kept the
+    // first, so every image sent from the app since has been PRIVATE under a
+    // name the read path treats as a public legacy object — it handed out an
+    // unsigned URL that 403s, and the chat showed a broken-image tile. The
+    // path now comes from the same decision `putTenantFile` uses, so it lands
+    // in `legacy/doubts/…` or `organizations/{orgId}/doubts/…` and is signed
+    // on every read.
+    const target = resolveStorageTarget({
+      fileName,
+      module: 'doubts',
+      entityId: messageId ? `${doubtId}_${messageId}` : String(doubtId),
+    });
+    const storagePath = target.storagePath;
 
     const blob = bucket.file(storagePath);
 
@@ -335,6 +393,9 @@ export const generateUploadUrl = async (req: AuthRequest, res: Response) => {
       fileType,
     });
   } catch (error) {
+    if (error instanceof StorageAccessDenied) {
+      return res.status(403).json({ error: error.message });
+    }
     console.error('Error generating upload URL:', error);
     return res.status(500).json({
       error: 'Failed to generate upload URL',
