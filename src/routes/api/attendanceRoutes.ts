@@ -368,6 +368,9 @@ import ExternalAttendanceController from '../../controllers/ExternalAttendanceCo
 
 // Admin: Fetch External Sync (Admin only)
 router.post('/fetch-external', authMiddleware, requireStaffPermission('attendance.manage'), requireLegacyDataOwner('Biometric attendance sync'), ExternalAttendanceController.fetchExternal);
+// Admin: watch a sync started above, and see whether the scheduled auto-sync is running
+router.get('/sync-runs/:runId', authMiddleware, requireStaffPermission('attendance.manage'), ExternalAttendanceController.getRun);
+router.get('/sync-status', authMiddleware, requireStaffPermission('attendance.manage'), ExternalAttendanceController.getStatus);
 
 // Admin: Attendance APIs (Read-Only Views)
 // Full paths: /api/attendance/admin/today, /api/attendance/admin/by-date, etc.

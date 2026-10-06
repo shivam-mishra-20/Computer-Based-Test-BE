@@ -1,6 +1,7 @@
 import { Types } from 'mongoose';
 import type { QuestionType, Difficulty } from '../models/Question';
 import { getClassQuestionModel, IClassQuestion } from '../models/ClassQuestion';
+import { answerKeyProblem } from './questionAnswerKey';
 
 /**
  * Enhanced Question Schema for Create Paper Flow
@@ -454,7 +455,13 @@ export function validateQuestionData(data: Partial<EnhancedQuestionData>): boole
     if (!data.options || !Array.isArray(data.options) || data.options.length < 2) {
       throw new Error(`${data.type} questions must have at least 2 options`);
     }
-    // Note: We no longer validate if answers are present - questions can be saved without answers
+  }
+
+  // A question graded by its options needs one marked correct, or every
+  // student is marked wrong on it. Same rule the grader applies.
+  const keyProblem = answerKeyProblem(data);
+  if (keyProblem) {
+    throw new Error(keyProblem);
   }
 
   if (data.type === 'assertionreason') {

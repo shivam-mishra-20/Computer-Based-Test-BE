@@ -4,6 +4,13 @@ import { assignExam, createExam, createQuestion, deleteExam, deleteQuestion, get
 import { logAudit } from '../utils/logger';
 import { tenantScope } from '../core/tenancy';
 import type { GeneratedPaperResult } from '../services/aiService';
+import { AnswerKeyError } from '../services/questionAnswerKey';
+
+/** 400 body; an answer-key refusal also lists the offending questions. */
+function badRequest(err: any, fallback: string) {
+  if (err instanceof AnswerKeyError) return { message: err.message, code: err.code, issues: err.issues };
+  return { message: err?.message || fallback };
+}
 
 export const createQuestionCtrl = async (req: Request, res: Response) => {
   try {
@@ -11,7 +18,7 @@ export const createQuestionCtrl = async (req: Request, res: Response) => {
     const q = await createQuestion({ ...req.body, createdBy });
     res.status(201).json(q);
   } catch (err: any) {
-    res.status(400).json({ message: err.message || 'Failed to create question' });
+    res.status(400).json(badRequest(err, 'Failed to create question'));
   }
 };
 
@@ -27,9 +34,14 @@ export const listQuestionsCtrl = async (req: Request, res: Response) => {
 };
 
 export const updateQuestionCtrl = async (req: Request, res: Response) => {
-  const q = await updateQuestion(req.params.id, req.body);
-  if (!q) return res.status(404).json({ message: 'Question not found' });
-  res.json(q);
+  try {
+    const q = await updateQuestion(req.params.id, req.body);
+    if (!q) return res.status(404).json({ message: 'Question not found' });
+    res.json(q);
+  } catch (err: any) {
+    if (err instanceof AnswerKeyError) return res.status(400).json(badRequest(err, 'Failed to update question'));
+    throw err;
+  }
 };
 
 export const deleteQuestionCtrl = async (req: Request, res: Response) => {
@@ -45,7 +57,7 @@ export const createExamCtrl = async (req: Request, res: Response) => {
   await logAudit((req as any).user?.id, 'admin.exam.create', String(exam._id), { title: exam.title });
     res.status(201).json(exam);
   } catch (err: any) {
-    res.status(400).json({ message: err.message || 'Failed to create exam' });
+    res.status(400).json(badRequest(err, 'Failed to create exam'));
   }
 };
 
@@ -56,7 +68,7 @@ export const updateExamCtrl = async (req: Request, res: Response) => {
     await logAudit((req as any).user?.id, 'admin.exam.update', String(exam._id), { patch: req.body });
     res.json(exam);
   } catch (err: any) {
-    res.status(400).json({ message: err.message || 'Failed to update exam' });
+    res.status(400).json(badRequest(err, 'Failed to update exam'));
   }
 };
 
@@ -139,7 +151,7 @@ export const createExamFromPaperCtrl = async (req: Request, res: Response) => {
     const exam = await createExamFromPaper(paper, createdBy, options || {});
     res.status(201).json(exam);
   } catch (err: any) {
-    res.status(400).json({ message: err.message || 'Failed to create exam from paper' });
+    res.status(400).json(badRequest(err, 'Failed to create exam from paper'));
   }
 };
 

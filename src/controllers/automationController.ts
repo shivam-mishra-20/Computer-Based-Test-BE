@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
-import { saveBatchValidatedQuestions, EnhancedQuestionData } from '../services/questionValidationService';
+import { saveBatchValidatedQuestions, sanitizeQuestionData, EnhancedQuestionData } from '../services/questionValidationService';
+import { findAnswerKeyIssues } from '../services/questionAnswerKey';
 import { Types, Model } from 'mongoose';
 import mongoose from 'mongoose';
 import AutomationStatusModel, { IAutomationStatus } from '../models/AutomationStatus';
@@ -122,8 +123,17 @@ export const bulkImportQuestions = async (req: Request, res: Response) => {
       isActive: true
     }));
 
+    // Questions graded by their options need one marked correct. This is an
+    // automated pipeline, so the rest of the batch still imports; the refused
+    // ones are reported with the reason instead of vanishing into "errors".
+    const keyIssues = findAnswerKeyIssues(enhancedQuestions.map((q) => sanitizeQuestionData(q)));
+    const refused = new Set(keyIssues.map((issue) => issue.position - 1));
+    if (keyIssues.length > 0) {
+      console.warn(`[Bulk Import] ${keyIssues.length} question(s) refused: no correct answer marked`);
+    }
+
     // Save using existing validation service
-    const savedQuestions = await saveBatchValidatedQuestions(enhancedQuestions);
+    const savedQuestions = await saveBatchValidatedQuestions(enhancedQuestions.filter((_q, i) => !refused.has(i)));
 
     console.log(`[Bulk Import] Successfully imported ${savedQuestions.length}/${questions.length} questions`);
 
@@ -131,7 +141,8 @@ export const bulkImportQuestions = async (req: Request, res: Response) => {
       success: true,
       count: savedQuestions.length,
       totalAttempted: questions.length,
-      questionIds: savedQuestions.map(q => q._id)
+      questionIds: savedQuestions.map(q => q._id),
+      rejected: keyIssues.map(({ position, text, reason }) => ({ index: position - 1, text, reason })),
     });
 
   } catch (error) {

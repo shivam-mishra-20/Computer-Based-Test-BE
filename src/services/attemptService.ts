@@ -9,6 +9,15 @@ import { getDeadline, getStartWindowState, getSubmitUnlockAt, isPastDeadline } f
 import { gradeSubjectiveAnswerGroq } from './aiService';
 import { tenantScope } from '../core/tenancy';
 import { getClassQuestionModel } from '../models/ClassQuestion';
+import {
+  FILL_TYPES,
+  INTEGER_TYPES,
+  MULTI_SELECT_TYPES,
+  SINGLE_CHOICE_TYPES,
+  SUBJECTIVE_TYPES,
+  TRUEFALSE_TYPES,
+  normalizeQuestionType,
+} from './questionAnswerKey';
 
 function makeError(message: string, code: string, extra?: Record<string, any>) {
   const err: any = new Error(message);
@@ -593,19 +602,9 @@ export async function clearAnswerResponse(attemptId: string, userId: string, que
   return attempt;
 }
 
-// Collapse the many type aliases the web/mobile players emit into a canonical
-// key (e.g. "mcq-single" / "MCQ_Single" -> "mcqsingle"). Without this the grader
-// silently skipped real question types and treated them as subjective.
-export function normalizeQuestionType(t?: string): string {
-  return (t || '').toLowerCase().replace(/[\s_-]+/g, '');
-}
-
-const SINGLE_CHOICE_TYPES = new Set(['mcq', 'mcqsingle', 'singlechoice', 'multiplechoice']);
-const TRUEFALSE_TYPES = new Set(['truefalse']);
-const MULTI_SELECT_TYPES = new Set(['mcqmulti', 'multiselect', 'multipleselect', 'msq']);
-const INTEGER_TYPES = new Set(['integer', 'numerical', 'numeric', 'number']);
-const FILL_TYPES = new Set(['fill', 'fillblank', 'fillintheblank', 'fillups']);
-const SUBJECTIVE_TYPES = new Set(['short', 'long', 'subjective', 'text', 'essay', 'descriptive']);
+// The type aliases and their sets live in questionAnswerKey.ts, so the
+// save/publish answer-key check applies exactly the rules graded here.
+export { normalizeQuestionType };
 
 export function isSubjectiveType(t?: string): boolean {
   return SUBJECTIVE_TYPES.has(normalizeQuestionType(t));

@@ -1,15 +1,20 @@
 import axios from 'axios';
 import User from '../models/User';
-import QueueService from './QueueService';
+import Attendance from '../models/Attendance';
 import AuditLog from '../models/AuditLog';
-
-// Interface matching actual DownloadPunchData API response
-interface EtimePunch {
-  Name: string;
-  Empcode: string;
-  PunchDate: string; // "13/01/2026 10:56:00"
-  M_Flag: string | null;
-}
+import SocketService from './SocketService';
+import {
+  EtimePunch,
+  PunchDay,
+  checkSyncRange,
+  dayNeedsWrite,
+  formatDdMmYyyy,
+  groupPunchesByDay,
+  idempotencyKeyFor,
+  isNoDataMessage,
+  splitIntoWindows,
+  storedDateFor,
+} from './etimeSyncLogic';
 
 // The API returns data wrapped in an object with PunchData array
 interface EtimeResponse {
@@ -19,6 +24,46 @@ interface EtimeResponse {
   PunchData: EtimePunch[];
 }
 
+export interface EtimeSyncProgress {
+  stage: 'fetching' | 'saving';
+  /** Windows fetched so far while fetching; records handled so far while saving. */
+  done: number;
+  total: number;
+}
+
+export interface EtimeSyncResult {
+  /** Device days that belong to a known user (written + unchanged + failed). */
+  processed: number;
+  failed: number;
+  /** Users whose stored attendance actually changed in this sync. */
+  updatedUserIds: string[];
+  written: number;
+  unchanged: number;
+  totalPunches: number;
+  skippedPunches: number;
+  unmatched: number;
+  unmatchedCodes: string[];
+  windows: number;
+  errors: string[];
+}
+
+const REQUEST_TIMEOUT_MS = 60_000;
+const RETRY_DELAYS_MS = [2_000, 5_000];
+const WINDOW_DAYS = 31;
+const WRITE_CONCURRENCY = 8;
+const LOOKUP_CHUNK = 1_000;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Pulls punches from eTimeOffice and stores one attendance record per person
+ * per day.
+ *
+ * The sync finishes its own writes before it returns. Earlier it handed every
+ * day to an in-memory queue that slept 100 ms per record, so the caller could
+ * only guess when the data had landed — and a month-to-date sync took minutes.
+ * Now the result describes what is actually in the database.
+ */
 class EtimeService {
   private static instance: EtimeService;
   private baseUrl: string;
@@ -47,189 +92,227 @@ class EtimeService {
     return `Basic ${credentials}`;
   }
 
-  /**
-   * Fetch attendance for a specific date range
-   * @param fromDate Format: dd/mm/yyyy (will be converted to dd/mm/yyyy_HH:mm)
-   * @param toDate Format: dd/mm/yyyy (will be converted to dd/mm/yyyy_HH:mm)
-   */
-  public async syncAttendance(fromDate: string, toDate: string): Promise<{ processed: number; failed: number; updatedUserIds: string[] }> {
-    console.log('=== EtimeService.syncAttendance START ===');
-    console.log('Date range:', fromDate, 'to', toDate);
-    
-    try {
-      // Use correct endpoint: DownloadPunchData (not DownloadInOutPunchData)
-      const apiUrl = `${this.baseUrl}/DownloadPunchData`;
-      console.log('[Etime] Calling API:', apiUrl);
-      
-      // Convert date format from dd/mm/yyyy to dd/mm/yyyy_HH:mm
-      // Using same format as working Postman example
-      const formattedFromDate = `${fromDate}_00:00`;
-      const formattedToDate = `${toDate}_23:59`;
-      
-      const authHeader = this.getBasicAuthHeader();
-      console.log('[Etime] Auth header (first 30 chars):', authHeader.substring(0, 30) + '...');
-      
-      const config = {
-        params: {
-          Empcode: 'ALL',
-          FromDate: formattedFromDate,
-          ToDate: formattedToDate
-        },
-        headers: {
-          'Authorization': authHeader
+  /** One window from the device, retried on failure. "No data" is an empty window. */
+  private async fetchWindow(fromDate: string, toDate: string): Promise<EtimePunch[]> {
+    const apiUrl = `${this.baseUrl}/DownloadPunchData`;
+    const params = {
+      Empcode: 'ALL',
+      FromDate: `${fromDate}_00:00`,
+      ToDate: `${toDate}_23:59`,
+    };
+
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
+      if (attempt > 0) {
+        console.warn(`[Etime] Retrying ${fromDate}–${toDate} (attempt ${attempt + 1}): ${lastError?.message}`);
+        await sleep(RETRY_DELAYS_MS[attempt - 1]);
+      }
+      try {
+        const response = await axios.get<EtimeResponse>(apiUrl, {
+          params,
+          headers: { Authorization: this.getBasicAuthHeader() },
+          timeout: REQUEST_TIMEOUT_MS,
+        });
+        if (response.data?.Error) {
+          if (isNoDataMessage(response.data.Msg)) return [];
+          throw new Error(`eTimeOffice API Error: ${response.data.Msg}`);
         }
+        return Array.isArray(response.data?.PunchData) ? response.data.PunchData : [];
+      } catch (error: any) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+      }
+    }
+    throw new Error(
+      `Could not read punches for ${fromDate} to ${toDate} from the device service: ${lastError?.message}`,
+    );
+  }
+
+  /**
+   * Fetch attendance for a date range and store it.
+   * @param fromDate Format: dd/mm/yyyy
+   * @param toDate Format: dd/mm/yyyy
+   */
+  public async syncAttendance(
+    fromDate: string,
+    toDate: string,
+    options: { onProgress?: (progress: EtimeSyncProgress) => void } = {},
+  ): Promise<EtimeSyncResult> {
+    const report = options.onProgress || (() => {});
+    console.log(`[Etime] Sync ${fromDate} to ${toDate}`);
+
+    try {
+      const range = checkSyncRange(fromDate, toDate);
+      if (!range.ok) throw new Error(range.message);
+
+      // ── 1. Read the device, a month at a time ───────────────────────────
+      const windows = splitIntoWindows(range.from, range.to, WINDOW_DAYS);
+      const punches: EtimePunch[] = [];
+      report({ stage: 'fetching', done: 0, total: windows.length });
+      for (let i = 0; i < windows.length; i += 1) {
+        const window = windows[i];
+        const batch = await this.fetchWindow(formatDdMmYyyy(window.from), formatDdMmYyyy(window.to));
+        punches.push(...batch);
+        report({ stage: 'fetching', done: i + 1, total: windows.length });
+      }
+      console.log(`[Etime] ${punches.length} punches in ${windows.length} window(s)`);
+
+      // ── 2. One day per person, matched to a user by employee code ───────
+      const { days, skipped } = groupPunchesByDay(punches);
+
+      const potentialUsers = await User.find({ empCode: { $exists: true, $ne: null } })
+        .select('_id empCode')
+        .lean();
+      const userMap = new Map<string, string>();
+      potentialUsers.forEach((u: any) => {
+        if (u.empCode) userMap.set(String(u.empCode).trim(), String(u._id));
+      });
+
+      const matched: Array<{ day: PunchDay; userId: string; key: string }> = [];
+      const unmatchedCodes = new Set<string>();
+      let unmatched = 0;
+      for (const day of days) {
+        const userId = userMap.get(day.code);
+        if (!userId) {
+          unmatched += 1;
+          unmatchedCodes.add(day.code);
+          continue;
+        }
+        matched.push({ day, userId, key: idempotencyKeyFor(day) });
+      }
+
+      // ── 3. Compare with what is stored, in a few large reads ────────────
+      const existing = new Map<string, any>();
+      for (let i = 0; i < matched.length; i += LOOKUP_CHUNK) {
+        const keys = matched.slice(i, i + LOOKUP_CHUNK).map((item) => item.key);
+        const rows = await Attendance.find({ idempotencyKey: { $in: keys } })
+          .select('idempotencyKey studentId date status clockIn clockOut metadata.punchCount')
+          .lean();
+        rows.forEach((row: any) => existing.set(row.idempotencyKey, row));
+      }
+
+      const pending = matched.filter(({ day, userId, key }) =>
+        dayNeedsWrite(existing.get(key), {
+          studentId: userId,
+          date: storedDateFor(day.datePart),
+          status: 'present',
+          clockIn: day.clockIn,
+          clockOut: day.clockOut,
+          punchCount: day.punchCount,
+        }),
+      );
+      const unchanged = matched.length - pending.length;
+
+      // ── 4. Write only what changed ──────────────────────────────────────
+      let written = 0;
+      let failed = 0;
+      let handled = 0;
+      const errors: string[] = [];
+      const updatedUserIds = new Set<string>();
+      report({ stage: 'saving', done: 0, total: pending.length });
+
+      for (let i = 0; i < pending.length; i += WRITE_CONCURRENCY) {
+        const slice = pending.slice(i, i + WRITE_CONCURRENCY);
+        const outcomes = await Promise.allSettled(
+          slice.map(({ day, userId, key }) => this.writeDay(day, userId, key)),
+        );
+        outcomes.forEach((outcome, index) => {
+          if (outcome.status === 'fulfilled') {
+            written += 1;
+            updatedUserIds.add(slice[index].userId);
+          } else {
+            failed += 1;
+            if (errors.length < 5) {
+              errors.push(`${slice[index].key}: ${outcome.reason?.message || outcome.reason}`);
+            }
+          }
+        });
+        handled += slice.length;
+        report({ stage: 'saving', done: handled, total: pending.length });
+      }
+
+      const result: EtimeSyncResult = {
+        processed: matched.length,
+        failed,
+        updatedUserIds: Array.from(updatedUserIds),
+        written,
+        unchanged,
+        totalPunches: punches.length,
+        skippedPunches: skipped,
+        unmatched,
+        unmatchedCodes: Array.from(unmatchedCodes).slice(0, 20),
+        windows: windows.length,
+        errors,
       };
 
-      console.log('[Etime] API Request params:', JSON.stringify(config.params));
-      console.log('[Etime] Full URL will be:', `${apiUrl}?Empcode=ALL&FromDate=${formattedFromDate}&ToDate=${formattedToDate}`);
-
-      const response = await axios.get<EtimeResponse>(apiUrl, config);
-      console.log('[Etime] API Response status:', response.status);
-      console.log('[Etime] API Response Error:', response.data.Error, 'Msg:', response.data.Msg);
-
-      // Check for API error
-      if (response.data.Error) {
-        console.error('[Etime] API returned error:', response.data.Msg);
-        throw new Error(`eTimeOffice API Error: ${response.data.Msg}`);
-      }
-
-      // Extract PunchData from the response wrapper
-      const punches = response.data.PunchData || [];
-      console.log(`[Etime] Fetched ${punches.length} punch records from PunchData`);
-      
-      if (punches.length > 0) {
-        console.log('[Etime] Sample punch:', JSON.stringify(punches[0]));
-        console.log('[Etime] Last punch:', JSON.stringify(punches[punches.length - 1]));
-      } else {
-        console.log('[Etime] WARNING: No punch records in PunchData array!');
-      }
-
-      let processed = 0;
-      let failed = 0;
-      const updatedUserIds = new Set<string>();
-
-      // Fetch all users with empCode
-      const potentialUsers = await User.find({ empCode: { $exists: true, $ne: null } }).select('_id empCode name');
-      console.log(`[Etime] Found ${potentialUsers.length} users with empCode in DB`);
-      
-      if (potentialUsers.length > 0) {
-        console.log('[Etime] Sample users:', potentialUsers.slice(0, 3).map(u => ({ empCode: u.empCode, name: u.name })));
-      }
-      const empCodes = punches.map(p => p.Empcode).filter((v, i, a) => a.indexOf(v) === i); // Unique
-      console.log('[Etime] Unique empCodes from API:', empCodes.slice(0, 5), '...');
-      
-      // Create a map of TRIMMED empCode -> userId
-      const userMap = new Map();
-      potentialUsers.forEach(u => {
-        if (u.empCode) {
-           userMap.set(u.empCode.trim(), u._id);
-           userMap.set(u.empCode, u._id);
-        }
-      });
-      
-      console.log('[Etime] UserMap size:', userMap.size);
-
-      // ========================================
-      // GROUP PUNCHES BY EMPLOYEE + DATE
-      // First punch of day = Clock IN
-      // Second/Last punch of day = Clock OUT
-      // ========================================
-      
-      // Group punches by Empcode + Date
-      const punchGroups = new Map<string, EtimePunch[]>();
-      
-      for (const punch of punches) {
-        // Parse PunchDate "dd/mm/yyyy HH:mm:ss" format
-        const [datePart] = punch.PunchDate.split(' ');
-        const key = `${punch.Empcode.trim()}_${datePart}`; // empcode_dd/mm/yyyy
-        
-        if (!punchGroups.has(key)) {
-          punchGroups.set(key, []);
-        }
-        punchGroups.get(key)!.push(punch);
-      }
-      
-      console.log(`[Etime] Grouped into ${punchGroups.size} employee-date combinations`);
-
-      // Process each employee-date group
-      for (const [key, groupPunches] of punchGroups.entries()) {
-        try {
-          const punchCode = groupPunches[0].Empcode.trim();
-          const userId = userMap.get(punchCode);
-          
-          if (!userId) {
-            console.log(`[Etime] No user found for Empcode: ${punchCode}`);
-            continue;
-          }
-          
-          // Sort punches by time to get first (clock in) and last (clock out)
-          const sortedPunches = groupPunches.sort((a, b) => {
-            const timeA = a.PunchDate.split(' ')[1] || '00:00:00';
-            const timeB = b.PunchDate.split(' ')[1] || '00:00:00';
-            return timeA.localeCompare(timeB);
-          });
-          
-          const firstPunch = sortedPunches[0];
-          const lastPunch = sortedPunches.length > 1 ? sortedPunches[sortedPunches.length - 1] : null;
-          
-          // Parse date
-          const [datePart] = firstPunch.PunchDate.split(' ');
-          const [day, month, year] = datePart.split('/');
-          const dateObj = new Date(`${year}-${month}-${day}T00:00:00.000Z`);
-          
-          // Extract times
-          const clockInTime = firstPunch.PunchDate.split(' ')[1]?.substring(0, 5); // HH:mm
-          const clockOutTime = lastPunch ? lastPunch.PunchDate.split(' ')[1]?.substring(0, 5) : undefined;
-          
-          console.log(`[Etime] Processing ${punchCode} on ${datePart}: ClockIn=${clockInTime}, ClockOut=${clockOutTime || 'N/A'} (${sortedPunches.length} punches)`);
-
-          // Add to Queue with aggregated clock in/out times
-          await QueueService.add({
-            studentId: userId.toString(),
-            date: dateObj,
-            status: 'present',
-            markedBy: userId.toString(), 
-            source: 'external',
-            idempotencyKey: `etime-${punchCode}-${datePart}`, // One record per employee per day
-            clockIn: clockInTime,
-            clockOut: clockOutTime,
-            metadata: {
-              punchCount: sortedPunches.length,
-              firstPunchTime: firstPunch.PunchDate,
-              lastPunchTime: lastPunch?.PunchDate || firstPunch.PunchDate,
-              apiName: firstPunch.Name,
-              mFlag: firstPunch.M_Flag
-            }
-          });
-
-          // Track this user for notification
-          updatedUserIds.add(userId.toString());
-          processed++;
-        } catch (err) {
-          console.error(`[Etime] Error processing group ${key}:`, err);
-          failed++;
-        }
-      }
+      console.log(
+        `[Etime] Done: ${matched.length} days (${written} written, ${unchanged} unchanged, ${failed} failed), ` +
+          `${unmatched} days with unknown employee codes`,
+      );
 
       await AuditLog.create({
         action: 'SYNC_ETIME',
-        status: 'success',
+        status: failed > 0 && written === 0 ? 'failure' : 'success',
         entity: 'System',
-        metadata: { fromDate, toDate, totalPunches: punches.length, groupsProcessed: punchGroups.size, processed, failed }
+        metadata: {
+          fromDate,
+          toDate,
+          totalPunches: punches.length,
+          groupsProcessed: days.length,
+          processed: matched.length,
+          written,
+          unchanged,
+          failed,
+          unmatched,
+        },
       });
 
-      return { processed, failed, updatedUserIds: Array.from(updatedUserIds) };
-
+      return result;
     } catch (error: any) {
       console.error('Etime Sync Error:', error.message);
       await AuditLog.create({
         action: 'SYNC_ETIME',
         status: 'failure',
         entity: 'System',
-        errorMessage: error.message
-      });
-      // Re-throw but ensure we don't lose the error
+        errorMessage: error.message,
+        metadata: { fromDate, toDate },
+      }).catch(() => {});
       throw error;
+    }
+  }
+
+  /**
+   * The same upsert the attendance worker always made for these records, so a
+   * day stored by an earlier sync is updated in place rather than duplicated.
+   */
+  private async writeDay(day: PunchDay, userId: string, key: string): Promise<void> {
+    const updateDoc = {
+      studentId: userId,
+      date: storedDateFor(day.datePart),
+      status: 'present',
+      markedBy: userId,
+      source: 'external',
+      idempotencyKey: key,
+      metadata: {
+        punchCount: day.punchCount,
+        firstPunchTime: day.firstPunchTime,
+        lastPunchTime: day.lastPunchTime,
+        apiName: day.apiName,
+        mFlag: day.mFlag,
+      },
+      clockIn: day.clockIn,
+      ...(day.clockOut && { clockOut: day.clockOut }),
+    };
+
+    const attendance = await Attendance.findOneAndUpdate(
+      { idempotencyKey: key },
+      { $set: updateDoc },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+
+    try {
+      SocketService.emitToUser(userId, 'attendance_update', attendance);
+    } catch {
+      // A missed live update is not a failed save; the record is stored.
     }
   }
 }

@@ -1,6 +1,7 @@
 import cron from 'node-cron';
 import { forEachOrg } from '../core/tenancy';
-import EtimeService from './EtimeService';
+import { runSyncAndRecord } from './attendanceSyncRuns';
+import { assessAutoSync, autoSyncRange } from './etimeSyncLogic';
 import AuditLog from '../models/AuditLog';
 import { broadcastNotification } from './notificationService';
 import Notification from '../models/Notification';
@@ -15,13 +16,18 @@ import Notification from '../models/Notification';
 export class AttendanceCron {
   private static scheduled = false;
 
-  // Cron schedule configuration
+  // Cron schedule configuration (hour/minute are IST, matching `cron`)
   private static readonly SYNC_TIMES = [
-    { cron: '40 11 * * *', label: '11:40 AM IST' },
-    { cron: '0 16 * * *', label: '4:00 PM IST' },
-    { cron: '0 21 * * *', label: '9:00 PM IST' },
-    { cron: '0 3 * * *', label: '3:00 AM IST' },
+    { cron: '40 11 * * *', label: '11:40 AM IST', hour: 11, minute: 40 },
+    { cron: '0 16 * * *', label: '4:00 PM IST', hour: 16, minute: 0 },
+    { cron: '0 21 * * *', label: '9:00 PM IST', hour: 21, minute: 0 },
+    { cron: '0 3 * * *', label: '3:00 AM IST', hour: 3, minute: 0 },
   ];
+
+  /** The schedule, for the admin page's "is auto-sync working" check. */
+  public static get schedule() {
+    return this.SYNC_TIMES.map(({ label, hour, minute }) => ({ label, hour, minute }));
+  }
 
   /**
    * Initialize cron jobs for attendance auto-sync
@@ -53,6 +59,35 @@ export class AttendanceCron {
 
     this.scheduled = true;
     console.log('[AttendanceCron] All 4 daily sync schedules initialized');
+
+    // A scheduled time that passed while the server was down or redeploying
+    // never fires later on its own, so the missed sync is made up shortly after
+    // boot. Delayed so it does not compete with startup.
+    setTimeout(() => {
+      forEachOrg('attendance-sync-catch-up', async () => {
+        if (await this.missedScheduledSync()) {
+          console.warn('[AttendanceCron] A scheduled sync was missed — running a catch-up sync now');
+          await this.runAutoSync();
+        }
+      }).catch((error) => console.error('[AttendanceCron] Catch-up check failed:', error?.message || error));
+    }, 60_000).unref();
+  }
+
+  /** True when the last scheduled slot has no completed sync after it. */
+  private static async missedScheduledSync(): Promise<boolean> {
+    const latest = (action: string) =>
+      AuditLog.findOne({ action }).sort({ createdAt: -1 }).select('createdAt').lean();
+    const [lastStart, lastComplete, lastFailure] = await Promise.all([
+      latest('AUTO_SYNC_ATTENDANCE_START'),
+      latest('AUTO_SYNC_ATTENDANCE_COMPLETE'),
+      latest('AUTO_SYNC_ATTENDANCE_FAILED'),
+    ]);
+    const { status } = assessAutoSync(new Date(), this.schedule, {
+      lastStart: (lastStart as any)?.createdAt,
+      lastComplete: (lastComplete as any)?.createdAt,
+      lastFailure: (lastFailure as any)?.createdAt,
+    });
+    return status !== 'ok' && status !== 'running';
   }
 
   /**
@@ -63,12 +98,8 @@ export class AttendanceCron {
     const startTime = Date.now();
     
     try {
-      // Get today's date in dd/mm/yyyy format
-      const today = new Date();
-      const toDate = `${String(today.getDate()).padStart(2, '0')}/${String(today.getMonth() + 1).padStart(2, '0')}/${today.getFullYear()}`;
-      
-      // Start from beginning of current month
-      const fromDate = `01/${String(today.getMonth() + 1).padStart(2, '0')}/${today.getFullYear()}`;
+      // Month to date in India time, always including yesterday (see autoSyncRange)
+      const { fromDate, toDate } = autoSyncRange(new Date());
 
       console.log(`[AttendanceCron] Auto-sync from ${fromDate} to ${toDate}`);
 
@@ -79,7 +110,7 @@ export class AttendanceCron {
         metadata: { fromDate, toDate, triggeredBy: 'cron' }
       });
 
-      const result = await EtimeService.syncAttendance(fromDate, toDate);
+      const result = await runSyncAndRecord({ fromDate, toDate, trigger: 'cron' });
 
       const duration = Date.now() - startTime;
       console.log(`[AttendanceCron] Auto-sync completed in ${duration}ms. Processed: ${result.processed}, Failed: ${result.failed}, Users updated: ${result.updatedUserIds.length}`);
@@ -155,7 +186,7 @@ export class AttendanceCron {
         metadata: { fromDate, toDate, triggeredBy: 'manual' }
       });
 
-      const result = await EtimeService.syncAttendance(fromDate, toDate);
+      const result = await runSyncAndRecord({ fromDate, toDate, trigger: 'api' });
 
       // Send notifications for manual sync too
       let notified = 0;

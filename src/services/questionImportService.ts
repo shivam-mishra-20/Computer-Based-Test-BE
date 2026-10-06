@@ -6,6 +6,7 @@ import { Types } from 'mongoose';
 import { ImportBatch, ImportedQuestion, IImportedQuestion } from '../models/ImportedQuestion';
 import { setPreview, newPreviewId, PreviewQuestion } from './importPreview';
 import { EnhancedQuestionData, saveValidatedQuestion } from './questionValidationService';
+import { AnswerKeyError, findAnswerKeyIssues } from './questionAnswerKey';
 import { normalizeMathematicalExpressions } from './mathService';
 import { EnhancedPdfQuestionExtractor } from './enhancedPdfQuestionExtractor';
 import { extractQuestionsFromChunk, mapOllamaToExtracted } from './ollamaService';
@@ -736,6 +737,14 @@ export class QuestionImportService {
 
     if (updatedData) {
       Object.assign(question, updatedData);
+    }
+
+    // Approving moves the question into the class bank, which refuses one
+    // with no correct answer marked. Refuse here, before it is recorded as
+    // approved, so the review status and the bank cannot disagree.
+    if (action === 'approve') {
+      const issues = findAnswerKeyIssues([question], () => `Question ${question.questionNumber ?? questionId}`);
+      if (issues.length > 0) throw new AnswerKeyError(issues, 'Cannot approve');
     }
 
     question.status = action === 'approve' ? 'approved' : 'rejected';

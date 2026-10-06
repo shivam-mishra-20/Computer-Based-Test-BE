@@ -5,6 +5,8 @@ import path from 'path';
 import fs from 'fs';
 import { Types } from 'mongoose';
 import { authMiddleware } from '../../middlewares/authMiddleware';
+import { requireStaffPermission } from '../../middlewares/requirePermission';
+import { AnswerKeyError, answerKeyErrorBody } from '../../services/questionAnswerKey';
 import { QuestionImportService } from '../../services/questionImportService';
 import { getProgress, stageLabel } from '../../services/importProgress';
 import { getPreview } from '../../services/importPreview';
@@ -56,7 +58,7 @@ const upload = preservingTenantContextOn(multer({
  * POST /api/import-paper
  * Upload and process question paper
  */
-router.post('/import-paper', authMiddleware, uploadLimiter, upload.single('questionPaper'), async (req, res) => {
+router.post('/import-paper', authMiddleware, requireStaffPermission('questions.import'), uploadLimiter, upload.single('questionPaper'), async (req, res) => {
   try {
   const { subject, topic, ocrProvider = 'pdf-parse', mode, class: className, board, chapter, section, marks, provider } = req.body;
     const userId = (req as any).user.id;
@@ -117,7 +119,7 @@ router.post('/import-paper', authMiddleware, uploadLimiter, upload.single('quest
  * GET /api/import-paper/batches
  * Get all import batches for the current user
  */
-router.get('/import-paper/batches', authMiddleware, async (req, res) => {
+router.get('/import-paper/batches', authMiddleware, requireStaffPermission('questions.import'), async (req, res) => {
   try {
     const userId = (req as any).user.id;
     const { page = 1, limit = 10, status } = req.query;
@@ -155,7 +157,7 @@ router.get('/import-paper/batches', authMiddleware, async (req, res) => {
  * GET /api/import-paper/batch/:batchId
  * Get specific import batch with questions
  */
-router.get('/import-paper/batch/:batchId', authMiddleware, async (req, res) => {
+router.get('/import-paper/batch/:batchId', authMiddleware, requireStaffPermission('questions.import'), async (req, res) => {
   try {
     const { batchId } = req.params;
     const userId = (req as any).user.id;
@@ -218,7 +220,7 @@ router.get('/import-paper/batch/:batchId', authMiddleware, async (req, res) => {
  * GET /api/import-paper/questions
  * Get questions from a specific batch with filtering
  */
-router.get('/import-paper/questions', authMiddleware, async (req, res) => {
+router.get('/import-paper/questions', authMiddleware, requireStaffPermission('questions.import'), async (req, res) => {
   try {
     const { 
       batchId, 
@@ -278,7 +280,7 @@ router.get('/import-paper/questions', authMiddleware, async (req, res) => {
  * PUT /api/import-paper/question/:questionId
  * Update/review a specific question
  */
-router.put('/import-paper/question/:questionId', authMiddleware, async (req, res) => {
+router.put('/import-paper/question/:questionId', authMiddleware, requireStaffPermission('questions.import'), async (req, res) => {
   try {
     const { questionId } = req.params;
     const userId = (req as any).user.id;
@@ -320,6 +322,7 @@ router.put('/import-paper/question/:questionId', authMiddleware, async (req, res
     });
 
   } catch (error) {
+    if (error instanceof AnswerKeyError) return res.status(400).json(answerKeyErrorBody(error));
     console.error('Update question error:', error);
     return errorResponse(res, 
       error instanceof Error ? error.message : 'Failed to update question', 
@@ -332,7 +335,7 @@ router.put('/import-paper/question/:questionId', authMiddleware, async (req, res
  * POST /api/import-paper/questions/bulk-approve
  * Bulk approve multiple questions
  */
-router.post('/import-paper/questions/bulk-approve', authMiddleware, async (req, res) => {
+router.post('/import-paper/questions/bulk-approve', authMiddleware, requireStaffPermission('questions.import', 'questions.create'), async (req, res) => {
   try {
     const { questionIds } = req.body;
     const userId = (req as any).user.id;
@@ -372,7 +375,7 @@ router.post('/import-paper/questions/bulk-approve', authMiddleware, async (req, 
  * DELETE /api/import-paper/batch/:batchId
  * Delete an import batch and all its questions
  */
-router.delete('/import-paper/batch/:batchId', authMiddleware, async (req, res) => {
+router.delete('/import-paper/batch/:batchId', authMiddleware, requireStaffPermission('questions.import'), async (req, res) => {
   try {
     const { batchId } = req.params;
     const userId = (req as any).user.id;
@@ -411,7 +414,7 @@ router.delete('/import-paper/batch/:batchId', authMiddleware, async (req, res) =
  * GET /api/import-paper/stats
  * Get import statistics for the current user
  */
-router.get('/import-paper/stats', authMiddleware, async (req, res) => {
+router.get('/import-paper/stats', authMiddleware, requireStaffPermission('questions.import'), async (req, res) => {
   try {
     const userId = (req as any).user.id;
     
@@ -519,7 +522,7 @@ router.get('/imports/questions', authMiddleware, async (req, res) => {
  * POST /api/import-paper/question/:questionId/diagram
  * Attach a diagram image to a specific imported question
  */
-router.post('/import-paper/question/:questionId/diagram', authMiddleware, uploadLimiter, memUpload.single('image'), async (req, res) => {
+router.post('/import-paper/question/:questionId/diagram', authMiddleware, requireStaffPermission('questions.import'), uploadLimiter, memUpload.single('image'), async (req, res) => {
   try {
     const { questionId } = req.params;
     if (!Types.ObjectId.isValid(questionId)) return errorResponse(res, 'Invalid question ID', 400);
@@ -569,7 +572,7 @@ router.get('/blueprints', authMiddleware, async (req, res) => {
  * Build a Paper document from a blueprint and selected imported question IDs, preserving order.
  * Body: { blueprintId: string, questionIds: string[] }
  */
-router.post('/import-paper/create-paper', authMiddleware, async (req, res) => {
+router.post('/import-paper/create-paper', authMiddleware, requireStaffPermission('questions.import', 'exams.create'), async (req, res) => {
   try {
     const userId = new Types.ObjectId((req as any).user.id);
     const { blueprintId, questionIds, examTitle } = req.body as { blueprintId: string; questionIds: string[]; examTitle?: string };

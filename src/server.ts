@@ -110,17 +110,44 @@ function isRealmSingleton(): boolean {
   return process.env.REALM_INSTANCE_PRIMARY !== 'false';
 }
 
-function shouldRunCronJobs(): boolean {
-  if (process.env.ENABLE_CRON === 'false') return false;
+/**
+ * Is this the one cluster worker that runs once-per-deployment work?
+ *
+ * ── Why not `cluster.worker.id === 1` ───────────────────────────────────────
+ * Worker ids are never reused. When worker 1 crashes, its replacement is
+ * worker N+1, after which NO worker has id 1 — and the attendance cron, the
+ * embedded workers and the platform runtime silently stop until the whole
+ * service is restarted. The leader is therefore a role handed to a worker when
+ * it is forked (server.cluster.ts passes it on to the replacement), or pm2's
+ * instance index, which pm2 keeps stable across restarts.
+ */
+function isClusterLeader(): boolean {
+  if (!cluster.isWorker) return true;
+  const assigned = process.env.CLUSTER_LEADER;
+  if (assigned === 'true' || assigned === 'false') return assigned === 'true';
+  const pm2Instance = process.env.NODE_APP_INSTANCE ?? process.env.INSTANCE_ID;
+  if (pm2Instance !== undefined && pm2Instance !== '') return pm2Instance === '0';
+  return cluster.worker?.id === 1;
+}
+
+/**
+ * Why this process will NOT schedule cron jobs, or null when it will.
+ *
+ * Returned as a sentence rather than a boolean so the boot log names the cause.
+ * The attendance auto-sync once stopped for days with nothing in the log but
+ * "Skipping cron initialization", which cannot tell a deliberate switch from a
+ * misconfiguration.
+ */
+function cronSkipReason(): string | null {
+  if (process.env.ENABLE_CRON === 'false') return 'ENABLE_CRON=false';
   // The api-legacy deployment must not schedule jobs: both deployments share
   // one database, so duplicate cron would give Abhigyan two attendance syncs
   // and two EOD reminders a day. Only an explicit TENANT_MODE=pinned disables
   // this — a defaulted value must not change today's production behaviour.
-  if (!shouldRunScheduledJobs()) return false;
-  if (!isRealmSingleton()) return false;
-  if (process.env.CRON_ON_ALL_WORKERS === 'true') return true;
-  if (!cluster.isWorker) return true;
-  return cluster.worker?.id === 1;
+  if (!shouldRunScheduledJobs()) return 'TENANT_MODE=pinned (scheduled jobs run on another deployment)';
+  if (!isRealmSingleton()) return 'REALM_INSTANCE_PRIMARY=false (not the singleton instance)';
+  if (process.env.CRON_ON_ALL_WORKERS === 'true') return null;
+  return isClusterLeader() ? null : 'not the cluster leader (the leader worker runs them)';
 }
 
 /** The AI PPT pipeline worker runs EMBEDDED here by default so `npm start`
@@ -132,8 +159,7 @@ function shouldRunCronJobs(): boolean {
 function shouldRunEmbeddedPptWorker(): boolean {
   if (process.env.PPT_WORKER_EMBEDDED === 'false') return false;
   if (!isRealmSingleton()) return false;
-  if (!cluster.isWorker) return true;
-  return cluster.worker?.id === 1;
+  return isClusterLeader();
 }
 
 /**
@@ -157,8 +183,7 @@ function shouldRunEmbeddedAppBuildWorker(): boolean {
   if (serviceRealm() !== 'platform') return false;
   if (process.env.APP_BUILD_WORKER_EMBEDDED === 'false') return false;
   if (!isRealmSingleton()) return false;
-  if (!cluster.isWorker) return true;
-  return cluster.worker?.id === 1;
+  return isClusterLeader();
 }
 
 const httpServer = http.createServer(app);
@@ -185,7 +210,7 @@ const server = httpServer.listen(PORT, LISTEN_HOST, () => {
   try {
     const started = startPlatformRuntime(configuredEnv(), {
       entry: __filename,
-      primary: !cluster.isWorker || cluster.worker?.id === 1,
+      primary: isClusterLeader(),
     });
     if (!started) {
       console.log(
@@ -204,7 +229,8 @@ const server = httpServer.listen(PORT, LISTEN_HOST, () => {
 server.maxConnections = 10000;
 
 connectDB().then(async () => {
-  if (shouldRunCronJobs()) {
+  const cronSkipped = cronSkipReason();
+  if (!cronSkipped) {
     // Initialize attendance auto-sync cron after DB is ready
     const { AttendanceCron } = require('./services/AttendanceCron');
     AttendanceCron.init();
@@ -214,7 +240,7 @@ connectDB().then(async () => {
     TeacherEodReminderCron.init();
     console.log(`✅ [Worker ${WORKER_ID}] Cron jobs initialized`);
   } else {
-    console.log(`ℹ️ [Worker ${WORKER_ID}] Skipping cron initialization on this worker`);
+    console.log(`ℹ️ [Worker ${WORKER_ID}] Skipping cron initialization: ${cronSkipped}`);
   }
 
   if (shouldRunEmbeddedPptWorker()) {

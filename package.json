@@ -28,6 +28,7 @@
     "verify:subject-model": "ts-node scripts/verify-subject-model.ts",
     "safety:doubts": "ts-node --transpile-only scripts/safety/doubts.test.ts",
     "safety:batch-config": "ts-node --transpile-only scripts/safety/batch-config.test.ts",
+    "safety:attendance-sync": "ts-node --transpile-only scripts/safety/attendance-sync.test.ts",
     "indexes:sync:dry": "ts-node --transpile-only scripts/sync-doubt-indexes.ts",
     "indexes:sync:apply": "ts-node --transpile-only scripts/sync-doubt-indexes.ts --apply",
     "lint": "eslint . --ext .ts",

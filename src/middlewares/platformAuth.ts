@@ -44,6 +44,15 @@ export async function platformAuthMiddleware(req: Request, res: Response, next: 
         code: 'TOKEN_AUDIENCE_MISMATCH',
       });
     }
+    // Expiry is told apart from every other failure: it is the one case the
+    // console answers by renewing the session (POST /refresh) rather than by
+    // signing the operator out.
+    if ((error as { name?: string })?.name === 'TokenExpiredError') {
+      return res.status(401).json({
+        message: 'Your platform session has expired.',
+        code: 'TOKEN_EXPIRED',
+      });
+    }
     return res.status(401).json({ message: 'Invalid or expired platform credentials.' });
   }
 

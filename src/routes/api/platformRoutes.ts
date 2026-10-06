@@ -99,7 +99,12 @@ import { issueInvite, issueResetLink } from '../../core/accounts/accountLinks';
 import { runWithTenant } from '../../core/tenancy/context';
 import Org from '../../models/Org';
 import mongoose from 'mongoose';
-import { signPlatformToken } from '../../core/auth/tokens';
+import {
+  signPlatformSession,
+  signPlatformToken,
+  verifyPlatformRefreshToken,
+  verifyToken,
+} from '../../core/auth/tokens';
 import { authLimiter } from '../../middlewares/rateLimiter';
 import bcrypt from 'bcrypt';
 
@@ -168,7 +173,9 @@ router.post('/login', authLimiter, async (req: Request, res: Response) => {
       return res.status(401).json(DENIED);
     }
 
-    const token = signPlatformToken({
+    // A 15-minute platform token, as before, plus a refresh token that renews
+    // it for at most TOKEN_TTL.platformSession — see POST /refresh below.
+    const session = signPlatformSession({
       id: String(staff._id),
       role: staff.role,
       // Carried so a bump to `tokenVersion` revokes this token immediately,
@@ -196,7 +203,9 @@ router.post('/login', authLimiter, async (req: Request, res: Response) => {
     // No password, no hash, no tokenVersion. The console needs identity and
     // capabilities; anything else here is a field someone later logs.
     return res.json({
-      token,
+      token: session.token,
+      refreshToken: session.refreshToken,
+      expiresIn: session.expiresIn,
       user: {
         id: String(staff._id),
         name: staff.name,
@@ -208,6 +217,130 @@ router.post('/login', authLimiter, async (req: Request, res: Response) => {
   } catch (error) {
     console.error('[platform/login] failed:', (error as Error).message);
     return res.status(500).json({ message: 'Login failed.' });
+  }
+});
+
+/** A token version as compared: a missing one is 0, as the model defaults it. */
+function tokenVersionOf(value: unknown): number {
+  return Number(value ?? 0) || 0;
+}
+
+/**
+ * Renew a console session's access token.
+ *
+ * Above the guard for the same reason as login: the access token it renews has
+ * expired, so the credential here is the refresh token itself — audience
+ * `platform-refresh`, accepted nowhere else. The account must still exist, be
+ * active, and hold the `tokenVersion` the refresh token was issued with, so
+ * disabling a staff account ends its sessions at the next renewal at the
+ * latest (and its access tokens at once, as before).
+ *
+ * Returns a new 15-minute access token only. The refresh token is not
+ * re-issued, so a sign-in still ends TOKEN_TTL.platformSession after it began.
+ */
+router.post('/refresh', authLimiter, async (req: Request, res: Response) => {
+  let claims: { id: string; tokenVersion?: number };
+  try {
+    claims = verifyPlatformRefreshToken(String(req.body?.refreshToken ?? ''));
+  } catch {
+    return res
+      .status(401)
+      .json({ message: 'Please sign in again.', code: 'REFRESH_INVALID' });
+  }
+
+  try {
+    const staff = await PlatformUserModel.findById(claims.id).lean();
+    if (
+      !staff ||
+      !staff.isActive ||
+      tokenVersionOf(claims.tokenVersion) !== tokenVersionOf(staff.tokenVersion)
+    ) {
+      return res
+        .status(401)
+        .json({ message: 'Please sign in again.', code: 'SESSION_REVOKED' });
+    }
+    // The stored value exactly as login signs it — `platformAuthMiddleware`
+    // compares the claim with the record as-is.
+    const token = signPlatformToken({
+      id: String(staff._id),
+      role: staff.role,
+      tokenVersion: staff.tokenVersion,
+    });
+    return res.json({ token, expiresIn: 15 * 60 });
+  } catch (error) {
+    console.error('[platform/refresh] failed:', (error as Error).message);
+    return res.status(500).json({ message: 'Could not renew the session.' });
+  }
+});
+
+/**
+ * Sign out — on the server, not only in the browser.
+ *
+ * Clearing the tab's storage leaves the refresh token valid until it expires,
+ * so a copy taken earlier would go on minting access tokens for up to
+ * TOKEN_TTL.platformSession. This bumps the account's `tokenVersion` — the
+ * same revocation deactivation uses — and every access and refresh token
+ * issued before it stops working at once (platformAuthMiddleware and
+ * POST /refresh both compare it). That is every console session of this
+ * account, in every tab and browser: the version is per account, not per tab.
+ *
+ * Above the guard so it works after the access token has expired: the
+ * credential is the refresh token, or else a still-valid access token. A
+ * credential that was already revoked changes nothing.
+ */
+router.post('/logout', authLimiter, async (req: Request, res: Response) => {
+  let claims: { id: string; tokenVersion?: number };
+  try {
+    const refreshToken =
+      typeof req.body?.refreshToken === 'string' ? req.body.refreshToken : '';
+    if (refreshToken) {
+      claims = verifyPlatformRefreshToken(refreshToken);
+    } else {
+      const raw =
+        req.header('Authorization')?.replace('Bearer ', '').trim() ?? '';
+      claims = verifyToken<{ id: string; tokenVersion?: number; aud?: string }>(
+        raw,
+        'platform',
+      );
+    }
+  } catch {
+    return res.status(401).json({
+      message: 'There is no platform session to sign out.',
+      code: 'REFRESH_INVALID',
+    });
+  }
+
+  try {
+    const staff = await PlatformUserModel.findById(claims.id)
+      .select('role tokenVersion')
+      .lean();
+    if (
+      !staff ||
+      tokenVersionOf(claims.tokenVersion) !== tokenVersionOf(staff.tokenVersion)
+    ) {
+      return res.status(204).end();
+    }
+    await PlatformUserModel.updateOne(
+      { _id: staff._id },
+      { $inc: { tokenVersion: 1 } },
+    );
+
+    (req as Request & { platformUser?: PlatformRequestUser }).platformUser = {
+      id: String(staff._id),
+      role: staff.role,
+      capabilities: platformCapabilities(staff.role),
+    };
+    await recordPlatformAction(req, {
+      action: 'platform.logout',
+      entity: 'PlatformUser',
+      entityId: String(staff._id),
+    });
+    return res.status(204).end();
+  } catch (error) {
+    console.error('[platform/logout] failed:', (error as Error).message);
+    return res
+      .status(500)
+      .json({ message: 'Could not sign out on the server.' });
   }
 });
 

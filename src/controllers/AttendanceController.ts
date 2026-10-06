@@ -814,6 +814,9 @@ export class AttendanceController {
           absent: totalAbsent,
           late: totalLate,
         },
+        // Which days anyone was expected (Sundays and holidays excluded), so a
+        // report can tell a short day from extra work on a day off.
+        workingDates,
         users: exportUsers,
       });
     } catch (error) {
@@ -983,6 +986,7 @@ export class AttendanceController {
       });
 
       // ── Aggregate per user ────────────────────────────────────────────────────
+      const todayYMD = toYMD(new Date());
       let gFullDays = 0, gPartialDays = 0, gHalfDays = 0, gAbsentDays = 0, gLateDays = 0;
       let gDeductionUnits = 0;
 
@@ -1001,6 +1005,14 @@ export class AttendanceController {
             record?.outTime ?? null,
             rule
           );
+
+          // Today is not over. Someone who has punched in but not yet out is at
+          // work, not on a short day: their day is classified once it has its
+          // out-punch. Lateness is already known on arrival, so it still counts.
+          if (dateStr === todayYMD && record?.inTime && !record?.outTime) {
+            if (cls.isLate) lateDays++;
+            return;
+          }
 
           if (cls.attendanceStatus === 'FULL_DAY') fullDays++;
           else if (cls.attendanceStatus === 'PARTIAL_FULL_DAY') partialFullDays++;

@@ -66,6 +66,13 @@ export const TOKEN_TTL = {
    */
   legacy: '3650d',
   legacyAdmin: '30d',
+  /**
+   * The longest a platform-console sign-in can last. The console's access
+   * token is still `platform` (15 minutes); this bounds the refresh token that
+   * renews it, and it is absolute — renewing never extends it. After it, the
+   * operator signs in again.
+   */
+  platformSession: '12h',
 } as const;
 
 function secret(): string {
@@ -199,4 +206,65 @@ export function verifyRefreshToken(raw: string): { id: string; tv?: number; orgI
   const decoded = jwt.verify(raw, secret()) as { id?: string; tv?: number; orgId?: string; aud?: string };
   if (decoded.aud !== 'refresh' || !decoded.id) throw new TokenAudienceMismatch('refresh', String(decoded.aud ?? 'legacy'));
   return { id: decoded.id, tv: decoded.tv, orgId: decoded.orgId };
+}
+
+export interface PlatformSession {
+  /** A `platform` access token — 15 minutes, exactly as before. */
+  token: string;
+  /** Renews the access token until `TOKEN_TTL.platformSession` after sign-in. */
+  refreshToken: string;
+  /** Seconds until `token` expires. */
+  expiresIn: number;
+}
+
+/**
+ * A platform-console sign-in: the usual 15-minute platform token, plus a
+ * refresh token so the console can renew it instead of dropping the operator
+ * every 15 minutes.
+ *
+ * The refresh token's audience is `platform-refresh`, so it is refused as an
+ * access token everywhere — `platformAuthMiddleware` asserts `platform`, the
+ * tenant middleware accepts only `tenant`/legacy, and the tenant refresh
+ * endpoint only `refresh`. It carries the account's `tokenVersion`, so
+ * disabling the account (which bumps it) kills it at once. It is not rotated:
+ * renewing returns a new access token only, so the sign-in still ends
+ * `TOKEN_TTL.platformSession` after it began.
+ */
+export function signPlatformSession(claims: {
+  id: string;
+  role: string;
+  tokenVersion?: number;
+}): PlatformSession {
+  const refresh: Record<string, unknown> = {
+    id: claims.id,
+    aud: 'platform-refresh',
+  };
+  if (typeof claims.tokenVersion === 'number')
+    refresh.tokenVersion = claims.tokenVersion;
+  return {
+    token: signPlatformToken(claims),
+    refreshToken: jwt.sign(refresh, secret(), {
+      expiresIn: TOKEN_TTL.platformSession,
+    }),
+    expiresIn: 15 * 60,
+  };
+}
+
+/** Verify a platform refresh token. Throws on anything that is not one. */
+export function verifyPlatformRefreshToken(raw: string): {
+  id: string;
+  tokenVersion?: number;
+} {
+  const decoded = jwt.verify(raw, secret()) as {
+    id?: string;
+    tokenVersion?: number;
+    aud?: string;
+  };
+  if (decoded.aud !== 'platform-refresh' || !decoded.id) {
+    throw new TokenAudienceMismatch(
+      'platform-refresh',
+      String(decoded.aud ?? 'legacy'),
+    );
+  }
+  return { id: decoded.id, tokenVersion: decoded.tokenVersion };
 }

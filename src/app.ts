@@ -339,7 +339,9 @@ app.get('/register', (_req, res) => {
 //                     `exams`, so gating the group on either would deny a
 //                     legitimate combination. Needs per-route gating.
 //   /api             importRoutes is mounted at the API root; a gate there
-//                     would apply to everything.
+//                     would apply to everything. Its smart-import surface has
+//                     its own prefix, so `/api/import-paper` IS gated below;
+//                     the rest of that router (/imports/*, /blueprints) is not.
 //   /api/teacher      mixed: rosters, analytics and exam tooling.
 //   /api/users        core. Gating identity is how a packaging mistake bricks
 //                     a tenant.
@@ -367,6 +369,10 @@ const MODULE_GATED_ROUTES: [string, string][] = [
   ['/api/holidays', 'scheduling'],
   ['/api/homework', 'homework'],
   ['/api/doubts', 'doubts'],
+  // Smart import (upload → AI extraction → review → create paper). A path
+  // prefix, so it gates every /api/import-paper/* route and nothing else
+  // importRoutes serves. Must stay above `app.use('/api', importRoutes)`.
+  ['/api/import-paper', 'questionImport'],
   // Firestore is a SINGLE-TENANT store — one global `Users` collection with no
   // organization dimension. This gate is what stops a second tenant writing
   // into the collection Abhigyan reads, and it is the mitigation the isolation

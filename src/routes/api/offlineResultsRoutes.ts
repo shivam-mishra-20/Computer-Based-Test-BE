@@ -1,4 +1,4 @@
-import { staffHolds } from '../../middlewares/requirePermission';
+import { requireStaffPermission, staffHolds } from '../../middlewares/requirePermission';
 import { Router, Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { authMiddleware } from '../../middlewares/authMiddleware';
@@ -80,12 +80,18 @@ function buildStudentTestMatch(user: { id?: string; classLevel?: string; batch?:
 }
 
 // New structured test routes
-router.post('/tests', authMiddleware, createTest);
+//
+// Writes are staff-only. The handlers check no role, so before these guards any
+// signed-in student could create, rename, re-mark or delete an offline test.
+// Entering marks also notifies students ("New Result Available"), which is why
+// it needs results.publish. Legacy admins and teachers hold all four through
+// LEGACY_ROLE_PERMISSIONS, so nothing changes for them.
+router.post('/tests', authMiddleware, requireStaffPermission('exams.create'), createTest);
 router.get('/tests', authMiddleware, getAllTests);
 router.get('/tests/:id', authMiddleware, getTestById);
-router.put('/tests/:id', authMiddleware, updateTestProperties);
-router.put('/tests/:id/results', authMiddleware, updateTestResults);
-router.delete('/tests/:id', authMiddleware, deleteTest);
+router.put('/tests/:id', authMiddleware, requireStaffPermission('exams.update'), updateTestProperties);
+router.put('/tests/:id/results', authMiddleware, requireStaffPermission('results.publish'), updateTestResults);
+router.delete('/tests/:id', authMiddleware, requireStaffPermission('exams.delete'), deleteTest);
 
 // Student results routes
 router.get('/students/:studentId/results', authMiddleware, getStudentResults);

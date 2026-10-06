@@ -21,17 +21,29 @@ if (cluster.isPrimary && !isPlatformRuntime) {
   console.log(`🚀 Master process ${process.pid} is running`);
   console.log(`📊 CPU Cores: ${numCPUs}, Starting ${numWorkers} workers`);
 
+  // Exactly one worker is the leader: it runs the attendance cron and the other
+  // once-per-deployment work (see isClusterLeader in server.ts). The role goes
+  // with the worker, so a restarted leader's replacement is the leader too —
+  // worker ids are never reused, so "worker 1" cannot carry it.
+  const leaders = new Set<number>();
+  const forkWorker = (leader: boolean) => {
+    const worker = cluster.fork({ CLUSTER_LEADER: leader ? 'true' : 'false' });
+    if (leader) leaders.add(worker.id);
+    return worker;
+  };
+
   // Fork workers
   for (let i = 0; i < numWorkers; i++) {
-    const worker = cluster.fork();
-    console.log(`✅ Worker ${worker.process.pid} started`);
+    const worker = forkWorker(i === 0);
+    console.log(`✅ Worker ${worker.process.pid} started${i === 0 ? ' (leader)' : ''}`);
   }
 
   // Handle worker exit and restart
   cluster.on('exit', (worker, code, signal) => {
+    const wasLeader = leaders.delete(worker.id);
     console.warn(`❌ Worker ${worker.process.pid} died (${signal || code}). Restarting...`);
-    const newWorker = cluster.fork();
-    console.log(`✅ Worker ${newWorker.process.pid} restarted`);
+    const newWorker = forkWorker(wasLeader);
+    console.log(`✅ Worker ${newWorker.process.pid} restarted${wasLeader ? ' (leader)' : ''}`);
   });
 
   // Graceful shutdown

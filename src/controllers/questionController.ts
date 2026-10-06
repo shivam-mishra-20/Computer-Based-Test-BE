@@ -1,6 +1,36 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
-import { saveBatchValidatedQuestions, EnhancedQuestionData } from '../services/questionValidationService';
+import { saveBatchValidatedQuestions, sanitizeQuestionData, EnhancedQuestionData } from '../services/questionValidationService';
+import {
+  ANSWER_KEY_FIELDS,
+  AnswerKeyError,
+  answerKeyErrorBody,
+  answerKeyProblem,
+  findAnswerKeyIssues,
+  type AnswerKeyFields,
+  type AnswerKeyIssue,
+} from '../services/questionAnswerKey';
+
+/**
+ * Fields of a class-bank update that can change a question's answer key. An
+ * update that sends none of them (text, tags, explanation …) leaves the key as
+ * it was, so it is not re-checked — that keeps metadata edits working on older
+ * questions saved before keys were required.
+ */
+const KEY_FIELDS = ['type', 'options', 'correctAnswerText', 'assertionIsTrue', 'reasonIsTrue'] as const;
+
+function touchesAnswerKey(update: Record<string, unknown> | null | undefined): boolean {
+  return !!update && KEY_FIELDS.some((field) => update[field] !== undefined);
+}
+
+/** The question as it would be after `update` is $set over `existing` (undefined keys are not written). */
+function mergedForKeyCheck(existing: AnswerKeyFields & { text?: unknown }, update: Record<string, unknown>) {
+  const merged: Record<string, unknown> = { ...existing };
+  for (const field of KEY_FIELDS) {
+    if (update[field] !== undefined) merged[field] = update[field];
+  }
+  return merged as AnswerKeyFields & { text?: unknown };
+}
 
 /**
  * Save questions with validation
@@ -50,6 +80,15 @@ export const saveValidatedQuestionsCtrl = async (req: Request, res: Response) =>
       pyqExam: q.pyqExam,
       pyqShift: q.pyqShift,
     }));
+
+    // Refuse the whole save when any question has no usable answer key, and
+    // say which ones. The batch saver would otherwise skip them silently and
+    // report only a "skipped" count. Checked after the same sanitization the
+    // saver applies, so a question it would fix is not refused.
+    const keyIssues = findAnswerKeyIssues(enhancedQuestions.map((q) => sanitizeQuestionData(q)));
+    if (keyIssues.length > 0) {
+      return res.status(400).json(answerKeyErrorBody(new AnswerKeyError(keyIssues, 'Nothing was saved')));
+    }
 
     // Save with validation
     const saved = await saveBatchValidatedQuestions(enhancedQuestions);
@@ -306,6 +345,17 @@ export const updateClassQuestionCtrl = async (req: Request, res: Response) => {
     const { getClassQuestionModel } = await import('../models/ClassQuestion');
     const ClassQuestionModel = getClassQuestionModel(className as string);
 
+    if (touchesAnswerKey(updateData)) {
+      const existing = await ClassQuestionModel.findById(id).select(`${ANSWER_KEY_FIELDS} text`).lean();
+      if (!existing) {
+        return res.status(404).json({ success: false, message: 'Question not found' });
+      }
+      const issues = findAnswerKeyIssues([mergedForKeyCheck(existing as AnswerKeyFields, updateData)], () => 'This question');
+      if (issues.length > 0) {
+        return res.status(400).json(answerKeyErrorBody(new AnswerKeyError(issues, 'Not saved')));
+      }
+    }
+
     // Find and update the question
     const updated = await ClassQuestionModel.findByIdAndUpdate(
       id,
@@ -480,11 +530,25 @@ export const solveClassQuestionCtrl = async (req: Request, res: Response) => {
       });
     }
 
-    // Update the question with correct answer
+    // Update the question with correct answer. `opt` is a hydrated subdocument:
+    // spreading it copies Mongoose internals, not its fields, and the cast
+    // update then keeps the ORIGINAL isCorrect flags — so convert it first.
     const updatedOptions = question.options?.map((opt, idx) => ({
-      ...opt,
+      ...(typeof (opt as any).toObject === 'function' ? (opt as any).toObject() : opt),
       isCorrect: idx === result.correctOptionIndex
     }));
+
+    // An index outside the options marks nothing correct; saving that would
+    // leave the question ungradable, so nothing is written.
+    const keyProblem = answerKeyProblem({ type: question.type, options: updatedOptions });
+    if (keyProblem) {
+      return res.status(422).json({
+        success: false,
+        code: 'ANSWER_KEY_MISSING',
+        message: `AI did not identify one of the options as correct; nothing was saved. ${keyProblem}`,
+        aiResult: { correctOptionIndex: result.correctOptionIndex, confidence: result.confidence },
+      });
+    }
 
     const updated = await ClassQuestionModel.findByIdAndUpdate(
       id,
@@ -593,11 +657,18 @@ export const solveBatchQuestionsCtrl = async (req: Request, res: Response) => {
           });
           solved++;
         } else {
-          // Update the question
+          // Update the question (hydrated subdocuments: see solveClassQuestionCtrl)
           const updatedOptions = question.options?.map((opt, idx) => ({
-            ...opt,
+            ...(typeof (opt as any).toObject === 'function' ? (opt as any).toObject() : opt),
             isCorrect: idx === result.correctOptionIndex
           }));
+
+          const keyProblem = answerKeyProblem({ type: question.type, options: updatedOptions });
+          if (keyProblem) {
+            results.push({ id, success: false, error: `AI did not identify a correct option; not saved. ${keyProblem}` });
+            failed++;
+            continue;
+          }
 
           await ClassQuestionModel.findByIdAndUpdate(id, {
             $set: {
@@ -692,6 +763,30 @@ export const bulkUpdateClassQuestionsCtrl = async (req: Request, res: Response) 
 
     const { getClassQuestionModel } = await import('../models/ClassQuestion');
     const ClassQuestionModel = getClassQuestionModel(className as string);
+
+    // Check every answer-key change before writing any of them, so a refused
+    // request leaves the bank exactly as it was. Only the fields this handler
+    // actually $sets are considered.
+    const written = (u: any) => ({ options: u.options, correctAnswerText: u.correctAnswerText });
+    const keyed = updates.filter(
+      (u: any) => u && u.id && Types.ObjectId.isValid(String(u.id)) && touchesAnswerKey(written(u)),
+    );
+    if (keyed.length > 0) {
+      const existing = await ClassQuestionModel.find({ _id: { $in: keyed.map((u: any) => String(u.id)) } })
+        .select(`${ANSWER_KEY_FIELDS} text`)
+        .lean();
+      const byId = new Map(existing.map((q: any) => [String(q._id), q]));
+      const issues: AnswerKeyIssue[] = [];
+      keyed.forEach((u: any) => {
+        const current = byId.get(String(u.id));
+        if (!current) return; // unknown id: findByIdAndUpdate below is a no-op for it, as before
+        const [issue] = findAnswerKeyIssues([{ ...mergedForKeyCheck(current, written(u)), _id: u.id }], () => `Question ${String(u.id)}`);
+        if (issue) issues.push({ ...issue, position: updates.indexOf(u) + 1 });
+      });
+      if (issues.length > 0) {
+        return res.status(400).json(answerKeyErrorBody(new AnswerKeyError(issues, 'Nothing was updated')));
+      }
+    }
 
     let updatedCount = 0;
     let errors = 0;

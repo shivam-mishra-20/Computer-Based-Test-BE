@@ -223,12 +223,32 @@ export const register = async (req: Request, res: Response) => {
     }
 
     const user = await User.findById(result.userId).select('name email role');
+    const registeredUser = {
+      id: result.userId,
+      name: user?.name,
+      email: user?.email,
+      role: result.role,
+    };
+    // A client that can refresh asks for a refreshable session, exactly as at
+    // login: a 15-minute access token and a refresh token. One that does not
+    // ask gets the token it always got.
+    if (req.body?.session === 'refresh') {
+      const pair = signSessionPair({
+        id: result.userId,
+        role: result.role,
+        orgId: result.orgId,
+        tokenVersion: 0,
+      });
+      return res
+        .status(201)
+        .json({ status: 'approved', ...pair, user: registeredUser });
+    }
     // A brand-new account: tokenVersion 0, so the token is revocable from day one.
     const token = signSessionToken({ id: result.userId, role: result.role, orgId: result.orgId, tokenVersion: 0 });
     return res.status(201).json({
       status: 'approved',
       token,
-      user: { id: result.userId, name: user?.name, email: user?.email, role: result.role },
+      user: registeredUser,
     });
   } catch (err) {
     if (err instanceof RegistrationRefused) {
@@ -336,6 +356,9 @@ export const login = async (req: Request, res: Response) => {
           status: user.status,
           classLevel: (user as any).classLevel,
           batch: (user as any).batch,
+          // The institute-issued roll number, as the long-lived branch below
+          // returns it — the mobile app shows it, and now signs in this way.
+          empCode: (user as { empCode?: string }).empCode,
         },
       });
     }

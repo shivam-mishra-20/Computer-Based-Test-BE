@@ -13,6 +13,7 @@ import * as notificationService from './notificationService';
 import mongoose from 'mongoose';
 import { deriveExamStatus } from '../utils/examTiming';
 import { resolveExamNotificationRecipients } from './examAudienceService';
+import { ANSWER_KEY_FIELDS, AnswerKeyError, findAnswerKeyIssues, type AnswerKeyFields } from './questionAnswerKey';
 
 // Attaches the server-derived `status` (draft/scheduled/live/completed) to an
 // exam document before it goes out over the API — additive field, not part of
@@ -25,6 +26,8 @@ function withStatus(examDoc: IExam | null): (IExam & { status: ReturnType<typeof
 }
 
 export const createQuestion = async (payload: Partial<IQuestion> & { createdBy: Types.ObjectId }): Promise<IQuestion> => {
+  const issues = findAnswerKeyIssues([payload as AnswerKeyFields], () => 'This question');
+  if (issues.length > 0) throw new AnswerKeyError(issues, 'Not saved');
   const q = await Question.create(payload as IQuestion);
   return q;
 };
@@ -127,9 +130,64 @@ export const listQuestions = async (filter: any = {}, limit = 50, skip = 0) => {
 };
 
 export const updateQuestion = async (id: string, payload: Partial<IQuestion>) => {
+  // Re-check the key only when this update can change it, so editing the text
+  // or tags of an older question saved without a key still works.
+  const body = payload as Record<string, unknown>;
+  if (['type', 'options', 'correctAnswerText', 'assertionIsTrue', 'reasonIsTrue'].some((f) => body?.[f] !== undefined)) {
+    const existing = await Question.findOne({ _id: id, ...requireTenantScope('questions') })
+      .select(`${ANSWER_KEY_FIELDS} text`)
+      .lean();
+    if (!existing) return null;
+    const merged = { ...existing, ...pickDefined(body, ['type', 'options', 'correctAnswerText', 'assertionIsTrue', 'reasonIsTrue']) };
+    const issues = findAnswerKeyIssues([merged as AnswerKeyFields], () => 'This question');
+    if (issues.length > 0) throw new AnswerKeyError(issues, 'Not saved');
+  }
   const q = await Question.findOneAndUpdate({ _id: id, ...requireTenantScope('questions') }, payload, { new: true });
   return q;
 };
+
+/** Every question id an exam's sections reference, in order, as one comparable string. */
+function questionIdList(sections: Array<{ questionIds?: unknown[] }> | undefined): string {
+  return (sections || []).map((s) => (s.questionIds || []).map(String).join(',')).join('|');
+}
+
+function pickDefined(source: Record<string, unknown>, fields: string[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const f of fields) if (source[f] !== undefined) out[f] = source[f];
+  return out;
+}
+
+/**
+ * Publishing gate: every question an exam would grade from its options must
+ * have a correct option. Looks questions up exactly as the grader does (the
+ * class bank when the exam has a classLevel, else `Question`), so it checks
+ * the copies students will actually be marked against.
+ */
+async function assertAnswerKeysReady(
+  sections: Array<{ title?: string; questionIds?: unknown[] }> | undefined,
+  classLevel: string | undefined,
+  action: string,
+) {
+  const ordered = (sections || []).flatMap((section, sIdx) =>
+    (section.questionIds || []).map((qid, qIdx) => ({
+      id: String(qid),
+      label: `${section.title || `Section ${sIdx + 1}`} Q${qIdx + 1}`,
+    })),
+  );
+  const ids = ordered.map((o) => o.id).filter((id) => Types.ObjectId.isValid(id));
+  if (ids.length === 0) return;
+  const docs = classLevel
+    ? await getClassQuestionModel(classLevel).find({ _id: { $in: ids } }).select(`${ANSWER_KEY_FIELDS} text`).lean()
+    : await Question.find({ _id: { $in: ids } }).select(`${ANSWER_KEY_FIELDS} text`).lean();
+  const byId = new Map<string, AnswerKeyFields>((docs as any[]).map((d) => [String(d._id), d] as [string, AnswerKeyFields]));
+  const present = ordered.filter((o) => byId.has(o.id));
+  const labels = new Map(present.map((o, i) => [i, o.label]));
+  const issues = findAnswerKeyIssues(
+    present.map((o) => byId.get(o.id)),
+    (_q, i) => labels.get(i) || `Q${i + 1}`,
+  );
+  if (issues.length > 0) throw new AnswerKeyError(issues, action);
+}
 
 /** The deleted question, or null when this organization has none by that id. */
 export const deleteQuestion = async (id: string) =>
@@ -165,7 +223,10 @@ function assertPublishReady(payload: Partial<IExam>, existing?: IExam | null) {
 }
 
 export const createExam = async (payload: Partial<IExam>) => {
-  if (payload.isPublished) assertPublishReady(payload);
+  if (payload.isPublished) {
+    assertPublishReady(payload);
+    await assertAnswerKeysReady(payload.sections as any, payload.classLevel, 'Cannot publish');
+  }
   const exam = await Exam.create(normalizeMarkingScheme({ ...payload }) as IExam);
   return withStatus(exam);
 };
@@ -175,6 +236,27 @@ export const updateExam = async (id: string, payload: Partial<IExam>) => {
   if (payload.isPublished) {
     existing = await Exam.findOne({ _id: id, ...requireTenantScope('exams') });
     assertPublishReady(payload, existing);
+  }
+  // Answer keys are checked when this update PUBLISHES the exam, or changes
+  // which questions (or which bank) a published exam grades — so a keyless
+  // question can't be swapped into a live exam either. Republishing a live
+  // exam with the same questions (the panel re-sends classLevel and sections
+  // to extend a schedule) is not re-checked, so an urgent time change on an
+  // exam published before this rule existed is never blocked.
+  if (payload.isPublished || payload.sections !== undefined || payload.classLevel !== undefined) {
+    existing = existing ?? (await Exam.findOne({ _id: id, ...requireTenantScope('exams') }));
+    if (existing) {
+      const wasPublished = !!existing.isPublished;
+      const willBePublished = payload.isPublished !== undefined ? !!payload.isPublished : wasPublished;
+      const nextSections = (payload.sections ?? existing.sections) as any;
+      const nextClass = payload.classLevel !== undefined ? payload.classLevel : existing.classLevel;
+      const questionSetChanged =
+        String(nextClass || '') !== String(existing.classLevel || '') ||
+        questionIdList(nextSections) !== questionIdList(existing.sections as any);
+      if (willBePublished && (!wasPublished || questionSetChanged)) {
+        await assertAnswerKeysReady(nextSections, nextClass, wasPublished ? 'Not saved' : 'Cannot publish');
+      }
+    }
   }
   const updated = await Exam.findOneAndUpdate({ _id: id, ...requireTenantScope('exams') }, normalizeMarkingScheme({ ...payload }), { new: true });
   return withStatus(updated);
@@ -276,6 +358,20 @@ export const createExamFromPaper = async (paper: GeneratedPaperResult, createdBy
   autoPublish?: boolean;
   blueprintId?: string;
 }) => {
+  // Every question becomes a bank question below, so the paper must carry a
+  // usable answer key for each one graded by its options. Checked before
+  // anything is written, so a refused paper leaves no half-created exam.
+  const paperIssues = findAnswerKeyIssues(
+    paper.sections.flatMap((s) => s.questions as AnswerKeyFields[]),
+    (() => {
+      const labels = paper.sections.flatMap((s, sIdx) =>
+        s.questions.map((_q, qIdx) => `${s.title || `Section ${sIdx + 1}`} Q${qIdx + 1}`),
+      );
+      return (_q: unknown, i: number) => labels[i] || `Q${i + 1}`;
+    })(),
+  );
+  if (paperIssues.length > 0) throw new AnswerKeyError(paperIssues, 'No exam was created');
+
   // First persist all questions (flatten sections)
   const questionDocs: IQuestion[] = [];
   for (const section of paper.sections) {
