@@ -5,6 +5,7 @@ import type { GeneratedPaperResult } from '../services/aiService';
 import { generateSolutionsForPaper } from '../services/aiService';
 import { buildPaperHtml } from '../utils/paperExport';
 import { htmlToPdfBuffer } from '../utils/launchBrowser';
+import { loadDocumentImage } from '../utils/pdfAssetPolicy';
 
 export const createPaperCtrl = async (req: Request, res: Response) => {
   try {
@@ -15,6 +16,9 @@ export const createPaperCtrl = async (req: Request, res: Response) => {
       owner,
       examTitle: payload.examTitle!,
       subject: payload.subject,
+      // The class the paper was built for — its questions come from that
+      // class bank, and an exam made from it uses the same records.
+      className: typeof (payload as any).className === 'string' ? (payload as any).className.trim() || undefined : undefined,
       totalMarks: payload.totalMarks,
       generalInstructions: payload.generalInstructions || [],
       sections: payload.sections,
@@ -192,26 +196,17 @@ export const exportDocCtrl = async (req: Request, res: Response) => {
         // Diagram
         if (q.diagramUrl) {
           try {
-            const axios = require('axios');
-            const fs = require('fs');
-            const path = require('path');
-            const base = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
-            const toAbs = (u: string) => (/^https?:\/\//i.test(u) || /^data:/i.test(u) ? u : (u.startsWith('/uploads/') ? path.join(process.cwd(), u.replace(/^\//, '')) : (base ? `${base}${u}` : u)));
-            const u = toAbs(q.diagramUrl);
-            let buffer: Buffer | null = null;
-            if (/^data:/i.test(u)) {
-              const m = /^data:([^;]+);base64,(.*)$/i.exec(u);
-              if (m) buffer = Buffer.from(m[2], 'base64');
-            } else if (/^https?:\/\//i.test(u)) {
-              const resp = await axios.get(u, { responseType: 'arraybuffer' });
-              buffer = Buffer.from(resp.data);
-            } else {
-              const abs = path.isAbsolute(u) ? u : path.join(process.cwd(), u);
-              buffer = fs.readFileSync(abs);
-            }
-            if (buffer) {
+            // Same policy as the PDF renderer: an inline image, a file inside
+            // uploads/, or our storage — never any URL, never any path on disk.
+            const buffer = await loadDocumentImage(q.diagramUrl);
+            // docx 9 needs the image type, or the file is stored as
+            // "<hash>.undefined" and Word cannot show it. From the bytes, not
+            // the URL; SVG would need a raster fallback, so it is skipped.
+            const sig = buffer ? buffer.subarray(0, 4).toString('hex') : '';
+            const type = sig.startsWith('89504e47') ? 'png' : sig.startsWith('ffd8ff') ? 'jpg' : sig.startsWith('47494638') ? 'gif' : sig.startsWith('424d') ? 'bmp' : null;
+            if (buffer && type) {
               const { ImageRun } = await import('docx');
-              children.push(new Paragraph({ children: [new ImageRun({ data: buffer, transformation: { width: 500, height: 300 } } as any)] }));
+              children.push(new Paragraph({ children: [new ImageRun({ type, data: buffer, transformation: { width: 500, height: 300 } } as any)] }));
             }
           } catch {}
         }

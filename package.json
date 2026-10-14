@@ -62,6 +62,8 @@
     "safety:application-e2e": "ts-node --transpile-only scripts/safety/organization-application.e2e.test.ts",
     "safety:finalization-e2e": "ts-node --transpile-only scripts/safety/organization-finalization.e2e.test.ts",
     "safety:mobile-rules": "ts-node --transpile-only scripts/safety/mobile-rules-drift.ts",
+    "safety:design-rules": "ts-node --transpile-only scripts/safety/design-rules-drift.ts",
+    "safety:app-design": "ts-node --transpile-only scripts/safety/app-design.test.ts",
     "safety:build-audience": "ts-node --transpile-only scripts/safety/build-audience.test.ts",
     "safety:build-progress": "ts-node --transpile-only scripts/safety/build-progress.test.ts",
     "safety:public-registration": "ts-node --transpile-only scripts/safety/public-registration.e2e.test.ts --scratch-suffix scratch_app",

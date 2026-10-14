@@ -1,4 +1,4 @@
-import { requireTenantScope } from '../core/tenancy';
+import { requireTenantScope, tenantScope } from '../core/tenancy';
 import { Types } from 'mongoose';
 import Exam, { IExam } from '../models/Exam';
 import Question, { IQuestion } from '../models/Question';
@@ -8,6 +8,7 @@ import ReviewAuditLog from '../models/ReviewAuditLog';
 import Blueprint, { IBlueprint } from '../models/Blueprint';
 import { ImportedQuestion } from '../models/ImportedQuestion';
 import { getClassQuestionModel } from '../models/ClassQuestion';
+import { findExamQuestions } from '../utils/questionSource';
 import type { GeneratedPaperResult } from './aiService';
 import * as notificationService from './notificationService';
 import mongoose from 'mongoose';
@@ -129,6 +130,30 @@ export const listQuestions = async (filter: any = {}, limit = 50, skip = 0) => {
   return { items, total };
 };
 
+/**
+ * The general `Question` collection itself (POST /exams/questions writes
+ * here). Exams built for a class read the class banks instead, so these are
+ * listed separately — to be edited, or copied into a class bank.
+ */
+export const listGeneralBankQuestions = async (
+  opts: { text?: string; subject?: string; topic?: string; difficulty?: string },
+  limit = 50,
+  skip = 0,
+) => {
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const filter: Record<string, unknown> = { ...requireTenantScope('questions') };
+  if (opts.text) filter.text = { $regex: escape(opts.text), $options: 'i' };
+  if (opts.subject) filter['tags.subject'] = opts.subject;
+  if (opts.topic) filter['tags.topic'] = opts.topic;
+  if (opts.difficulty) filter['tags.difficulty'] = opts.difficulty;
+  const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 200);
+  const [items, total] = await Promise.all([
+    Question.find(filter).sort({ createdAt: -1 }).skip(Math.max(Number(skip) || 0, 0)).limit(safeLimit).lean(),
+    Question.countDocuments(filter),
+  ]);
+  return { items, total };
+};
+
 export const updateQuestion = async (id: string, payload: Partial<IQuestion>) => {
   // Re-check the key only when this update can change it, so editing the text
   // or tags of an older question saved without a key still works.
@@ -159,8 +184,8 @@ function pickDefined(source: Record<string, unknown>, fields: string[]): Record<
 
 /**
  * Publishing gate: every question an exam would grade from its options must
- * have a correct option. Looks questions up exactly as the grader does (the
- * class bank when the exam has a classLevel, else `Question`), so it checks
+ * have a correct option. Looks questions up exactly as the grader does
+ * (findExamQuestions: the class bank, then the general bank), so it checks
  * the copies students will actually be marked against.
  */
 async function assertAnswerKeysReady(
@@ -176,11 +201,23 @@ async function assertAnswerKeysReady(
   );
   const ids = ordered.map((o) => o.id).filter((id) => Types.ObjectId.isValid(id));
   if (ids.length === 0) return;
-  const docs = classLevel
-    ? await getClassQuestionModel(classLevel).find({ _id: { $in: ids } }).select(`${ANSWER_KEY_FIELDS} text`).lean()
-    : await Question.find({ _id: { $in: ids } }).select(`${ANSWER_KEY_FIELDS} text`).lean();
+  // Wherever the grader will find them: the class bank, then the general
+  // bank (an exam created from a paper keeps its questions there).
+  const docs = await findExamQuestions(classLevel, ids, { select: `${ANSWER_KEY_FIELDS} text`, lean: true });
   const byId = new Map<string, AnswerKeyFields>((docs as any[]).map((d) => [String(d._id), d] as [string, AnswerKeyFields]));
-  const present = ordered.filter((o) => byId.has(o.id));
+  // A question the exam cannot load is one no student will ever see — and the
+  // grader skips it. That happened when an exam's class was changed after its
+  // questions were picked from another class's bank, or a question was deleted.
+  const missing = ordered.filter((o) => !byId.has(o.id));
+  if (missing.length > 0) {
+    const where = classLevel ? `the Class ${classLevel} question bank` : 'the question bank';
+    const list = missing.slice(0, 5).map((o) => o.label).join(', ');
+    throw new Error(
+      `${action}: ${missing.length} question(s) (${list}${missing.length > 5 ? ', …' : ''}) are not in ${where}. ` +
+        'Remove them, or set the exam to the class they were picked from.',
+    );
+  }
+  const present = ordered;
   const labels = new Map(present.map((o, i) => [i, o.label]));
   const issues = findAnswerKeyIssues(
     present.map((o) => byId.get(o.id)),
@@ -351,6 +388,57 @@ export const deleteBlueprint = async (id: string, owner: Types.ObjectId) => {
 };
 
 // Create exam (and optionally questions) from generated paper result
+/** "Class 11" / "class_11" / "11" → "11" — the form exams and the publish panel use. */
+function normalizeClassLevel(value: unknown): string | undefined {
+  const text = String(value ?? '').trim();
+  if (!text) return undefined;
+  return text.match(/\d+/)?.[0] ?? text;
+}
+
+/** The bank ids a paper's questions were picked from (papers built from the question bank keep them). */
+function paperQuestionIds(paper: GeneratedPaperResult): string[] {
+  return paper.sections
+    .flatMap((s) => s.questions as Array<{ _id?: unknown }>)
+    .map((q) => String(q?._id ?? ''))
+    .filter((id) => Types.ObjectId.isValid(id));
+}
+
+/**
+ * The class a paper's exam belongs to: the one asked for, the one saved on the
+ * paper, or — for papers saved before they kept their class — the class bank
+ * their questions were picked from.
+ */
+async function resolvePaperClass(paper: GeneratedPaperResult, requested?: string): Promise<string | undefined> {
+  const declared = normalizeClassLevel(requested || (paper as any).classLevel || (paper as any).className);
+  if (declared) return declared;
+  const ids = paperQuestionIds(paper);
+  const db = mongoose.connection.db;
+  if (ids.length === 0 || !db) return undefined;
+  const banks = (await db.listCollections({ name: { $regex: /^class_/ } }, { nameOnly: true }).toArray()).map((c) => c.name);
+  let best: { classLevel: string; hits: number } | undefined;
+  for (const bank of banks) {
+    const classLevel = bank.replace(/^class_/, '');
+    const hits = await getClassQuestionModel(classLevel).countDocuments({ _id: { $in: ids }, ...tenantScope() });
+    if (hits > (best?.hits ?? 0)) best = { classLevel, hits };
+  }
+  return best?.classLevel;
+}
+
+const CLASS_BANK_TYPES = new Set(['mcq', 'truefalse', 'fill', 'short', 'long', 'assertionreason', 'integer']);
+const DIFFICULTIES = new Set(['easy', 'medium', 'hard']);
+
+/**
+ * Create an exam from a saved question paper.
+ *
+ * ── Which bank the questions live in ────────────────────────────────────────
+ * The class question bank — the one the exam builder, the Question Bank tab,
+ * Smart Import and the AI generator all use. A paper built from that bank
+ * carries each question's bank id, and the exam uses those same records (no
+ * copies, so a correction in the bank reaches the exam). A question with no
+ * bank record yet is added to the class bank. Only a paper with no class at
+ * all still writes to the general bank, as every paper exam used to — and
+ * those older exams keep working (findExamQuestions reads both banks).
+ */
 export const createExamFromPaper = async (paper: GeneratedPaperResult, createdBy: Types.ObjectId, opts: {
   classLevel?: string;
   batch?: string;
@@ -358,11 +446,20 @@ export const createExamFromPaper = async (paper: GeneratedPaperResult, createdBy
   autoPublish?: boolean;
   blueprintId?: string;
 }) => {
-  // Every question becomes a bank question below, so the paper must carry a
-  // usable answer key for each one graded by its options. Checked before
-  // anything is written, so a refused paper leaves no half-created exam.
+  const classLevel = await resolvePaperClass(paper, opts.classLevel);
+  const flat = paper.sections.flatMap((s) => s.questions as any[]);
+
+  // Questions the paper took from a bank keep their bank record.
+  const sourceIds = paperQuestionIds(paper);
+  const existing = sourceIds.length > 0 ? await findExamQuestions(classLevel, sourceIds) : [];
+  const existingById = new Map<string, any>(existing.map((d: any) => [String(d._id), d]));
+  const reusedFor = (q: any) => existingById.get(String(q?._id ?? ''));
+
+  // Every question must carry a usable answer key — checked on what will be
+  // graded (the bank record for a reused question, the paper's copy for a new
+  // one), before anything is written, so a refused paper leaves nothing behind.
   const paperIssues = findAnswerKeyIssues(
-    paper.sections.flatMap((s) => s.questions as AnswerKeyFields[]),
+    flat.map((q) => (reusedFor(q) ?? q) as AnswerKeyFields),
     (() => {
       const labels = paper.sections.flatMap((s, sIdx) =>
         s.questions.map((_q, qIdx) => `${s.title || `Section ${sIdx + 1}`} Q${qIdx + 1}`),
@@ -372,31 +469,46 @@ export const createExamFromPaper = async (paper: GeneratedPaperResult, createdBy
   );
   if (paperIssues.length > 0) throw new AnswerKeyError(paperIssues, 'No exam was created');
 
-  // First persist all questions (flatten sections)
-  const questionDocs: IQuestion[] = [];
-  for (const section of paper.sections) {
-    for (const q of section.questions) {
-      const doc = await Question.create({
-        text: q.text,
-        type: q.type as any,
-        options: q.options,
-        correctAnswerText: q.correctAnswerText,
-        integerAnswer: (q as any).integerAnswer,
-        assertion: (q as any).assertion,
-        reason: (q as any).reason,
-        assertionIsTrue: (q as any).assertionIsTrue,
-        reasonIsTrue: (q as any).reasonIsTrue,
-        reasonExplainsAssertion: (q as any).reasonExplainsAssertion,
-        diagramUrl: (q as any).diagramUrl,
-        diagramAlt: (q as any).diagramAlt,
-        explanation: q.explanation,
-        tags: {
-          subject: paper.subject,
-          difficulty: (q as any).tags?.difficulty || 'medium',
-        },
-        createdBy,
+  const questionIds: Types.ObjectId[] = [];
+  for (const q of flat) {
+    const reused = reusedFor(q);
+    if (reused) {
+      questionIds.push(reused._id as Types.ObjectId);
+      continue;
+    }
+    const content = {
+      text: q.text,
+      type: q.type,
+      options: Array.isArray(q.options) ? q.options.map((o: any) => ({ text: o.text, isCorrect: !!o.isCorrect })) : undefined,
+      correctAnswerText: q.correctAnswerText,
+      integerAnswer: q.integerAnswer,
+      assertion: q.assertion,
+      reason: q.reason,
+      assertionIsTrue: q.assertionIsTrue,
+      reasonIsTrue: q.reasonIsTrue,
+      reasonExplainsAssertion: q.reasonExplainsAssertion,
+      diagramUrl: q.diagramUrl,
+      diagramAlt: q.diagramAlt,
+      explanation: q.explanation,
+      createdBy,
+    };
+    const difficulty = DIFFICULTIES.has(q.tags?.difficulty || q.difficulty) ? q.tags?.difficulty || q.difficulty : 'medium';
+    if (classLevel && CLASS_BANK_TYPES.has(String(q.type))) {
+      const doc = await getClassQuestionModel(classLevel).create({
+        ...content,
+        subject: paper.subject || q.tags?.subject || q.subject || 'General',
+        chapter: q.tags?.chapter || q.chapter,
+        topic: q.tags?.topic || q.topic,
+        difficulty,
       } as any);
-      questionDocs.push(doc);
+      questionIds.push(doc._id as Types.ObjectId);
+    } else {
+      // No class, or a type the class bank does not hold: the general bank, as before.
+      const doc = await Question.create({
+        ...content,
+        tags: { subject: paper.subject, difficulty },
+      } as any);
+      questionIds.push(doc._id as Types.ObjectId);
     }
   }
 
@@ -404,7 +516,7 @@ export const createExamFromPaper = async (paper: GeneratedPaperResult, createdBy
   let cursor = 0;
   const sections = paper.sections.map((s) => {
     const count = s.questions.length;
-    const slice = questionDocs.slice(cursor, cursor + count).map((qd) => qd._id as Types.ObjectId);
+    const slice = questionIds.slice(cursor, cursor + count);
     cursor += count;
     return {
       title: s.title,
@@ -433,7 +545,7 @@ export const createExamFromPaper = async (paper: GeneratedPaperResult, createdBy
     createdBy,
     sections,
     isPublished,
-    classLevel: opts.classLevel,
+    classLevel,
     batch: opts.batch,
     autoPublish: opts.autoPublish,
     schedule: opts.schedule ? { startAt: opts.schedule.startAt, endAt: opts.schedule.endAt } : undefined,

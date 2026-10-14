@@ -14,6 +14,7 @@
  */
 import fs from 'fs';
 import path from 'path';
+import { lockRenderPage } from './pdfAssetPolicy';
 
 function exists(p?: string | null): p is string {
   try {
@@ -160,6 +161,8 @@ export async function htmlToPdfBuffer(html: string): Promise<Buffer> {
   try {
     browser = await launchBrowser();
     const page = await browser.newPage();
+    // Only allowlisted storage/CDN URLs may load; JavaScript off (utils/pdfAssetPolicy).
+    await lockRenderPage(page);
     await page.setContent(html, { waitUntil: 'networkidle0' });
     const pdf = await page.pdf({
       format: 'A4',
@@ -199,6 +202,8 @@ export async function htmlToPdfBufferAdvanced(
   try {
     browser = await launchBrowser();
     const page = await browser.newPage();
+    // Only allowlisted storage/CDN URLs may load; JavaScript off (utils/pdfAssetPolicy).
+    await lockRenderPage(page);
     await page.setContent(html, { waitUntil: 'networkidle0' });
     const displayHeaderFooter = !!(opts.headerTemplate || opts.footerTemplate);
     const pdf = await page.pdf({

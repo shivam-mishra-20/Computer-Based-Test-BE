@@ -114,9 +114,21 @@ export const adminGetRegistrationRecords = async (req: Request, res: Response) =
 			from,
 			to,
 			accountType,
+			origin,
+			limit,
 		} = req.query as Record<string, string | undefined>;
 
 		const filter: any = { ...requireTenantScope('users:registrations') };
+
+		// `?origin=self` — accounts people created themselves through public
+		// registration, whatever their status. Under an "open" policy a student
+		// is active at once and never passes through the pending queue, and the
+		// institute still needs to see that they arrived. Parents are reviewed
+		// through their links, not here.
+		if (origin === 'self') {
+			filter.registrationId = { $exists: true, $ne: null };
+			filter.role = { $ne: 'parent' };
+		}
 
 		// Institute-only by default, so this admin view keeps meaning exactly what
 		// it meant before public learners existed. `?accountType=PUBLIC_LEARNER`
@@ -165,9 +177,12 @@ export const adminGetRegistrationRecords = async (req: Request, res: Response) =
 			if (Object.keys(filter.createdAt).length === 0) delete filter.createdAt;
 		}
 
-		const users = await User.find(filter)
+		const max = Math.min(Math.max(Number(limit) || 0, 0), 200);
+		const query = User.find(filter)
 			.select('-password')
 			.sort({ createdAt: -1 });
+		if (max) query.limit(max);
+		const users = await query;
 
 		res.json(users);
 	} catch {

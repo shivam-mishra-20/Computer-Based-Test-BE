@@ -136,6 +136,17 @@ export interface IOrganizationRegistration extends Document {
   draftExpiresAt?: Date;
   submittedAt?: Date;
 
+  /**
+   * The password the applicant chose for their institute's first
+   * administrator account — as a bcrypt hash only; the password itself is
+   * never stored. Approval creates the account with it, so nobody has to pass
+   * an invitation link on, and it is removed from here once that account
+   * exists. `select: false`, and never in any response.
+   */
+  adminPasswordHash?: string;
+  /** When it was chosen — what the applicant and staff see ("password set"). */
+  adminPasswordSetAt?: Date;
+
   // ── Review ────────────────────────────────────────────────────────────────
   status: OrganizationRegistrationStatus;
   reviewedBy?: mongoose.Types.ObjectId;
@@ -193,6 +204,8 @@ const OrganizationRegistrationSchema = new Schema<IOrganizationRegistration>(
     draftToken: { type: String, select: false, index: true },
     draftExpiresAt: { type: Date },
     submittedAt: { type: Date },
+    adminPasswordHash: { type: String, select: false },
+    adminPasswordSetAt: { type: Date },
 
     status: {
       type: String,

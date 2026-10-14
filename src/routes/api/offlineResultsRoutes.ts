@@ -86,9 +86,15 @@ function buildStudentTestMatch(user: { id?: string; classLevel?: string; batch?:
 // Entering marks also notifies students ("New Result Available"), which is why
 // it needs results.publish. Legacy admins and teachers hold all four through
 // LEGACY_ROLE_PERMISSIONS, so nothing changes for them.
+//
+// Reads are staff-only too: a test carries EVERY student's marks, and the list
+// was unscoped for anyone but a teacher, so a student could read the whole
+// class's results. Students read their own through /student. Which tests a
+// teacher may change is decided in the controller (canManageTest): their own,
+// unless they are an admin.
 router.post('/tests', authMiddleware, requireStaffPermission('exams.create'), createTest);
-router.get('/tests', authMiddleware, getAllTests);
-router.get('/tests/:id', authMiddleware, getTestById);
+router.get('/tests', authMiddleware, requireStaffPermission('results.read'), getAllTests);
+router.get('/tests/:id', authMiddleware, requireStaffPermission('results.read'), getTestById);
 router.put('/tests/:id', authMiddleware, requireStaffPermission('exams.update'), updateTestProperties);
 router.put('/tests/:id/results', authMiddleware, requireStaffPermission('results.publish'), updateTestResults);
 router.delete('/tests/:id', authMiddleware, requireStaffPermission('exams.delete'), deleteTest);

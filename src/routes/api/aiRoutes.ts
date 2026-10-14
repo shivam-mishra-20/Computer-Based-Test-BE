@@ -2,7 +2,7 @@ import { requireStaffPermission } from '../../middlewares/requirePermission';
 import { Router } from 'express';
 import { authMiddleware} from '../../middlewares/authMiddleware';
 import { parseAnyFiles } from '../../middlewares/formData';
-import { evaluateSubjective, generateFromPdf, generateFromText, generatePaper, refineQuestion, generatePaperFromPdf, generateFromImage, createGuidance, listGuidance, updateGuidance, deleteGuidance, generatePaperFromImage, aiGenerateFromPDF, aiGenerateFromImage, aiGenerateFromText } from '../../controllers/aiController';
+import { evaluateSubjective, generateFromPdf, generateFromText, generatePaper, refineQuestion, generatePaperFromPdf, generateFromImage, createGuidance, listGuidance, updateGuidance, deleteGuidance, generatePaperFromImage, aiGenerateFromPDF, aiGenerateFromImage, aiGenerateFromText, getAiGenerationJob, discardAiGenerationJob } from '../../controllers/aiController';
 import { upload } from '../../middlewares/upload';
 import { saveValidatedQuestionsCtrl, getClassQuestionsCtrl, getClassQuestionFiltersCtrl, updateClassQuestionCtrl, deleteClassQuestionCtrl, solveClassQuestionCtrl, solveBatchQuestionsCtrl, bulkUpdateMetaCtrl } from '../../controllers/questionController';
 import { aiLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
@@ -13,6 +13,9 @@ const router = Router();
 router.post('/ai-generate/pdf', authMiddleware, requireStaffPermission('ai.generate'), aiLimiter, uploadLimiter, upload.single('file'), aiGenerateFromPDF);
 router.post('/ai-generate/image', authMiddleware, requireStaffPermission('ai.generate'), aiLimiter, uploadLimiter, upload.single('file'), aiGenerateFromImage);
 router.post('/ai-generate/text', authMiddleware, requireStaffPermission('ai.generate'), aiLimiter, aiGenerateFromText);
+// Background generation jobs (pdf/image with async=true): progress, result, discard.
+router.get('/ai-generate/jobs/:jobId', authMiddleware, requireStaffPermission('ai.generate'), getAiGenerationJob);
+router.delete('/ai-generate/jobs/:jobId', authMiddleware, requireStaffPermission('ai.generate'), discardAiGenerationJob);
 
 // OLD: Teachers/Admins can generate questions (keep for backward compatibility)
 router.post('/generate/pdf', authMiddleware, requireStaffPermission('ai.generate'), aiLimiter, uploadLimiter, parseAnyFiles, generateFromPdf);

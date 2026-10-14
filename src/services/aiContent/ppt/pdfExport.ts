@@ -6,6 +6,7 @@
  * (see aiContentController.exportPdf) and cached on the AiGeneration doc.
  */
 import { launchBrowser } from '../../../utils/launchBrowser';
+import { lockRenderPage } from '../../../utils/pdfAssetPolicy';
 
 /** Wraps preview HTML with print CSS: each .slide becomes exactly one
  * fixed-size page (matching pptxgenjs's LAYOUT_WIDE 13.33in × 7.5in), no
@@ -34,6 +35,8 @@ export async function renderSlidesPdf(previewHtml: string): Promise<Buffer> {
   try {
     browser = await launchBrowser();
     const page = await browser.newPage();
+    // Only allowlisted storage/CDN URLs may load; JavaScript off (utils/pdfAssetPolicy).
+    await lockRenderPage(page);
     await page.setContent(toPrintableHtml(previewHtml), { waitUntil: 'networkidle0' });
     const pdf = await page.pdf({
       width: '13.33in',

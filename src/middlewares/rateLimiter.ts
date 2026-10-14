@@ -250,6 +250,28 @@ export const draftEditLimiter = rateLimit({
 });
 
 /**
+ * A live preview: computed from what was sent, writing and reading nothing.
+ *
+ * ── Why this is not `publicFormLimiter` ─────────────────────────────────────
+ * The onboarding form asks for a fresh preview each time someone pauses while
+ * typing, so writing two sign-in messages is dozens of requests. Behind a
+ * ceiling of twenty an hour the preview went blank part-way through the first
+ * honest edit — and stayed blank for the rest of the hour. There is nothing
+ * here to spam into (no row is created), so the ceiling only has to stop a
+ * runaway loop; `globalLimiter` still applies underneath.
+ */
+export const previewLimiter = rateLimit({
+  windowMs: envNumber('PREVIEW_RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000),
+  max: envNumber('PREVIEW_RATE_LIMIT_MAX', 600),
+  message: { message: 'Too many preview requests from this device, please wait a moment' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: createRedisStore('rl:preview:'),
+  passOnStoreError: true,
+  validate: false,
+});
+
+/**
  * Message/Chat endpoints — per-user (all message routes are authenticated).
  */
 export const messageLimiter = rateLimit({

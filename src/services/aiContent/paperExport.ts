@@ -8,6 +8,7 @@
 import fs from 'fs';
 import katex from 'katex';
 import { htmlToPdfBufferAdvanced } from '../../utils/launchBrowser';
+import { checkAssetUrl } from '../../utils/pdfAssetPolicy';
 import { LOGO_DATA_URL } from './brandAssets';
 import { latexToUnicode } from './ppt/pptxBuilder';
 import type { PaperJSON } from './types';
@@ -35,7 +36,21 @@ const esc = (x: unknown) =>
   String(x ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+/**
+ * The logo as an <img src> value, or '' when the PDF renderer may not load it.
+ * An organization admin sets `branding.logoUrl` to any string; it used to go
+ * into the attribute unescaped and be fetched from wherever it pointed.
+ */
+function logoSrc(branding: DocumentBranding): string {
+  const value = (branding.logoDataUrl || '').trim();
+  if (!value) return '';
+  if (/^data:image\//i.test(value)) return esc(value);
+  return checkAssetUrl(value).allowed ? esc(value) : '';
+}
 
 /**
  * Repair the LaTeX the model actually emits for fill-in-the-blank questions —
@@ -135,7 +150,7 @@ function headerHtml(paper: PaperJSON, branding: DocumentBranding): string {
   const classValue = (paper.className || '').replace(/^class\s+/i, '').trim() || '—';
   return `<div class="doc-header">
     <div class="brand-row">
-      ${branding.logoDataUrl ? `<img class="logo" src="${branding.logoDataUrl}" alt="logo"/>` : '<div class="logo"></div>'}
+      ${logoSrc(branding) ? `<img class="logo" src="${logoSrc(branding)}" alt="logo"/>` : '<div class="logo"></div>'}
       <div class="brand-name">${esc(branding.instituteName)}</div>
       <div class="logo-spacer"></div>
     </div>
@@ -281,7 +296,7 @@ export function buildBrandedPaperHtml(
   <title>${esc(paper.examTitle || 'Question Paper')}</title>
   <style>${katexCss()}${STYLES}</style></head>
   <body>
-    ${branding.logoDataUrl ? `<div class="watermark"><img src="${branding.logoDataUrl}" alt=""/></div>` : ''}
+    ${logoSrc(branding) ? `<div class="watermark"><img src="${logoSrc(branding)}" alt=""/></div>` : ''}
     <div class="content">
       ${headerHtml(paper, branding)}
       ${questionsHtml(paper)}

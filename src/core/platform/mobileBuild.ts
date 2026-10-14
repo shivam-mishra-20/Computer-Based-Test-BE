@@ -46,6 +46,7 @@ import {
   type MobileBuildStatus,
 } from './mobileBuildRules';
 import { withoutTenantScope } from '../tenancy/context';
+import { activeSelectionOf } from './appDesign';
 
 export class MobileConfigConflict extends Error {
   constructor(readonly field: string, readonly value: string, readonly owner: string) {
@@ -313,6 +314,11 @@ export async function generateBuildConfig(
   const org = await loadOrg(orgId);
   const mobile = (org?.mobile ?? {}) as Record<string, unknown>;
   const experience = (org?.appExperience ?? {}) as BrandInput;
+  // The design platform staff activated, or null for the product default.
+  // Written as the SELECTION (template reference + validated overrides), never
+  // as resolved colours: the app re-validates it on the device against the
+  // templates it ships, exactly as it does the brand.
+  const design = activeSelectionOf(org as Record<string, any> | null);
 
   // The organization's own words and colours, completed with defaults. The
   // admin preview calls the SAME function through /api/public/brand-preview,
@@ -385,6 +391,11 @@ const ${name} = {
   // and a generated file reviewable. Someone reading this file sees the copy
   // their users will read, not a set of fields that might default to it.
   brand: ${jsObject(brand, 2)},
+
+  // The app design this organization activated in the platform console
+  // (App designs). Null means the product's default look. Change it by
+  // activating another design, then building again — never by editing here.
+  design: ${design ? jsObject(design, 2) : 'null'},
 
   branding: {
     logo: './assets/${slug}/logo.png',

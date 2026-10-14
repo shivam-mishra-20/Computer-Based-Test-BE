@@ -1,4 +1,5 @@
 import { requireStaffPermission } from '../../middlewares/requirePermission';
+import { requireExamOwner } from '../../middlewares/examOwnership';
 import { Router } from 'express';
 import { authMiddleware} from '../../middlewares/authMiddleware';
 import { invalidateCacheOn } from '../../utils/cacheHelpers';
@@ -52,11 +53,12 @@ router.delete('/blueprints/:id', authMiddleware, requireStaffPermission('exams.d
 router.post('/from-paper', authMiddleware, requireStaffPermission('exams.create'), createExamFromPaperCtrl);
 
 // Param-based exam operations (must come after specific paths)
-router.get('/:id', authMiddleware, requireStaffPermission('exams.read'), getExamCtrl);
-router.put('/:id', authMiddleware, requireStaffPermission('exams.update'), invalidateAssigned, updateExamCtrl);
-router.delete('/:id', authMiddleware, requireStaffPermission('exams.delete'), invalidateAssigned, deleteExamCtrl);
+// One exam by id: its creator or an admin (the teacher's list is already own-only).
+router.get('/:id', authMiddleware, requireStaffPermission('exams.read'), requireExamOwner(), getExamCtrl);
+router.put('/:id', authMiddleware, requireStaffPermission('exams.update'), requireExamOwner(), invalidateAssigned, updateExamCtrl);
+router.delete('/:id', authMiddleware, requireStaffPermission('exams.delete'), requireExamOwner(), invalidateAssigned, deleteExamCtrl);
 
 // Assign exams
-router.post('/:id/assign', authMiddleware, requireStaffPermission('exams.publish'), invalidateAssigned, assignExamCtrl);
+router.post('/:id/assign', authMiddleware, requireStaffPermission('exams.publish'), requireExamOwner(), invalidateAssigned, assignExamCtrl);
 
 export default router;

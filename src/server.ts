@@ -86,9 +86,21 @@ registerTenancy();
 
 import http from 'http';
 import cluster from 'cluster';
-import SocketService from './services/SocketService';
 import { closeRedis } from './config/redis';
 import { shouldRunScheduledJobs } from './core/tenancy';
+
+// ── Anything that compiles a model is REQUIRED here, never imported ─────────
+// An `import` is hoisted: the bundler (esbuild, `npm run build`) evaluates
+// every imported module before this file's first statement, whatever line the
+// import is written on. `import SocketService` therefore compiled the User and
+// Doubt models (SocketService → authMiddleware → User) BEFORE registerTenancy()
+// ran, so in dist/server.js User had no `orgId` path: every account saved
+// through Mongoose silently lost its organization — an app registration became
+// a pending student no institute could see — and User reads were not scoped.
+// ts-node keeps source order, which is why development never showed it.
+// A `require` runs where it is written.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const SocketService = require('./services/SocketService').default;
 
 // Import application after credentials are configured
 const app = require('./app').default || require('./app');
@@ -251,7 +263,24 @@ connectDB().then(async () => {
     );
   }
 
-  if (shouldRunEmbeddedAppBuildWorker()) {
+  // Only a host that can build takes builds: the queue lives in Redis, and
+  // every server sharing that Redis would otherwise compete for each build and
+  // fail the ones it cannot run — see buildHostProblem.
+  const appBuildHostProblem: string | null = shouldRunEmbeddedAppBuildWorker()
+    ? (() => {
+        try {
+          return require('./core/platform/appBuildWorkspace').buildHostProblem();
+        } catch (err) {
+          return `its readiness could not be checked (${(err as Error)?.message})`;
+        }
+      })()
+    : null;
+
+  if (appBuildHostProblem) {
+    console.log(
+      `ℹ️ [Worker ${WORKER_ID}] Mobile app build worker NOT started on this host: ${appBuildHostProblem}. Builds stay queued for a server that has the app project.`,
+    );
+  } else if (shouldRunEmbeddedAppBuildWorker()) {
     // Wrapped, because the failure mode this replaces was silence. A worker
     // that throws on startup and is not caught leaves the server running, the
     // queue filling, and every build in the console reading "Waiting for a

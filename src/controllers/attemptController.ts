@@ -1,8 +1,9 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
-import { listAssignedExams, startAttempt, getAttemptView, saveAnswer, saveAnswersBatch, markForReview, clearAnswerResponse, submitAttempt, publishResult, logActivity, nextAdaptiveQuestion, listPendingReviewAttempts, adjustAnswerScore, listAttemptsForUser, getAttemptViewForTeacher, getExamPreview, heartbeat } from '../services/attemptService';
+import { listAssignedExams, startAttempt, getAttemptView, saveAnswer, saveAnswersBatch, markForReview, clearAnswerResponse, submitAttempt, publishResult, logActivity, nextAdaptiveQuestion, listPendingReviewAttempts, adjustAnswerScore, listAttemptsForUser, getAttemptViewForTeacher, getExamPreview, heartbeat, studentAttemptView } from '../services/attemptService';
 import Question from '../models/Question';
 import Attempt from '../models/Attempt';
+import { ownedExamIdsOrAll } from '../middlewares/examOwnership';
 
 export const listAssignedCtrl = async (req: Request, res: Response) => {
   const exams = await listAssignedExams((req as any).user.id);
@@ -12,7 +13,7 @@ export const listAssignedCtrl = async (req: Request, res: Response) => {
 export const startAttemptCtrl = async (req: Request, res: Response) => {
   try {
     const attempt = await startAttempt(req.params.examId, (req as any).user.id);
-    res.status(201).json(attempt);
+    res.status(201).json(studentAttemptView(attempt));
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Failed to start attempt', code: err.code, startAt: err.startAt, endAt: err.endAt });
   }
@@ -39,7 +40,9 @@ export const heartbeatCtrl = async (req: Request, res: Response) => {
 export const getAttemptCtrl = async (req: Request, res: Response) => {
   try {
     const view = await getAttemptView(req.params.attemptId, (req as any).user.id);
-    res.json(view);
+    // Correct answers are already withheld per question until publish; the
+    // attempt's own marks are withheld here.
+    res.json({ ...view, attempt: studentAttemptView(view.attempt) });
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Failed to fetch attempt' });
   }
@@ -105,11 +108,11 @@ export const saveAnswerCtrl = async (req: Request, res: Response) => {
     // Deselect / clear a response (keeps the mark-for-review flag).
     if (body.clear) {
       const cleared = await clearAnswerResponse(req.params.attemptId, (req as any).user.id, body.questionId);
-      return res.json(cleared);
+      return res.json(studentAttemptView(cleared));
     }
     const answer = buildAnswerFromBody(body);
     const { attempt, applied } = await saveAnswer(req.params.attemptId, (req as any).user.id, answer);
-    res.json({ ...(attempt as any).toObject(), applied });
+    res.json({ ...studentAttemptView(attempt), applied });
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Failed to save answer' });
   }
@@ -120,7 +123,7 @@ export const saveAnswersBatchCtrl = async (req: Request, res: Response) => {
     const items = Array.isArray(req.body?.answers) ? req.body.answers : [];
     const answers = items.map(buildAnswerFromBody);
     const { attempt, results } = await saveAnswersBatch(req.params.attemptId, (req as any).user.id, answers);
-    res.json({ ...(attempt as any).toObject(), results });
+    res.json({ ...studentAttemptView(attempt), results });
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Failed to sync answers' });
   }
@@ -129,7 +132,7 @@ export const saveAnswersBatchCtrl = async (req: Request, res: Response) => {
 export const markForReviewCtrl = async (req: Request, res: Response) => {
   try {
     const attempt = await markForReview(req.params.attemptId, (req as any).user.id, req.body.questionId, !!req.body.marked);
-    res.json(attempt);
+    res.json(studentAttemptView(attempt));
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Failed to update mark for review' });
   }
@@ -144,7 +147,7 @@ export const submitAttemptCtrl = async (req: Request, res: Response) => {
     // still-unsynced offline-queue entries at exam end).
     const inlineAnswers = Array.isArray(body.answers) ? body.answers.map(buildAnswerFromBody) : [];
     const attempt = await submitAttempt(req.params.attemptId, (req as any).user.id, !!body.auto, inlineAnswers);
-    res.json(attempt);
+    res.json(studentAttemptView(attempt));
   } catch (err: any) {
     const status = err.code === 'SUBMIT_LOCKED' ? 403 : 400;
     res.status(status).json({ message: err.message || 'Failed to submit attempt', code: err.code, unlockAt: err.unlockAt });
@@ -160,13 +163,38 @@ export const publishResultCtrl = async (req: Request, res: Response) => {
   }
 };
 
+const ACTIVITY_TYPES = ['focus-lost', 'fullscreen-exit', 'suspicious', 'navigation'] as const;
+type ActivityType = (typeof ACTIVITY_TYPES)[number];
+
+/**
+ * The stored activity type for what a player sent.
+ *
+ * Mobile builds before 2026-10 sent `{ type: 'violation', reason }` for the app
+ * leaving the foreground — not a stored type, so every such event was refused
+ * and lost. Those builds are still installed, so 'violation' is accepted as
+ * the focus loss it describes; the reason travels in `meta`.
+ */
+function normalizeActivity(type: unknown, reason: unknown, meta: unknown): { type: ActivityType; meta: unknown } | null {
+  if (typeof type !== 'string') return null;
+  if ((ACTIVITY_TYPES as readonly string[]).includes(type)) return { type: type as ActivityType, meta };
+  if (type === 'violation') {
+    const base = meta && typeof meta === 'object' ? (meta as Record<string, unknown>) : {};
+    return { type: 'focus-lost', meta: { ...base, reason: base.reason ?? reason ?? 'violation' } };
+  }
+  return null;
+}
+
 export const logActivityCtrl = async (req: Request, res: Response) => {
   try {
+    const activity = normalizeActivity(req.body?.type, req.body?.reason, req.body?.meta);
+    if (!activity) {
+      return res.status(400).json({ message: `type must be one of: ${ACTIVITY_TYPES.join(', ')}` });
+    }
     const entry = await logActivity(
       req.params.attemptId,
       (req as any).user.id,
-      req.body.type,
-      req.body.meta
+      activity.type,
+      activity.meta
     );
     res.status(201).json(entry);
   } catch (err: any) {
@@ -182,9 +210,10 @@ export const nextAdaptiveQuestionCtrl = async (req: Request, res: Response) => {
     res.status(400).json({ message: err.message || 'Failed to select next question' });
   }
 };
-export const listPendingReviewCtrl = async (_req: Request, res: Response) => {
+export const listPendingReviewCtrl = async (req: Request, res: Response) => {
   try {
-    const list = await listPendingReviewAttempts();
+    // A teacher sees the attempts of their own exams; an admin all of them.
+    const list = await listPendingReviewAttempts(await ownedExamIdsOrAll(req));
     res.json(list);
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Failed to list attempts' });

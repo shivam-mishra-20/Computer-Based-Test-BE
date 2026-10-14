@@ -256,6 +256,34 @@ export interface IOrgProfile {
   country?: string;
 }
 
+/**
+ * The app design an organization's builds compile in.
+ *
+ * Set ONLY by activating an approved design request (core/platform/appDesign.ts)
+ * — never by the institute directly, and never by selecting a template in the
+ * Design Studio. `generateBuildConfig` writes `active.selection` into the
+ * generated app configuration, so every build from that moment carries it; an
+ * installed app shows it once that build is installed.
+ *
+ * The selection is a template reference plus validated overrides, never tokens
+ * — see models/AppDesignRequest.ts.
+ */
+export interface IOrgAppDesign {
+  active?: {
+    requestId: mongoose.Types.ObjectId;
+    selection: {
+      kind: 'org-app-design';
+      schemaVersion: number;
+      templateId: string;
+      templateVersion: string;
+      overrides: Record<string, string>;
+    };
+    templateName: string;
+    activatedAt: Date;
+    activatedByEmail?: string;
+  };
+}
+
 export interface IOrgLocale {
   timezone?: string;
   currency?: string;
@@ -272,6 +300,7 @@ export interface IOrg extends Document {
   registrationStore?: IOrgRegistrationStore;
   deletion?: IOrgDeletion;
   mobile?: IOrgMobile;
+  appDesign?: IOrgAppDesign;
   locale?: IOrgLocale;
   profile?: IOrgProfile;
   /** Hostnames that resolve to this org. Drives per-tenant CORS. */
@@ -362,6 +391,26 @@ const orgSchema = new Schema<IOrg>(
       _id: false,
     },
     deletion: { type: Schema.Types.Mixed, required: false },
+    appDesign: {
+      type: {
+        active: {
+          type: {
+            requestId: { type: Schema.Types.ObjectId, ref: 'AppDesignRequest' },
+            // Normalized by normalizeDesignSelection before every write and
+            // after every read; Mixed so a future schema version can be read
+            // back and reported rather than silently stripped.
+            selection: { type: Schema.Types.Mixed },
+            templateName: String,
+            activatedAt: Date,
+            activatedByEmail: String,
+          },
+          required: false,
+          _id: false,
+        },
+      },
+      required: false,
+      _id: false,
+    },
     registrationStore: {
       type: {
         collection: { type: String, match: /^reg_[a-z0-9_]{2,60}$/ },

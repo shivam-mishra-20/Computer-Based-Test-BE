@@ -35,6 +35,8 @@ export interface PdfOcrResult {
   ocrPages: number[];
   /** True when at least one page's text was produced by OCR. */
   usedOcr: boolean;
+  /** 1-based pages whose OCR call FAILED (service error), as opposed to reading nothing. */
+  ocrFailedPages: number[];
 }
 
 export interface PdfOcrOptions {
@@ -75,9 +77,12 @@ async function renderPageToPng(page: any, canvasFactory: any, scale: number): Pr
 /**
  * Extract every page's text, OCR'ing only the pages the text layer can't cover.
  * Never throws; returns the best combined text it could assemble.
+ *
+ * Takes a file path (Smart Import's disk upload) or the PDF bytes themselves
+ * (the AI generator's in-memory upload) — the same pipeline either way.
  */
 export async function extractPdfTextWithOcrFallback(
-  filePath: string,
+  source: string | Buffer,
   opts: PdfOcrOptions,
 ): Promise<PdfOcrResult> {
   const minChars = opts.minChars ?? DEFAULT_MIN_CHARS();
@@ -86,10 +91,11 @@ export async function extractPdfTextWithOcrFallback(
 
   const pageTexts: string[] = [];
   const ocrPages: number[] = [];
+  const ocrFailedPages: number[] = [];
   let totalPages = 0;
 
   try {
-    const buffer = await fs.promises.readFile(filePath);
+    const buffer = typeof source === 'string' ? await fs.promises.readFile(source) : source;
     // pdfjs-dist's LEGACY Node build is ESM-only; dynamic import from this module
     // (the same pattern the PPT pipeline uses). It bundles a working canvasFactory.
     const pdfjs: any = await import('pdfjs-dist/legacy/build/pdf.mjs');
@@ -137,6 +143,7 @@ export async function extractPdfTextWithOcrFallback(
             ocrText = (await opts.ocr(png)).trim();
             console.log(`[PDF OCR] OCR returned ${ocrText.length} chars for page ${n}`);
           } catch (e) {
+            ocrFailedPages.push(n);
             // Never fail the import — log, keep parser text, continue.
             console.error(`[PDF OCR] Page ${n} OCR failed: ${errMsg(e)} — using parser text (${text.length} chars)`);
           }
@@ -164,5 +171,5 @@ export async function extractPdfTextWithOcrFallback(
   if (ocrPages.length) {
     console.log(`[PDF OCR] OCR applied to ${ocrPages.length}/${totalPages} page(s): [${ocrPages.join(', ')}]`);
   }
-  return { combinedText, totalPages, ocrPages, usedOcr: ocrPages.length > 0 };
+  return { combinedText, totalPages, ocrPages, usedOcr: ocrPages.length > 0, ocrFailedPages };
 }

@@ -21,8 +21,9 @@
  */
 
 import { randomBytes, timingSafeEqual } from 'crypto';
+import bcrypt from 'bcrypt';
 import { withoutTenantScope } from '../tenancy/context';
-import { putApplicationAsset, signUnchecked } from '../storage/storageService';
+import { deleteStoragePrefix, putApplicationAsset, signUnchecked } from '../storage/storageService';
 import { isValidHexColor } from './mobileBuildRules';
 import {
   RegistrationValidationError,
@@ -206,6 +207,49 @@ export async function saveDraft(
    ══════════════════════════════════════════════════════════════════════════ */
 
 const text = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** The administrator provisioning creates: the one marked primary, else the first. */
+export function primaryAdminOf(app: IOrganizationApplication | undefined): { name?: string; email?: string } | undefined {
+  const admins = Array.isArray(app?.staff?.admins) ? app!.staff!.admins! : [];
+  return admins.find((a) => a?.isPrimary) ?? admins[0];
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   The administrator's password
+   ══════════════════════════════════════════════════════════════════════════ */
+
+export const MIN_ADMIN_PASSWORD = 8;
+const MAX_ADMIN_PASSWORD = 128;
+
+/**
+ * Set (or replace) the password the institute's administrator will sign in
+ * with once the application is approved.
+ *
+ * Hashed here, immediately, with the same algorithm the User model uses; the
+ * password itself is never written anywhere, never logged and never returned.
+ * Its own call rather than part of a step save, so it is sent once — not
+ * re-sent with every autosave of a draft that is otherwise plain data.
+ */
+export async function setAdminPassword(id: string, token: string, password: unknown): Promise<IOrganizationRegistration> {
+  const value = typeof password === 'string' ? password : '';
+  if (value.length < MIN_ADMIN_PASSWORD) {
+    throw new RegistrationValidationError({ 'staff.password': `Use at least ${MIN_ADMIN_PASSWORD} characters.` });
+  }
+  if (value.length > MAX_ADMIN_PASSWORD) {
+    throw new RegistrationValidationError({ 'staff.password': `Use at most ${MAX_ADMIN_PASSWORD} characters.` });
+  }
+  const found = await loadDraft(id, token);
+  if (!EDITABLE.has(found.status)) throw new DraftNotEditable(found.status);
+
+  const hash = await bcrypt.hash(value, 10);
+  const setAt = new Date();
+  await withoutTenantScope('application:admin-password', async () =>
+    model().updateOne({ _id: found._id }, { $set: { adminPasswordHash: hash, adminPasswordSetAt: setAt } }),
+  );
+  found.adminPasswordSetAt = setAt;
+  return found;
+}
 
 /**
  * What an applicant must supply before the form will submit.
@@ -239,6 +283,13 @@ export function validateApplicationForSubmission(
     if (!value) fields[`branding.${key}`] = `${label} is required.`;
     else if (!isValidHexColor(value)) fields[`branding.${key}`] = `${label} must be a hex colour like #1D4ED8.`;
   }
+
+  // The administrator signs in with the password chosen here as soon as the
+  // institute is approved, so the account it belongs to must be complete.
+  const admin = primaryAdminOf(app);
+  if (!text(admin?.name)) fields['staff.name'] = 'Administrator name is required.';
+  if (!EMAIL.test(text(admin?.email))) fields['staff.email'] = 'Enter a valid administrator email.';
+  if (!registration.adminPasswordSetAt) fields['staff.password'] = 'Choose a password for the administrator.';
 
   const classLevels = Array.isArray(academic.classLevels) ? academic.classLevels : [];
   const subjects = Array.isArray(academic.subjects) ? academic.subjects : [];
@@ -296,6 +347,30 @@ export async function submitApplication(
 
   await withoutTenantScope('application:submit', async () => found.save());
   return found;
+}
+
+/**
+ * Throw an unsubmitted draft away — the applicant's "start a new application".
+ *
+ * Only a DRAFT: once submitted the token is retired, and an application in the
+ * review queue belongs to the reviewers. The uploaded files go first, from the
+ * draft's own `applications/<id>/` prefix (a 24-hex id, which is what
+ * `deleteStoragePrefix` insists on); a storage failure is logged and does not
+ * keep the record alive — the person asked for a fresh start, and private
+ * files nobody references cost a bucket entry, not a leak.
+ */
+export async function discardDraft(id: string, token: string): Promise<{ removedFiles: number }> {
+  const found = await loadDraft(id, token);
+  if (found.status !== 'DRAFT') throw new DraftNotEditable(found.status);
+
+  let removedFiles = 0;
+  try {
+    removedFiles = await deleteStoragePrefix(`applications/${String(found._id)}/`);
+  } catch (err) {
+    console.error('[application] could not delete draft files:', (err as Error)?.message);
+  }
+  await withoutTenantScope('application:discard-draft', async () => model().deleteOne({ _id: found._id, status: 'DRAFT' }));
+  return { removedFiles };
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -466,6 +541,8 @@ export function draftView(registration: IOrganizationRegistration) {
     estimatedTeachers: registration.estimatedTeachers,
     message: registration.message,
     application: registration.application ?? { version: 1 },
+    // Whether a password was chosen — never the password or its hash.
+    adminPasswordSet: Boolean(registration.adminPasswordSetAt),
     submittedAt: registration.submittedAt,
     updatedAt: registration.updatedAt,
   };

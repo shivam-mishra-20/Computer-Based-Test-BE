@@ -1,7 +1,17 @@
 import type { IPaper } from '../models/Paper';
 import fs from 'fs';
+import path from 'path';
+import { checkAssetUrl } from './pdfAssetPolicy';
 
-const esc = (x: unknown) => String(x ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+// Quotes too: values land in attributes (src="…"), where an unescaped quote
+// let a diagram URL add attributes of its own.
+const esc = (x: unknown) =>
+  String(x ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 
 function renderMathServer(text: string): string {
   // Try to render LaTeX ($..$, $$..$$) to HTML via KaTeX, fallback to escaped with <br/>
@@ -53,7 +63,6 @@ export function buildPaperHtml(paper: IPaper, options?: { includeSolutions?: boo
     const cssPath = require.resolve('katex/dist/katex.min.css');
     katexCss = fs.readFileSync(cssPath, 'utf8');
   } catch {}
-  const base = (process.env.PUBLIC_BASE_URL || '').replace(/\/$/, '');
   const guessMime = (file: string) => {
     const ext = file.toLowerCase().split('.').pop() || '';
     if (ext === 'png') return 'image/png';
@@ -62,24 +71,30 @@ export function buildPaperHtml(paper: IPaper, options?: { includeSolutions?: boo
     if (ext === 'svg') return 'image/svg+xml';
     return 'application/octet-stream';
   };
+  const uploadsDir = path.resolve(process.cwd(), 'uploads');
   const embedIfLocal = (u?: string) => {
     if (!u) return '';
-    // If it's already absolute remote URL, don't embed
-    if (/^https?:\/\//i.test(u)) return u;
+    // A remote image is used only if the PDF renderer may load it (our storage
+    // bucket, etc. — utils/pdfAssetPolicy); anything else is left out, not fetched.
+    if (/^https?:\/\//i.test(u)) return checkAssetUrl(u).allowed ? u : '';
+    if (/^data:image\//i.test(u)) return u;
     // Only embed from our local uploads folder
     if (u.startsWith('/uploads/')) {
       try {
-        const abs = require('path').join(process.cwd(), u.replace(/^\//, ''));
-        const buf = fs.readFileSync(abs);
+        // Resolved and checked: '/uploads/../.env' must not read outside the folder.
+        const abs = path.resolve(process.cwd(), u.replace(/^\//, '').split(/[?#]/)[0]);
+        if (!abs.startsWith(uploadsDir + path.sep)) return '';
         const mime = guessMime(abs);
-        const b64 = buf.toString('base64');
+        if (!mime.startsWith('image/')) return '';
+        const b64 = fs.readFileSync(abs).toString('base64');
         return `data:${mime};base64,${b64}`;
       } catch {
-        // Fall back to public URL
-        return base ? `${base}${u}` : u;
+        // Not on this server's disk. The renderer may not fetch our own host
+        // (it is not an allowed asset origin), so there is nothing to show.
+        return '';
       }
     }
-    return base ? `${base}${u}` : u;
+    return '';
   };
   return `<!doctype html><html><head><meta charset="utf-8"/><title>${esc(paper.examTitle)}</title>
     <style>

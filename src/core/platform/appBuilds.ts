@@ -16,6 +16,11 @@
  * into a Gradle run is something they have to escalate. So every condition
  * that can be checked cheaply is checked here, up front, and the refusal names
  * the field and the next action.
+ *
+ * The one network call readiness makes is to the organization's OWN API
+ * address (`apiConnectionCheck`), bounded to a few seconds and remembered for
+ * a minute: an APK compiled with an address that does not know its institute
+ * builds perfectly and then fails for every student.
  */
 
 import mongoose from 'mongoose';
@@ -31,6 +36,8 @@ import { getMobileConfig } from './mobileBuild';
 import { nativeAssetState, syncAssetsReady } from './mobileAssets';
 import { isEasConfigured } from './easClient';
 import { profileNameFor } from './appBuildWorkspace';
+import { designBuildProblem, designForBuildView } from './appDesign';
+import { checkApiConnection, type ApiConnection } from './apiConnectionCheck';
 import type { SelectableBuildProfile } from './mobileBuildRules';
 import {
   DEFAULT_BUILD_MS,
@@ -81,6 +88,13 @@ export interface BuildReadiness {
   profile: SelectableBuildProfile;
   /** Sentences an administrator can act on. Never a stack trace. */
   problems: string[];
+  /** Worth reading before building, but not a reason to refuse. */
+  warnings: string[];
+  /**
+   * Whether the compiled API address answers for this organization — see
+   * `apiConnectionCheck`. Null when there was nothing to check.
+   */
+  connection: ApiConnection | null;
   appVersion: string;
   slug: string;
   identity: {
@@ -94,6 +108,11 @@ export interface BuildReadiness {
   assets: Awaited<ReturnType<typeof nativeAssetState>>;
   /** Whether this SERVER can build at all, as opposed to this organization. */
   easConfigured: boolean;
+  /**
+   * The app design this build will compile in — the organization's activated
+   * design request — or null for the product's default look.
+   */
+  design: ReturnType<typeof designForBuildView>;
   /**
    * The organization's Expo project, if it has one yet.
    *
@@ -128,12 +147,15 @@ export async function buildReadiness(
       ready: false,
       profile,
       problems: ['That organization no longer exists.'],
+      warnings: [],
+      connection: null,
       appVersion: '',
       slug: '',
       identity: null,
       assets: [],
       easConfigured: isEasConfigured(),
       easProject: { connected: false, projectId: null, account: null, slug: null, provisionedAt: null },
+      design: null,
     };
   }
   if (String(org.status ?? '').toUpperCase() !== 'ACTIVE') {
@@ -150,6 +172,11 @@ export async function buildReadiness(
   for (const issue of view.issues ?? []) {
     problems.push(issue.message ?? String(issue));
   }
+
+  // A design activated from a template this platform version no longer ships
+  // would build as the default look while the console said otherwise.
+  const designProblem = designBuildProblem(org);
+  if (designProblem) problems.push(designProblem);
 
   const assets = await nativeAssetState(orgId);
   for (const asset of assets) {
@@ -183,10 +210,27 @@ export async function buildReadiness(
   }
 
   const id = view.identity ?? ({} as Record<string, any>);
+
+  // The address the app will be compiled with must know this organization.
+  const warnings: string[] = [];
+  let connection: ApiConnection | null = null;
+  if (id.apiBaseUrl) {
+    connection = await checkApiConnection({
+      apiBaseUrl: String(id.apiBaseUrl),
+      orgId,
+      orgHint: String(id.slug ?? org.slug ?? '') || orgId,
+      appId: String(id.androidPackage ?? '') || String(id.iosBundleId ?? ''),
+    }).catch(() => null);
+    if (connection?.state === 'mismatch') problems.push(connection.detail);
+    else if (connection?.detail) warnings.push(connection.detail);
+  }
+
   return {
     ready: problems.length === 0,
     profile,
     problems,
+    warnings,
+    connection,
     appVersion: String(org.mobile?.version ?? '1.0.0'),
     slug: String(id.slug ?? org.slug ?? ''),
     identity: view.identity
@@ -201,6 +245,7 @@ export async function buildReadiness(
       : null,
     assets,
     easConfigured,
+    design: designForBuildView(org),
     easProject: {
       connected: Boolean(easProject),
       projectId: easProject || null,
@@ -333,6 +378,7 @@ export async function startBuild(input: StartBuildInput): Promise<StartBuildResu
     progress: 5,
     queuedAt: new Date(),
     resolvedIdentity: readiness.identity ?? undefined,
+    design: readiness.design ?? undefined,
     easProjectId: org?.mobile?.easProjectId ? String(org.mobile.easProjectId) : undefined,
   };
 
@@ -529,6 +575,7 @@ export function publicBuildView(
     errorCode: job.errorCode,
     errorMessage: job.errorMessage,
     resolvedIdentity: job.resolvedIdentity,
+    design: job.design ?? null,
     generatedConfigHash: job.generatedConfigHash,
     queuedAt: job.queuedAt,
     startedAt: job.startedAt,

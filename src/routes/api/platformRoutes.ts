@@ -42,8 +42,7 @@ import { parseBuildProfile } from '../../core/platform/mobileBuildRules';
 import { RegistrationStorageFailed } from '../../core/platform/appExperience';
 import { GuardianLinkError, listLinks, revokeLink, verifyLink } from '../../core/guardians/guardians';
 import {
-  loadOrgForRegistration,
-  registrationView,
+  registrationViewFor,
   updateRegistrationSettings,
 } from '../../core/platform/registrationSettings';
 import {
@@ -62,7 +61,16 @@ import {
   saveNativeAsset,
   type NativeAssetKind,
 } from '../../core/platform/mobileAssets';
-import { BUILD_ARTIFACT_TYPES } from '../../models/AppBuildJob';
+import { BUILD_ARTIFACT_TYPES, type IAppBuildJob } from '../../models/AppBuildJob';
+import {
+  activateDesign,
+  DesignRequestError,
+  getDesignRequest,
+  linkBuildToRequest,
+  listDesignRequests,
+  reviewDesign,
+} from '../../core/platform/appDesign';
+import type { SelectableBuildProfile } from '../../core/platform/mobileBuildRules';
 import { enqueuePrepare } from '../../queues/appBuildQueue';
 import { uploadNativeAsset } from '../../middlewares/uploadNativeAsset';
 import { assessApplication, applicationToOnboardingInput } from '../../core/platform/applicationProvisioning';
@@ -397,6 +405,11 @@ function handle(fn: (req: Request, res: Response) => Promise<unknown>) {
       // coherent but the resource is not in a state that permits it.
       if (error instanceof RegistrationNotActionable) {
         return res.status(409).json({ message: error.message });
+      }
+      // A design-request move the lifecycle does not allow, a stale record,
+      // or a missing note — each carries its own status and a sentence.
+      if (error instanceof DesignRequestError) {
+        return res.status(error.status).json({ message: error.message, code: error.code });
       }
       console.error(`[platform] ${req.method} ${req.path} failed:`, error);
       return res.status(500).json({ message: (error as Error).message || 'Platform request failed' });
@@ -903,9 +916,9 @@ router.get(
   '/orgs/:orgId/registration',
   requirePlatformCapability('org.read'),
   handle(async (req, res) => {
-    const org = await loadOrgForRegistration(req.params.orgId);
-    if (!org) return res.status(404).json({ message: 'Organization not found.' });
-    return res.json(registrationView(org, { includeStore: true }));
+    const view = await registrationViewFor(req.params.orgId, { includeStore: true });
+    if (!view) return res.status(404).json({ message: 'Organization not found.' });
+    return res.json(view);
   }),
 );
 
@@ -926,8 +939,7 @@ router.put(
         changes: { policy: body.policy, roles: body.roles },
         metadata: { storeProvisioned: Boolean(saved.registrationCollection) },
       });
-      const org = await loadOrgForRegistration(req.params.orgId);
-      return res.json(registrationView(org, { includeStore: true }));
+      return res.json(await registrationViewFor(req.params.orgId, { includeStore: true }));
     } catch (err) {
       if (err instanceof RegistrationStorageFailed) {
         return res.status(503).json({ message: err.message, code: 'REGISTRATION_STORAGE_FAILED' });
@@ -1158,6 +1170,65 @@ router.get(
   }),
 );
 
+const QUEUE_DOWN = 'The build could not be queued. The build service is unavailable — try again shortly.';
+
+/**
+ * Create a build and put it on the queue — the one path that both "Start
+ * build" and "Activate and build" (App designs) take, so a design build is
+ * judged, queued and audited exactly like any other.
+ *
+ * Throws `BuildNotAllowed` / `BuildConfigIncomplete` for the caller to map.
+ * A queue that is down is returned as `queueFailed` rather than thrown, after
+ * failing the row: left alone it would sit in `queued` for ever AND hold the
+ * live-build slot, so the next click would be told a build is already running
+ * when none is.
+ */
+async function startQueuedBuild(
+  req: Request,
+  orgId: string,
+  input: { artifactType: 'apk' | 'aab'; force?: boolean; appProfile?: SelectableBuildProfile },
+): Promise<{ build: IAppBuildJob; created: boolean; queueFailed?: string }> {
+  const actor = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+  const { build, created } = await startBuild({
+    orgId,
+    platform: 'android',
+    artifactType: input.artifactType,
+    requestedBy: String(actor?.id ?? ''),
+    force: input.force === true,
+    appProfile: input.appProfile,
+  });
+
+  if (created) {
+    try {
+      await enqueuePrepare({ buildId: String(build._id), orgId, platform: 'android', artifactType: input.artifactType });
+    } catch (err) {
+      await markFailed(String(build._id), {
+        errorCode: 'QUEUE_UNAVAILABLE',
+        errorMessage: QUEUE_DOWN,
+        errorDetail: (err as Error)?.message,
+      });
+      return { build, created, queueFailed: QUEUE_DOWN };
+    }
+    // Audited on creation only. Recording the duplicate clicks as well would
+    // bury the entries that matter under a person's mouse.
+    await recordPlatformAction(req, {
+      action: 'mobile.build.start',
+      orgId,
+      entity: 'AppBuildJob',
+      entityId: String(build._id),
+      metadata: {
+        buildNumber: build.buildNumber,
+        artifactType: build.artifactType,
+        appVersion: build.appVersion,
+        profile: build.buildProfile,
+        androidPackage: (build.resolvedIdentity as Record<string, string> | undefined)?.androidPackage,
+        design: build.design?.templateId,
+      },
+    });
+  }
+  return { build, created };
+}
+
 /**
  * Start a build.
  *
@@ -1177,56 +1248,13 @@ router.post(
       });
     }
 
-    const actor = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
     try {
-      const { build, created } = await startBuild({
-        orgId: req.params.orgId,
-        platform: 'android',
+      const { build, created, queueFailed } = await startQueuedBuild(req, req.params.orgId, {
         artifactType: artifactType as 'apk' | 'aab',
-        requestedBy: String(actor?.id ?? ''),
         force: req.body?.force === true,
         appProfile: parseBuildProfile(req.body?.appProfile),
       });
-
-      if (created) {
-        try {
-          await enqueuePrepare({
-            buildId: String(build._id),
-            orgId: req.params.orgId,
-            platform: 'android',
-            artifactType: artifactType as 'apk' | 'aab',
-          });
-        } catch (err) {
-          // The row exists but nothing will ever pick it up. Left alone it
-          // would sit in `queued` for ever AND hold the live-build slot, so
-          // the next click would be told a build is already running when none
-          // is. Failing it here keeps the record honest and the slot free.
-          await markFailed(String(build._id), {
-            errorCode: 'QUEUE_UNAVAILABLE',
-            errorMessage: 'The build could not be queued. The build service is unavailable — try again shortly.',
-            errorDetail: (err as Error)?.message,
-          });
-          return res.status(503).json({
-            message: 'The build could not be queued. The build service is unavailable — try again shortly.',
-          });
-        }
-        // Audited on creation only. Recording the duplicate clicks as well
-        // would bury the entries that matter under a person's mouse.
-        await recordPlatformAction(req, {
-          action: 'mobile.build.start',
-          orgId: req.params.orgId,
-          entity: 'AppBuildJob',
-          entityId: String(build._id),
-          metadata: {
-            buildNumber: build.buildNumber,
-            artifactType: build.artifactType,
-            appVersion: build.appVersion,
-            profile: build.buildProfile,
-            androidPackage: (build.resolvedIdentity as Record<string, string> | undefined)?.androidPackage,
-          },
-        });
-      }
-
+      if (queueFailed) return res.status(503).json({ message: queueFailed });
       return res.status(created ? 201 : 200).json({ build: await publicBuildViewOf(build), created });
     } catch (err) {
       if (err instanceof BuildNotAllowed) {
@@ -1312,6 +1340,132 @@ router.get(
   }),
 );
 
+// ── App designs ────────────────────────────────────────────────────────────
+//
+// Institutes choose and submit a design in the web Design Studio
+// (/api/org-admin/app-design); staff review it here. Reading needs `org.read`.
+// Every decision needs `app.manage` — the capability that starts builds —
+// because activation decides what that organization's next build compiles in.
+// Drafts never appear here: the queue starts at submission.
+
+function staffOf(req: Request): { id?: string } {
+  const actor = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+  return { id: actor?.id ? String(actor.id) : undefined };
+}
+
+router.get(
+  '/app-design/requests',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    return res.json(
+      await listDesignRequests({
+        stage: typeof req.query.stage === 'string' ? req.query.stage : undefined,
+        orgId: typeof req.query.orgId === 'string' ? req.query.orgId : undefined,
+        limit: Number(req.query.limit) || undefined,
+      }),
+    );
+  }),
+);
+
+router.get(
+  '/app-design/requests/:id',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => res.json({ request: await getDesignRequest(req.params.id) })),
+);
+
+/** One review decision. Declared per route below so each path is literal in the source (and in the API contract snapshot). */
+function reviewHandler(action: 'request-changes' | 'approve' | 'reject') {
+  return handle(async (req, res) => {
+    const note = typeof req.body?.note === 'string' ? req.body.note : undefined;
+    const view = await reviewDesign(req.params.id, action, staffOf(req), note);
+    await recordPlatformAction(req, {
+      action: `app-design.${action}`,
+      orgId: view.orgId,
+      entity: 'AppDesignRequest',
+      entityId: view.id,
+      metadata: { templateId: view.selection.templateId, revision: view.revision, note: note?.slice(0, 200) },
+    });
+    return res.json({ request: view });
+  });
+}
+
+router.post('/app-design/requests/:id/request-changes', requirePlatformCapability('app.manage'), reviewHandler('request-changes'));
+router.post('/app-design/requests/:id/approve', requirePlatformCapability('app.manage'), reviewHandler('approve'));
+router.post('/app-design/requests/:id/reject', requirePlatformCapability('app.manage'), reviewHandler('reject'));
+
+/**
+ * Start a build for an ACTIVE design request and remember it on the request.
+ *
+ * Returns the build, or a `buildError` sentence: the design is already
+ * active either way, and why the build could not start (a missing icon, no
+ * Expo account) is the useful answer — the console offers the build again.
+ */
+async function buildForDesign(
+  req: Request,
+  requestId: string,
+  orgId: string,
+  wanted: Record<string, unknown>,
+): Promise<{ build: Record<string, unknown> | null; created?: boolean; buildError?: { message: string; problems?: string[] } }> {
+  const artifactType = String(wanted.artifactType ?? 'aab').toLowerCase();
+  if (!BUILD_ARTIFACT_TYPES.includes(artifactType as never)) {
+    return { build: null, buildError: { message: 'Choose APK or AAB.' } };
+  }
+  try {
+    const { build, created, queueFailed } = await startQueuedBuild(req, orgId, {
+      artifactType: artifactType as 'apk' | 'aab',
+      appProfile: parseBuildProfile(wanted.appProfile),
+      force: wanted.force === true,
+    });
+    if (queueFailed) return { build: null, buildError: { message: queueFailed } };
+    if (created) await linkBuildToRequest(requestId, build);
+    return { build: await publicBuildViewOf(build), created };
+  } catch (err) {
+    if (err instanceof BuildNotAllowed) return { build: null, buildError: { message: err.message, problems: err.problems } };
+    if (err instanceof BuildConfigIncomplete) {
+      return { build: null, buildError: { message: err.message, problems: err.issues.map((i) => i.message) } };
+    }
+    throw err;
+  }
+}
+
+/**
+ * Activate an approved design — it becomes what this organization's builds
+ * compile in — and optionally start a build with it in the same step.
+ */
+router.post(
+  '/app-design/requests/:id/activate',
+  requirePlatformCapability('app.manage'),
+  handle(async (req, res) => {
+    const note = typeof req.body?.note === 'string' ? req.body.note : undefined;
+    const view = await activateDesign(req.params.id, staffOf(req), note);
+    await recordPlatformAction(req, {
+      action: 'app-design.activate',
+      orgId: view.orgId,
+      entity: 'AppDesignRequest',
+      entityId: view.id,
+      metadata: { templateId: view.selection.templateId, templateVersion: view.selection.templateVersion, revision: view.revision },
+    });
+    const wanted = req.body?.build && typeof req.body.build === 'object' ? (req.body.build as Record<string, unknown>) : null;
+    if (!wanted) return res.json({ request: await getDesignRequest(view.id), build: null });
+    const built = await buildForDesign(req, view.id, view.orgId, wanted);
+    return res.json({ request: await getDesignRequest(view.id), ...built });
+  }),
+);
+
+/** Build an already-active design again — after fixing what stopped the first build, or for a store update. */
+router.post(
+  '/app-design/requests/:id/builds',
+  requirePlatformCapability('app.manage'),
+  handle(async (req, res) => {
+    const request = await getDesignRequest(req.params.id);
+    if (request.stage !== 'active') {
+      return res.status(409).json({ message: 'Only the active design can be built. Activate it first.' });
+    }
+    const built = await buildForDesign(req, request.id, request.orgId, (req.body ?? {}) as Record<string, unknown>);
+    return res.status(built.build ? (built.created ? 201 : 200) : 422).json({ request: await getDesignRequest(request.id), ...built });
+  }),
+);
+
 // ── Organization registrations ─────────────────────────────────────────────
 //
 // The staff half of the public "Register your institute" flow. Reading needs
@@ -1367,6 +1521,9 @@ router.get(
         modules: mapped.input.subscription?.addOns ?? [],
         droppedModules: mapped.droppedModules,
         adminPrefill: mapped.adminPrefill,
+        // The applicant chose the administrator's password when applying —
+        // approval creates the account with it and issues no invitation.
+        adminPasswordChosen: Boolean((registration as { adminPasswordSetAt?: Date }).adminPasswordSetAt),
       },
     });
   }),

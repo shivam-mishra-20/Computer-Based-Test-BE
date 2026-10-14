@@ -16,7 +16,7 @@ import Org from '../../models/Org';
 import { withoutTenantScope } from '../tenancy/context';
 import { resolveBrandConfig, SUPPORTED_AUTH_ROLES } from './mobileBuildRules';
 import { setAppExperience } from './appExperience';
-import { deploymentAllowsRegistration } from '../registration/publicRegistration';
+import { deploymentAllowsRegistration, registrationPolicyFor } from '../registration/publicRegistration';
 
 interface RegistrationViewOrg {
   name?: string;
@@ -55,6 +55,23 @@ export function registrationView(org: RegistrationViewOrg | null, options: { inc
           }
         : null,
     deploymentOpen: deploymentAllowsRegistration(),
+  };
+}
+
+/**
+ * The settings view plus what an installed app is told RIGHT NOW — computed by
+ * `registrationPolicyFor`, the function the app's own request runs. The admin
+ * screens show this, so "registration is on" here can never quietly disagree
+ * with an app that shows no form: if anything else stops it (the server-wide
+ * switch, storage not provisioned, the organization not live), it says so.
+ */
+export async function registrationViewFor(orgId: string, options: { includeStore: boolean }) {
+  const org = await loadOrgForRegistration(orgId);
+  if (!org) return null;
+  const live = await registrationPolicyFor(orgId);
+  return {
+    ...registrationView(org, options),
+    inApp: { open: live.open, reason: live.reason, roles: live.roles, studentApprovalRequired: live.studentApprovalRequired },
   };
 }
 

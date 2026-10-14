@@ -71,6 +71,13 @@ export interface OnboardingInput {
     name: string;
     email: string;
     password?: string;
+    /**
+     * A bcrypt hash of the password the administrator chose themselves when
+     * applying (registrations: `adminPasswordHash`). Written to the account
+     * as-is, so it is never hashed twice, and no invitation is issued: the
+     * administrator already has a password nobody else knows.
+     */
+    passwordHash?: string;
   };
 }
 
@@ -249,11 +256,28 @@ export async function onboardOrganization(input: OnboardingInput): Promise<Onboa
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const Role = require('../../models/Role').default;
 
+        // Only a real bcrypt hash is accepted as one; anything else is ignored
+        // rather than stored as a password nobody could ever match.
+        const chosenHash =
+          !input.admin!.password && /^\$2[aby]\$\d{2}\$.{53}$/.test(input.admin!.passwordHash ?? '')
+            ? input.admin!.passwordHash!
+            : null;
+        // The hash goes straight to the field: `updateOne` skips the model's
+        // save hook, which would otherwise hash the hash.
+        const adoptChosenPassword = (userId: unknown) =>
+          User.updateOne(
+            { _id: userId },
+            { $set: { password: chosenHash }, $unset: { inviteTokenHash: 1, inviteExpiresAt: 1, invitedBy: 1, invitedAt: 1 } },
+          );
+
         const found = await User.findOne({ orgId, email: input.admin!.email.toLowerCase() });
         if (found) {
-          // Re-running approval for an administrator who never accepted: a
-          // fresh link, so staff are never stuck with one they did not copy.
-          if (found.inviteTokenHash && !input.admin!.password) {
+          // Re-running approval for an administrator who never accepted their
+          // invitation: the password they chose when applying replaces it, or
+          // — without one — a fresh link, so staff are never stuck with one
+          // they did not copy.
+          if (found.inviteTokenHash && chosenHash) await adoptChosenPassword(found._id);
+          else if (found.inviteTokenHash && !input.admin!.password) {
             adminInvite = await issueInvite(found._id, 'platform');
           }
           return String(found._id);
@@ -272,7 +296,8 @@ export async function onboardOrganization(input: OnboardingInput): Promise<Onboa
           // is eventually retired.
           roleIds: adminRole ? [adminRole._id] : [],
         });
-        if (!input.admin!.password) adminInvite = await issueInvite(user._id, 'platform');
+        if (chosenHash) await adoptChosenPassword(user._id);
+        else if (!input.admin!.password) adminInvite = await issueInvite(user._id, 'platform');
         return String(user._id);
       });
       record('admin-user', true, adminUserId);

@@ -15,12 +15,12 @@
  * be a second set of rules to keep in step, and the one nobody is looking at
  * is the one that drifts.
  *
- * ── Why the admin block is NOT mapped ───────────────────────────────────────
- * The application carries the initial administrator's name and email, and
- * deliberately no password: a public form is the wrong place to receive one.
- * So approval prefills those two fields in the console and staff supply the
- * credential there, which is the existing flow. Mapping an admin here would
- * mean inventing a password or provisioning an account nobody can sign into.
+ * ── Why the admin block is only a prefill here ──────────────────────────────
+ * The application carries the initial administrator's name and email; the
+ * password they chose is held apart, as a hash on the registration
+ * (`adminPasswordHash`, select: false), and is applied by
+ * `approveRegistration` — never by this mapping, which must stay plain data
+ * that is safe to show in the console's preview.
  */
 
 import { normalizeAppExperience } from './appExperience';

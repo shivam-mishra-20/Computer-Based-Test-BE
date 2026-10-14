@@ -21,6 +21,8 @@ import {
   findWardByCredentials,
   GuardianLinkError,
   requestLink,
+  wardAttendance,
+  wardProgress,
   wardResults,
   wardsOf,
 } from '../../core/guardians/guardians';
@@ -61,6 +63,46 @@ router.get(
         return res.status(err.httpStatus).json({ message: err.message, code: err.code });
       }
       return res.status(500).json({ message: 'Could not load results.' });
+    }
+  },
+);
+
+/** A verified ward's attendance (same records and counts the student sees). */
+router.get(
+  '/wards/:studentId/attendance',
+  authMiddleware,
+  requireRole('parent'),
+  async (req: Request, res: Response) => {
+    const who = sessionOf(req);
+    if (!who) return res.status(403).json({ message: 'This account is not attached to an institute.' });
+    const month = Number(req.query.month) || undefined;
+    const year = Number(req.query.year) || undefined;
+    try {
+      return res.json(await wardAttendance(who.orgId, who.id, req.params.studentId, { month, year }));
+    } catch (err) {
+      if (err instanceof GuardianLinkError) {
+        return res.status(err.httpStatus).json({ message: err.message, code: err.code });
+      }
+      return res.status(500).json({ message: 'Could not load attendance.' });
+    }
+  },
+);
+
+/** A verified ward's progress — published results only. */
+router.get(
+  '/wards/:studentId/progress',
+  authMiddleware,
+  requireRole('parent'),
+  async (req: Request, res: Response) => {
+    const who = sessionOf(req);
+    if (!who) return res.status(403).json({ message: 'This account is not attached to an institute.' });
+    try {
+      return res.json(await wardProgress(who.orgId, who.id, req.params.studentId));
+    } catch (err) {
+      if (err instanceof GuardianLinkError) {
+        return res.status(err.httpStatus).json({ message: err.message, code: err.code });
+      }
+      return res.status(500).json({ message: 'Could not load progress.' });
     }
   },
 );

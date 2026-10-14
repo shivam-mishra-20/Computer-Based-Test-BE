@@ -9,7 +9,9 @@ const router = Router();
 router.get('/me/progress', authMiddleware, requireRole('student'), async (req, res) => {
   try {
     const mode: any = req.query.mode || (req.query.includeOffline === 'true' ? 'combined' : 'online');
-    const data = await getStudentAnalytics((req as any).user.id, mode);
+    // A student's own progress counts only results their teacher has published
+    // (practice tests publish at submit) — the same rule as their results list.
+    const data = await getStudentAnalytics((req as any).user.id, mode, { publishedOnly: true });
     res.json(data);
   } catch (err: any) {
     res.status(400).json({ message: err.message || 'Failed to fetch analytics' });

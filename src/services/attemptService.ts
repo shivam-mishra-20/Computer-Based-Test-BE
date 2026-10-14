@@ -1,14 +1,14 @@
 import { Types } from 'mongoose';
 import Exam from '../models/Exam';
 import User from '../models/User';
-import Question, { IQuestion } from '../models/Question';
+import { IQuestion } from '../models/Question';
 import Attempt, { IAnswerItem } from '../models/Attempt';
 import ExamEvaluation from '../models/ExamEvaluation';
 import { computeMaxScoreForExam, sanitizeQuestion, shuffleArray } from '../utils/exam';
 import { getDeadline, getStartWindowState, getSubmitUnlockAt, isPastDeadline } from '../utils/examTiming';
 import { gradeSubjectiveAnswerGroq } from './aiService';
 import { tenantScope } from '../core/tenancy';
-import { getClassQuestionModel } from '../models/ClassQuestion';
+import { findExamQuestions } from '../utils/questionSource';
 import {
   FILL_TYPES,
   INTEGER_TYPES,
@@ -163,15 +163,10 @@ export async function startAttempt(examId: string, userId: string) {
 
   // Load questions from class-specific collection
   const qids = exam.sections.flatMap((s) => s.questionIds.map((id) => id.toString()));
-  let questions: IQuestion[];
-  if (exam.classLevel) {
-    const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
-    // Scoped: the per-class collections are shared across organizations, and an
-    // exam must never resolve a question belonging to another institute.
-    questions = await ClassQuestionModel.find({ _id: { $in: qids }, ...tenantScope() });
-  } else {
-    questions = await Question.find({ _id: { $in: qids } });
-  }
+  // The class bank (scoped: the per-class collections are shared across
+  // organizations, and an exam must never resolve a question belonging to
+  // another institute), then the general bank for any id not found there.
+  const questions: IQuestion[] = await findExamQuestions(exam.classLevel, qids, { classFilter: tenantScope() });
   const qmap = new Map<string, IQuestion>(questions.map((q) => [(q as any)._id.toString(), q]));
 
   // Build snapshot with randomization
@@ -322,15 +317,10 @@ export async function getAttemptView(attemptId: string, userId: string) {
   const exam = await Exam.findById(attempt.examId);
   if (!exam) throw new Error('Exam not found');
   const qids = exam.sections.flatMap((s) => s.questionIds);
-  let questions: IQuestion[];
-  if (exam.classLevel) {
-    const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
-    // Scoped: the per-class collections are shared across organizations, and an
-    // exam must never resolve a question belonging to another institute.
-    questions = await ClassQuestionModel.find({ _id: { $in: qids }, ...tenantScope() });
-  } else {
-    questions = await Question.find({ _id: { $in: qids } });
-  }
+  // The class bank (scoped: the per-class collections are shared across
+  // organizations, and an exam must never resolve a question belonging to
+  // another institute), then the general bank for any id not found there.
+  const questions: IQuestion[] = await findExamQuestions(exam.classLevel, qids, { classFilter: tenantScope() });
   const qmap = new Map<string, IQuestion>(questions.map((q) => [(q as any)._id.toString(), q]));
 
   // Build sanitized view per snapshot order
@@ -457,15 +447,10 @@ export async function getAttemptViewForTeacher(attemptId: string) {
   const exam = await Exam.findById(attempt.examId);
   if (!exam) throw new Error('Exam not found');
   const qids = exam.sections.flatMap((s) => s.questionIds);
-  let questions: IQuestion[];
-  if (exam.classLevel) {
-    const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
-    // Scoped: the per-class collections are shared across organizations, and an
-    // exam must never resolve a question belonging to another institute.
-    questions = await ClassQuestionModel.find({ _id: { $in: qids }, ...tenantScope() });
-  } else {
-    questions = await Question.find({ _id: { $in: qids } });
-  }
+  // The class bank (scoped: the per-class collections are shared across
+  // organizations, and an exam must never resolve a question belonging to
+  // another institute), then the general bank for any id not found there.
+  const questions: IQuestion[] = await findExamQuestions(exam.classLevel, qids, { classFilter: tenantScope() });
   const qmap = new Map<string, IQuestion>(questions.map((q) => [(q as any)._id.toString(), q]));
   const sections = exam.sections.map((s) => ({
     _id: s._id,
@@ -787,13 +772,8 @@ export async function submitAttempt(attemptId: string, userId: string, auto = fa
     }
 
     const qids = exam.sections.flatMap((s) => s.questionIds);
-    let questions: IQuestion[];
-    if (exam.classLevel) {
-      const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
-      questions = await ClassQuestionModel.find({ _id: { $in: qids } });
-    } else {
-      questions = await Question.find({ _id: { $in: qids } });
-    }
+    // The class bank, then the general bank for any id not found there.
+    const questions: IQuestion[] = await findExamQuestions(exam.classLevel, qids);
     qmap = new Map<string, IQuestion>(questions.map((q) => [(q as any)._id.toString(), q]));
     // Grade with the exam's build-time marking scheme (e.g. +4 / -1 / 0) so the
     // provisional score matches the same logic the review module finalises with.
@@ -885,6 +865,35 @@ export async function submitAttempt(attemptId: string, userId: string, auto = fa
   return attempt;
 }
 
+// Result data on an attempt and on each of its answers.
+const ATTEMPT_RESULT_FIELDS = ['totalScore', 'maxScore', 'rawTotalScore', 'rawMaxScore', 'percentage', 'rankInTest', 'percentile'] as const;
+const ANSWER_RESULT_FIELDS = ['isCorrect', 'scoreAwarded', 'rubricScore', 'aiFeedback', 'manualScore', 'manualScoreBy', 'manualScoreAt'] as const;
+
+/**
+ * An attempt as its STUDENT may see it. Until the result is published, every
+ * score, correctness flag and grading note is withheld (nulled on the attempt,
+ * removed from each answer) — the same rule the attempt lists follow. Clients
+ * already hide them, but the API must not carry them: anyone calling it
+ * directly would otherwise read their marks before the teacher publishes.
+ * Practice tests publish at submit, so theirs pass through.
+ */
+export function studentAttemptView(attempt: any): any {
+  if (!attempt) return attempt;
+  const plain = typeof attempt.toObject === 'function' ? attempt.toObject() : { ...attempt };
+  if (plain.resultPublished) return plain;
+  for (const field of ATTEMPT_RESULT_FIELDS) {
+    if (field in plain) plain[field] = null;
+  }
+  if (Array.isArray(plain.answers)) {
+    plain.answers = plain.answers.map((answer: any) => {
+      const copy = { ...answer };
+      for (const field of ANSWER_RESULT_FIELDS) delete copy[field];
+      return copy;
+    });
+  }
+  return plain;
+}
+
 export async function publishResult(attemptId: string, publish = true) {
   const attempt = await Attempt.findByIdAndUpdate(
     attemptId,
@@ -894,9 +903,10 @@ export async function publishResult(attemptId: string, publish = true) {
   return attempt;
 }
 
-export async function listPendingReviewAttempts() {
-  // Fetch ALL submitted attempts (both pending and published) for the reviews dashboard
-  const attempts = await Attempt.find({ submittedAt: { $ne: null } })
+export async function listPendingReviewAttempts(examIds: Types.ObjectId[] | null = null) {
+  // Submitted attempts (both pending and published) for the reviews dashboard —
+  // of the given exams only, when a teacher asks (null = every exam: admin).
+  const attempts = await Attempt.find({ submittedAt: { $ne: null }, ...(examIds ? { examId: { $in: examIds } } : {}) })
     .populate('userId', 'name email classLevel batch firebaseUid profileImage')
     .populate('examId', 'title')
     .sort({ submittedAt: -1 })
@@ -1038,15 +1048,10 @@ export async function nextAdaptiveQuestion(attemptId: string, userId: string) {
 
   // Gather pool
   const qids = exam.sections.flatMap((s) => s.questionIds);
-  let questions: IQuestion[];
-  if (exam.classLevel) {
-    const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
-    // Scoped: the per-class collections are shared across organizations, and an
-    // exam must never resolve a question belonging to another institute.
-    questions = await ClassQuestionModel.find({ _id: { $in: qids }, ...tenantScope() });
-  } else {
-    questions = await Question.find({ _id: { $in: qids } });
-  }
+  // The class bank (scoped: the per-class collections are shared across
+  // organizations, and an exam must never resolve a question belonging to
+  // another institute), then the general bank for any id not found there.
+  const questions: IQuestion[] = await findExamQuestions(exam.classLevel, qids, { classFilter: tenantScope() });
   const askedSet = new Set((attempt.snapshot.adaptiveState?.asked || []).map((id) => id.toString()));
 
   // Determine current difficulty based on last answer

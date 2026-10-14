@@ -14,6 +14,8 @@ export interface IPaper extends Document {
   owner: Types.ObjectId; // teacher/admin who generated
   examTitle: string;
   subject?: string;
+  /** The class the paper was built for (its questions come from that class bank). */
+  className?: string;
   totalMarks?: number;
   generalInstructions: string[];
   // Original generated paper JSON
@@ -49,6 +51,9 @@ const paperSchema = new Schema<IPaper>(
     owner: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
     examTitle: { type: String, required: true },
     subject: { type: String },
+    // Sent by the paper builder all along but dropped by the schema, so an exam
+    // made from the paper could not tell which class bank its questions are in.
+    className: { type: String },
     totalMarks: { type: Number },
     generalInstructions: { type: [String], default: [] },
     sections: { type: Schema.Types.Mixed, required: true },

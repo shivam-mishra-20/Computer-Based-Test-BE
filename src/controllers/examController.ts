@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { Types } from 'mongoose';
-import { assignExam, createExam, createQuestion, deleteExam, deleteQuestion, getExam, listExams, listQuestions, updateExam, updateQuestion, createBlueprint, listBlueprints, updateBlueprint, deleteBlueprint, createExamFromPaper } from '../services/examService';
+import { assignExam, createExam, createQuestion, deleteExam, deleteQuestion, getExam, listExams, listGeneralBankQuestions, listQuestions, updateExam, updateQuestion, createBlueprint, listBlueprints, updateBlueprint, deleteBlueprint, createExamFromPaper } from '../services/examService';
 import { logAudit } from '../utils/logger';
 import { tenantScope } from '../core/tenancy';
 import type { GeneratedPaperResult } from '../services/aiService';
@@ -23,7 +23,19 @@ export const createQuestionCtrl = async (req: Request, res: Response) => {
 };
 
 export const listQuestionsCtrl = async (req: Request, res: Response) => {
-  const { q, subject, topic, difficulty, limit = '50', skip = '0' } = req.query as any;
+  const { q, subject, topic, difficulty, limit = '50', skip = '0', bank } = req.query as any;
+  // ?bank=general lists the general `Question` collection itself — where
+  // POST /exams/questions has always written, but which the default listing
+  // below (imported + class banks) never included, so those questions could
+  // not be seen, edited or moved anywhere.
+  if (bank === 'general') {
+    const result = await listGeneralBankQuestions(
+      { text: q ? String(q) : undefined, subject, topic, difficulty },
+      parseInt(limit, 10),
+      parseInt(skip, 10),
+    );
+    return res.json(result);
+  }
   const filter: any = {};
   if (q) filter.text = { $regex: q, $options: 'i' };
   if (subject) filter['tags.subject'] = subject;

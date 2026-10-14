@@ -575,6 +575,11 @@ router.delete('/batches/:id', authMiddleware, async (req: Request, res: Response
 // Get students from Firebase Users collection
 router.get('/firebase/students', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // A roster with emails: staff only, like GET /students. It answered any
+    // signed-in account, so a student or parent could list every student.
+    if (!(await staffHolds(req, 'students.read'))) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
     const { classLevel, batch } = req.query;
     // Firestore holds ONE institute's people, with no organization on them: only
     // the organization that owns that data reads it. Everyone else is served
@@ -677,6 +682,10 @@ router.get('/firebase/students', authMiddleware, async (req: Request, res: Respo
 // Get teachers from Firebase Users collection
 router.get('/firebase/teachers', authMiddleware, async (req: Request, res: Response) => {
   try {
+    // Staff contact details: staff only.
+    if (!(await staffHolds(req, 'teachers.read'))) {
+      return res.status(403).json({ error: 'Not authorized' });
+    }
     // Firestore holds ONE institute's people, with no organization on them: only
     // the organization that owns that data reads it. Everyone else is served
     // from their own MongoDB users below.

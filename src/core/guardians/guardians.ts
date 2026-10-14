@@ -36,7 +36,11 @@ import Attempt from '../../models/Attempt';
 import { withoutTenantScope } from '../tenancy/context';
 
 export class GuardianLinkError extends Error {
-  constructor(readonly code: 'NOT_FOUND' | 'INVALID_STATE' | 'WARD_NOT_VERIFIED', readonly httpStatus: number, message: string) {
+  constructor(
+    readonly code: 'NOT_FOUND' | 'INVALID_STATE' | 'WARD_NOT_VERIFIED' | 'FEATURE_NOT_AVAILABLE' | 'MODULE_NOT_ENABLED',
+    readonly httpStatus: number,
+    message: string,
+  ) {
     super(message);
     this.name = 'GuardianLinkError';
   }
@@ -239,4 +243,90 @@ export async function wardResults(orgId: string, parentId: string, studentId: st
       };
     });
   });
+}
+
+/** The verified ward, re-checked in the parent's own organization — or the same 404 as everywhere else. */
+async function verifiedWard(orgId: string, parentId: string, studentId: string) {
+  if (!mongoose.isValidObjectId(studentId)) {
+    throw new GuardianLinkError('WARD_NOT_VERIFIED', 404, 'No such ward.');
+  }
+  const student = await withoutTenantScope('guardian:verified-ward', async () => {
+    const link = await GuardianLink.findOne({ orgId, parentId, studentId, status: 'verified' }).lean();
+    if (!link) return null;
+    return User.findOne({ _id: studentId, orgId, role: 'student' }).select('name classLevel batch').lean();
+  });
+  if (!student) throw new GuardianLinkError('WARD_NOT_VERIFIED', 404, 'No such ward.');
+  return student as { _id: unknown; name?: string; classLevel?: string; batch?: string };
+}
+
+/**
+ * The same module the server enforces for the student's own view. Commercial,
+ * like requireModule: an entitlement lookup that fails does not lock anyone out.
+ */
+async function assertModule(orgId: string, moduleKey: string, label: string): Promise<void> {
+  try {
+    const { getEntitlement } = await import('../entitlements/resolve');
+    const entitlement = await getEntitlement(orgId);
+    if (!entitlement.modules.includes(moduleKey)) {
+      throw new GuardianLinkError('MODULE_NOT_ENABLED', 403, `${label} is not enabled for your institute.`);
+    }
+  } catch (error) {
+    if (error instanceof GuardianLinkError) throw error;
+    console.error(`[guardians] entitlement lookup failed for org ${orgId}, allowing through:`, (error as Error).message);
+  }
+}
+
+/**
+ * A verified ward's attendance — exactly what the student sees on
+ * GET /api/attendance/my: day records (newest first) and present/absent counts.
+ *
+ * Attendance comes from the institute's own biometric and attendance data,
+ * which only the organization that owns that data has; anyone else gets the
+ * student endpoint's answer (FEATURE_NOT_AVAILABLE), not an empty list that
+ * would read as "absent every day".
+ */
+export async function wardAttendance(
+  orgId: string,
+  parentId: string,
+  studentId: string,
+  opts: { month?: number; year?: number } = {},
+) {
+  const student = await verifiedWard(orgId, parentId, studentId);
+  await assertModule(orgId, 'attendance', 'Attendance');
+  const { isLegacyDataOwnerRequest } = await import('../../middlewares/orgScopeGates');
+  if (!isLegacyDataOwnerRequest()) {
+    throw new GuardianLinkError('FEATURE_NOT_AVAILABLE', 404, 'Attendance is not available for your organization.');
+  }
+  if (!student.name || !student.classLevel) {
+    return { records: [], stats: { present: 0, absent: 0, total: 0, percentage: 0 } };
+  }
+  const { getStudentAttendance } = await import('../../services/attendanceService');
+  const all = await getStudentAttendance(student.name, student.classLevel, String(student._id));
+  const records =
+    opts.month && opts.year
+      ? all.filter((r) => {
+          const d = new Date(r.dayAndDate);
+          return d.getMonth() + 1 === opts.month && d.getFullYear() === opts.year;
+        })
+      : all;
+  // Same rule as /attendance/my: a day counts as present with both punches.
+  const present = records.filter((r) => r.clockIn !== '--:--' && r.clockOut !== '--:--').length;
+  const total = records.length;
+  return {
+    records: records
+      .sort((a, b) => new Date(b.dayAndDate).getTime() - new Date(a.dayAndDate).getTime())
+      .slice(0, 120),
+    stats: { present, absent: total - present, total, percentage: total ? Math.round((present / total) * 100) : 0 },
+  };
+}
+
+/**
+ * A verified ward's progress — the student's own analytics, limited to results
+ * the teacher has published (plus self-practice, which has no publish step).
+ */
+export async function wardProgress(orgId: string, parentId: string, studentId: string) {
+  await verifiedWard(orgId, parentId, studentId);
+  await assertModule(orgId, 'analytics', 'Progress');
+  const { getStudentAnalytics } = await import('../../services/analyticsService');
+  return getStudentAnalytics(studentId, 'combined', { publishedOnly: true });
 }

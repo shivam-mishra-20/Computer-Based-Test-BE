@@ -25,13 +25,27 @@
 import { registerTenancy, verifyTenantPluginApplied } from '../core/tenancy';
 registerTenancy();
 
-import { connectDB } from '../config/db';
-import { closeRedis } from '../config/redis';
-import { startAppBuildWorker, stopAppBuildWorker } from './appBuildWorkerCore';
-import { reconcileOrphanedBuilds } from '../core/platform/appBuilds';
+// REQUIRED, not imported: an `import` is hoisted above registerTenancy() by
+// the bundler, so the models these pull in would compile without the tenancy
+// plugin (see the note in server.ts). A `require` runs where it is written.
+/* eslint-disable @typescript-eslint/no-var-requires */
+const { connectDB } = require('../config/db') as typeof import('../config/db');
+const { closeRedis } = require('../config/redis') as typeof import('../config/redis');
+const { startAppBuildWorker, stopAppBuildWorker } =
+  require('./appBuildWorkerCore') as typeof import('./appBuildWorkerCore');
+const { reconcileOrphanedBuilds } = require('../core/platform/appBuilds') as typeof import('../core/platform/appBuilds');
+const { buildHostProblem } =
+  require('../core/platform/appBuildWorkspace') as typeof import('../core/platform/appBuildWorkspace');
+/* eslint-enable @typescript-eslint/no-var-requires */
 
 async function main() {
   verifyTenantPluginApplied();
+
+  // A host that cannot build must not take builds off a shared queue.
+  const hostProblem = buildHostProblem();
+  if (hostProblem) {
+    throw new Error(`This host cannot build apps: ${hostProblem}. Set CLIENT_APP_PATH to the client-platform-app checkout.`);
+  }
 
   await connectDB();
   console.log('✅ [appBuildWorker] MongoDB connected');

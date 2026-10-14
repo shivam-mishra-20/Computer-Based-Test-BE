@@ -10,8 +10,18 @@ import {
   generateQuestionsFromImage, 
   generateQuestionsFromDirectText,
   type AIGenerationOptions,
-  type GeneratedQuestion 
+  type GeneratedQuestion,
+  EmptySourceError,
+  OcrUnavailableError,
 } from '../services/aiQuestionGenerationService';
+import {
+  startGenerationJob,
+  getGenerationJob,
+  discardGenerationJob,
+  toPreviewQuestions,
+  JobRejectedError,
+  type GenerationSource,
+} from '../services/aiGenerationJobs';
 
 export const generateFromPdf = async (req: Request, res: Response) => {
   try {
@@ -361,194 +371,149 @@ export const deleteGuidance = async (req: Request, res: Response) => {
   res.json({ message: 'Deleted' });
 };
 
+/** The generator options an upload request carries, or the 400 message for a bad one. */
+function readGenerationOptions(req: Request): { options: AIGenerationOptions } | { error: string } {
+  const userId = (req as any).user.id;
+  const {
+    subject,
+    class: className,
+    topic,
+    board,
+    chapter,
+    section,
+    marks,
+    count,
+    difficulty,
+    questionTypes,
+  } = req.body;
+
+  // Validate required fields
+  if (!subject || !className) {
+    return { error: 'Subject and Class are required' };
+  }
+
+  if (!count || isNaN(Number(count)) || Number(count) < 1) {
+    return { error: 'Valid question count is required' };
+  }
+
+  return {
+    options: {
+      subject: subject.trim(),
+      class: className.trim(),
+      topic: topic?.trim(),
+      board: board?.trim(),
+      chapter: chapter?.trim(),
+      section: section?.trim(),
+      marks: marks ? Number(marks) : undefined,
+      count: Number(count),
+      difficulty: difficulty || 'mixed',
+      questionTypes: questionTypes ? questionTypes.split(',').map((t: string) => t.trim()) : undefined,
+      createdBy: new Types.ObjectId(userId),
+    },
+  };
+}
+
+/**
+ * PDF / image generation. By default the request waits for the result, as it
+ * always has. With `async=true` (form field or query) it answers 202 with a
+ * job id instead and the work continues in the background
+ * (services/aiGenerationJobs) — a scanned PDF's OCR can take many minutes.
+ */
+async function aiGenerateFromUpload(req: Request, res: Response, source: GenerationSource) {
+  const label = source === 'pdf' ? 'PDF' : 'image';
+  try {
+    const file = (req as any).file as { buffer: Buffer; originalname?: string } | undefined;
+    if (!file) {
+      return res.status(400).json({ success: false, message: `${source === 'pdf' ? 'PDF' : 'Image'} file is required` });
+    }
+
+    const parsed = readGenerationOptions(req);
+    if ('error' in parsed) {
+      return res.status(400).json({ success: false, message: parsed.error });
+    }
+    const { options } = parsed;
+
+    console.log(`[AI Tools] Generating questions from ${label}:`, options);
+
+    // The institute's AI Guidance (admin-managed) shapes what is generated.
+    options.guidance = await getGuidanceText(options.subject, options.topic);
+
+    if (String(req.body?.async ?? req.query.async) === 'true') {
+      const jobId = await startGenerationJob({
+        source,
+        buffer: file.buffer,
+        originalFileName: file.originalname || '',
+        options,
+        userId: (req as any).user.id,
+      });
+      res.setHeader('Location', `${req.baseUrl}/ai-generate/jobs/${jobId}`);
+      return res.status(202).json({ success: true, data: { jobId, status: 'processing', stage: 'queued' } });
+    }
+
+    const result = source === 'pdf'
+      ? await generateQuestionsFromPDF(file.buffer, options)
+      : await generateQuestionsFromImage(file.buffer, options);
+
+    // Format response for preview (similar to Smart Import)
+    res.status(200).json({
+      success: true,
+      data: {
+        questions: toPreviewQuestions(result.questions),
+        metadata: result.metadata,
+        formData: options, // Return form data for reference
+      }
+    });
+  } catch (error) {
+    if (error instanceof JobRejectedError) {
+      res.setHeader('Retry-After', '60');
+      return res.status(error.status).json({ success: false, code: error.code, message: error.message });
+    }
+    if (error instanceof EmptySourceError || error instanceof OcrUnavailableError) {
+      return res
+        .status(error instanceof OcrUnavailableError ? 503 : 422)
+        .json({ success: false, code: error.code, message: error.message });
+    }
+    console.error(`[AI Tools] ${label} generation error:`, error);
+    res.status(500).json({
+      success: false,
+      message: `Failed to generate questions from ${label}`,
+      error: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
+}
+
 /**
  * NEW AI TOOLS - Generate questions from PDF (with preview)
  * Matches Smart Import workflow
  */
-export const aiGenerateFromPDF = async (req: Request, res: Response) => {
-  try {
-    const file = (req as any).file as { buffer: Buffer } | undefined;
-    if (!file) {
-      return res.status(400).json({ success: false, message: 'PDF file is required' });
-    }
-    
-    const userId = (req as any).user.id;
-    const {
-      subject,
-      class: className,
-      topic,
-      board,
-      chapter,
-      section,
-      marks,
-      count,
-      difficulty,
-      questionTypes,
-    } = req.body;
-    
-    // Validate required fields
-    if (!subject || !className) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Subject and Class are required' 
-      });
-    }
-    
-    if (!count || isNaN(Number(count)) || Number(count) < 1) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Valid question count is required' 
-      });
-    }
-    
-    const options: AIGenerationOptions = {
-      subject: subject.trim(),
-      class: className.trim(),
-      topic: topic?.trim(),
-      board: board?.trim(),
-      chapter: chapter?.trim(),
-      section: section?.trim(),
-      marks: marks ? Number(marks) : undefined,
-      count: Number(count),
-      difficulty: difficulty || 'mixed',
-      questionTypes: questionTypes ? questionTypes.split(',').map((t: string) => t.trim()) : undefined,
-      createdBy: new Types.ObjectId(userId),
-    };
-    
-    console.log('[AI Tools] Generating questions from PDF:', options);
-    
-    const result = await generateQuestionsFromPDF(file.buffer, options);
-    
-    // Format response for preview (similar to Smart Import)
-    const previewQuestions = result.questions.map((q, index) => ({
-      _id: new Types.ObjectId().toString(),
-      questionNumber: index + 1,
-      text: q.text,
-      type: q.type,
-      options: q.options,
-      correctAnswerText: q.correctAnswerText,
-      integerAnswer: q.integerAnswer,
-      assertion: q.assertion,
-      reason: q.reason,
-      assertionIsTrue: q.assertionIsTrue,
-      reasonIsTrue: q.reasonIsTrue,
-      reasonExplainsAssertion: q.reasonExplainsAssertion,
-      difficulty: q.difficulty || 'medium',
-      confidence: q.confidence || 0.85,
-      needsReview: q.needsReview || false,
-      status: 'pending' as const,
-    }));
-    
-    res.status(200).json({
-      success: true,
-      data: {
-        questions: previewQuestions,
-        metadata: result.metadata,
-        formData: options, // Return form data for reference
-      }
-    });
-  } catch (error) {
-    console.error('[AI Tools] PDF generation error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to generate questions from PDF',
-      error: error instanceof Error ? error.message : 'Unknown error'
-    });
-  }
-};
+export const aiGenerateFromPDF = (req: Request, res: Response) => aiGenerateFromUpload(req, res, 'pdf');
 
 /**
  * NEW AI TOOLS - Generate questions from Image (with preview)
  */
-export const aiGenerateFromImage = async (req: Request, res: Response) => {
+export const aiGenerateFromImage = (req: Request, res: Response) => aiGenerateFromUpload(req, res, 'image');
+
+/** A background generation job's progress — and, once done, its questions for review. */
+export const getAiGenerationJob = async (req: Request, res: Response) => {
   try {
-    const file = (req as any).file as { buffer: Buffer } | undefined;
-    if (!file) {
-      return res.status(400).json({ success: false, message: 'Image file is required' });
-    }
-    
-    const userId = (req as any).user.id;
-    const {
-      subject,
-      class: className,
-      topic,
-      board,
-      chapter,
-      section,
-      marks,
-      count,
-      difficulty,
-      questionTypes,
-    } = req.body;
-    
-    // Validate required fields
-    if (!subject || !className) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Subject and Class are required' 
-      });
-    }
-    
-    if (!count || isNaN(Number(count)) || Number(count) < 1) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Valid question count is required' 
-      });
-    }
-    
-    const options: AIGenerationOptions = {
-      subject: subject.trim(),
-      class: className.trim(),
-      topic: topic?.trim(),
-      board: board?.trim(),
-      chapter: chapter?.trim(),
-      section: section?.trim(),
-      marks: marks ? Number(marks) : undefined,
-      count: Number(count),
-      difficulty: difficulty || 'mixed',
-      questionTypes: questionTypes ? questionTypes.split(',').map((t: string) => t.trim()) : undefined,
-      createdBy: new Types.ObjectId(userId),
-    };
-    
-    console.log('[AI Tools] Generating questions from Image:', options);
-    
-    const result = await generateQuestionsFromImage(file.buffer, options);
-    
-    // Format response for preview (similar to Smart Import)
-    const previewQuestions = result.questions.map((q, index) => ({
-      _id: new Types.ObjectId().toString(),
-      questionNumber: index + 1,
-      text: q.text,
-      type: q.type,
-      options: q.options,
-      correctAnswerText: q.correctAnswerText,
-      integerAnswer: q.integerAnswer,
-      assertion: q.assertion,
-      reason: q.reason,
-      assertionIsTrue: q.assertionIsTrue,
-      reasonIsTrue: q.reasonIsTrue,
-      reasonExplainsAssertion: q.reasonExplainsAssertion,
-      difficulty: q.difficulty || 'medium',
-      confidence: q.confidence || 0.85,
-      needsReview: q.needsReview || false,
-      status: 'pending' as const,
-    }));
-    
-    res.status(200).json({
-      success: true,
-      data: {
-        questions: previewQuestions,
-        metadata: result.metadata,
-        formData: options, // Return form data for reference
-      }
-    });
+    const job = await getGenerationJob(String(req.params.jobId), (req as any).user.id);
+    if (!job) return res.status(404).json({ success: false, message: 'Generation job not found' });
+    res.json({ success: true, data: job });
   } catch (error) {
-    console.error('[AI Tools] Image generation error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Failed to generate questions from image',
-      error: error instanceof Error ? error.message : 'Unknown error'
-    });
+    console.error('[AI Tools] Job status error:', error);
+    res.status(500).json({ success: false, message: 'Failed to read the generation job' });
+  }
+};
+
+/** Drop a finished (or abandoned) job and the questions it holds. */
+export const discardAiGenerationJob = async (req: Request, res: Response) => {
+  try {
+    const removed = await discardGenerationJob(String(req.params.jobId), (req as any).user.id);
+    if (!removed) return res.status(404).json({ success: false, message: 'Generation job not found' });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[AI Tools] Job discard error:', error);
+    res.status(500).json({ success: false, message: 'Failed to discard the generation job' });
   }
 };
 
@@ -610,27 +575,12 @@ export const aiGenerateFromText = async (req: Request, res: Response) => {
     
     console.log('[AI Tools] Generating questions from text:', options);
     
+    // The institute's AI Guidance (admin-managed) shapes what is generated.
+    options.guidance = await getGuidanceText(options.subject, options.topic);
     const result = await generateQuestionsFromDirectText(text.trim(), options);
     
     // Format response for preview (similar to Smart Import)
-    const previewQuestions = result.questions.map((q, index) => ({
-      _id: new Types.ObjectId().toString(),
-      questionNumber: index + 1,
-      text: q.text,
-      type: q.type,
-      options: q.options,
-      correctAnswerText: q.correctAnswerText,
-      integerAnswer: q.integerAnswer,
-      assertion: q.assertion,
-      reason: q.reason,
-      assertionIsTrue: q.assertionIsTrue,
-      reasonIsTrue: q.reasonIsTrue,
-      reasonExplainsAssertion: q.reasonExplainsAssertion,
-      difficulty: q.difficulty || 'medium',
-      confidence: q.confidence || 0.85,
-      needsReview: q.needsReview || false,
-      status: 'pending' as const,
-    }));
+    const previewQuestions = toPreviewQuestions(result.questions);
     
     res.status(200).json({
       success: true,
@@ -641,6 +591,11 @@ export const aiGenerateFromText = async (req: Request, res: Response) => {
       }
     });
   } catch (error) {
+    if (error instanceof EmptySourceError || error instanceof OcrUnavailableError) {
+      return res
+        .status(error instanceof OcrUnavailableError ? 503 : 422)
+        .json({ success: false, code: error.code, message: error.message });
+    }
     console.error('[AI Tools] Text generation error:', error);
     res.status(500).json({
       success: false,

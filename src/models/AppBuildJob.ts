@@ -143,6 +143,12 @@ export interface IAppBuildJob extends Document {
   generatedConfigHash?: string;
   /** The resolved identity, recorded BEFORE the build starts. See §10. */
   resolvedIdentity?: Record<string, unknown>;
+  /**
+   * The app design this build compiled in (Org.appDesign.active at the time),
+   * or absent for the product default. A snapshot, so the history still says
+   * which design shipped after a newer one is activated.
+   */
+  design?: { templateId: string; templateName: string; templateVersion: string; requestId: string };
 
   queueJobId?: string;
   /** Set when a newer build supersedes this one via `force`. */
@@ -201,6 +207,7 @@ const appBuildJobSchema = new Schema<IAppBuildJob>(
 
     generatedConfigHash: { type: String },
     resolvedIdentity: { type: Schema.Types.Mixed },
+    design: { type: Schema.Types.Mixed },
 
     queueJobId: { type: String },
     supersededBy: { type: Schema.Types.ObjectId, ref: 'AppBuildJob' },

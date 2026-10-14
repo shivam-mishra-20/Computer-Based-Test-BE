@@ -1,6 +1,7 @@
 import { Types } from 'mongoose';
 import sharp from 'sharp';
 import { ai, fixLatexBackslashes } from '../ai';
+import { extractPdfTextWithOcrFallback } from './pdfOcrFallback';
 
 /** Verbatim OCR prompt shared by image/page extraction. */
 const OCR_PROMPT = `Extract ALL text content from this image with MAXIMUM ACCURACY.
@@ -11,8 +12,24 @@ CRITICAL INSTRUCTIONS:
 - Keep mathematical expressions, equations, and formulas precise.
 - Include special characters, symbols, headers, and instructions.
 - Note diagrams/figures with placeholders: [DIAGRAM: brief description].
+- If the image contains NO readable text at all (a blank or empty page), reply with exactly: [NO_TEXT]
 
 Return ONLY the extracted text, nothing else.`;
+
+/**
+ * Vision models asked to read a blank page often answer with a sentence about
+ * the page ("The image is blank…") instead of nothing. That sentence must not
+ * pass as source text — it would let generation invent questions from it.
+ */
+export function isNoTextReply(reply: string): boolean {
+  const t = reply.trim();
+  if (!t) return true;
+  if (/^\[?\s*NO_TEXT\s*\]?\.?$/i.test(t)) return true;
+  return (
+    t.length < 300 &&
+    /\b(?:image|page|picture|photo|document)\b[^.]{0,40}\b(?:is|appears(?: to be)?|seems(?: to be)?)\s+(?:completely\s+|entirely\s+|mostly\s+)?(?:blank|empty|white)\b|\bno\s+(?:readable|visible|legible|discernible|extractable)?\s*text\b|\b(?:does|did)\s+not\s+contain\s+any\s+(?:readable\s+|visible\s+)?text\b|\bthere\s+is\s+no\s+(?:readable\s+|visible\s+)?text\b/i.test(t)
+  );
+}
 
 /** Detect an image MIME type from its bytes (defaults to image/png). */
 async function detectImageMime(buffer: Buffer): Promise<string> {
@@ -64,7 +81,12 @@ export interface AIGenerationOptions {
   count: number;
   difficulty?: 'easy' | 'medium' | 'hard' | 'mixed';
   questionTypes?: Array<'mcq' | 'truefalse' | 'fill' | 'short' | 'long' | 'integer' | 'assertionreason'>;
-  model?: string; // optional model override (provider-agnostic; default from env)
+  /**
+   * The institute's own instructions for generated questions (AI Guidance,
+   * managed by an admin). Added to the prompt as written. The model itself is
+   * NOT selectable per request — it comes from server configuration.
+   */
+  guidance?: string | null;
   /**
    * 'auto' (default): reproduce existing questions if the source IS a question
    * paper, else generate new ones. 'recreate': always reproduce verbatim.
@@ -93,6 +115,14 @@ export function looksLikeQuestionPaper(text: string): boolean {
   return score >= 3;
 }
 
+/**
+ * Progress notifications for a caller that runs generation as a background
+ * job (services/aiGenerationJobs). The synchronous endpoints pass nothing.
+ */
+export interface GenerationProgress {
+  onStage?: (stage: 'reading' | 'ocr' | 'generating', detail?: { page: number; total: number }) => void;
+}
+
 export interface AIGenerationResult {
   questions: GeneratedQuestion[];
   metadata: {
@@ -117,6 +147,17 @@ export async function extractTextFromImage(buffer: Buffer): Promise<string> {
     });
 
     console.log(`[AI Generation] NVIDIA vision extracted ${extractedText.length} characters`);
+    // NO reply at all is the service failing (an idle-timeout ends the stream
+    // with zero chunks and still returns ""), not a blank page — a blank page
+    // gets the [NO_TEXT] answer the prompt asks for. Reporting it as "no
+    // readable text" told teachers their scan was unreadable during an outage.
+    if (!extractedText.trim()) {
+      throw new Error('the vision service returned no output');
+    }
+    if (isNoTextReply(extractedText)) {
+      console.log('[AI Generation] Vision reports no readable text on this image');
+      return '';
+    }
     return extractedText;
   } catch (error) {
     console.error('[AI Generation] Vision OCR error:', error);
@@ -127,32 +168,87 @@ export async function extractTextFromImage(buffer: Buffer): Promise<string> {
 /**
  * Extract text from PDF by converting pages to images and using Vision API
  */
-export async function extractTextFromPDF(buffer: Buffer): Promise<string> {
+export async function extractTextFromPDF(buffer: Buffer, progress?: GenerationProgress): Promise<string> {
+  let parsed = '';
   try {
     console.log('[AI Generation] Extracting text from PDF...');
-    
-    // Use pdf-lib to convert PDF to images
     const { default: pdfParse } = await import('pdf-parse');
-    const sharp = await import('sharp');
-    
-    // Try basic text extraction first
-    const pdfData = await pdfParse(buffer);
-    
-    if (pdfData.text && pdfData.text.length > 100) {
-      console.log(`[AI Generation] PDF text extraction successful: ${pdfData.text.length} chars`);
-      return pdfData.text;
-    }
-    
-    // If basic extraction fails, use OCR on rendered pages
-    console.log('[AI Generation] Basic extraction insufficient, falling back to OCR...');
-    
-    // For now, return the basic extraction
-    // TODO: Implement page-by-page OCR if needed
-    return pdfData.text;
+    parsed = (await pdfParse(buffer)).text || '';
   } catch (error) {
-    console.error('[AI Generation] PDF extraction error:', error);
-    throw new Error(`PDF text extraction failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    // A PDF the text parser cannot read may still render — try OCR below.
+    console.warn('[AI Generation] PDF text layer unreadable:', error instanceof Error ? error.message : error);
   }
+
+  if (meaningfulLength(parsed) > 100) {
+    console.log(`[AI Generation] PDF text extraction successful: ${parsed.length} chars`);
+    return parsed;
+  }
+
+  // Scanned (image-only) PDF: render the sparse pages and read them with the
+  // same NVIDIA vision OCR image uploads use — the pipeline Smart Import
+  // already relies on (services/pdfOcrFallback). Capped, because only the
+  // first 50,000 characters reach the prompt anyway.
+  console.log('[AI Generation] Text layer is sparse — running OCR on the PDF pages...');
+  const fallback = await extractPdfTextWithOcrFallback(buffer, {
+    ocr: (png) => extractTextFromImage(png),
+    maxOcrPages: Number(process.env.AI_GENERATE_OCR_MAX_PAGES || 15),
+    onOcrPage: (page, total) => progress?.onStage?.('ocr', { page, total }),
+  });
+  const text = meaningfulLength(fallback.combinedText) > meaningfulLength(parsed) ? fallback.combinedText : parsed;
+  if (fallback.usedOcr) {
+    console.log(`[AI Generation] OCR read ${fallback.ocrPages.length}/${fallback.totalPages} page(s)`);
+  }
+  // Nothing readable AND the OCR service itself failed: that is an outage to
+  // retry, not a blank document — say so instead of "no readable text".
+  if (meaningfulLength(text) < MIN_SOURCE_CHARS() && fallback.ocrFailedPages.length > 0) {
+    throw new OcrUnavailableError();
+  }
+  return text;
+}
+
+/** The vision OCR service failed (timeout, 5xx) on a scan with no text layer. */
+export class OcrUnavailableError extends Error {
+  readonly code = 'OCR_UNAVAILABLE';
+  constructor() {
+    super(
+      "The text-recognition service didn't respond, so this scan couldn't be read. Nothing was generated — please try again in a few minutes.",
+    );
+    this.name = 'OcrUnavailableError';
+  }
+}
+
+/** Characters of real content — page markers and whitespace do not count. */
+export function meaningfulLength(text: string | null | undefined): number {
+  return String(text || '')
+    .replace(/=== PAGE \d+ ===/g, '')
+    .replace(/\s+/g, '')
+    .length;
+}
+
+/** The fewest content characters worth sending to the model. */
+const MIN_SOURCE_CHARS = () => Number(process.env.AI_GENERATE_MIN_SOURCE_CHARS || 40);
+
+/**
+ * The upload had no text the model could work from. Generating anyway makes
+ * the model invent questions from nothing, which then look real in the
+ * preview — so this is refused before any generation call.
+ */
+export class EmptySourceError extends Error {
+  readonly code = 'EMPTY_SOURCE';
+  constructor(readonly sourceType: 'pdf' | 'image' | 'text') {
+    super(
+      sourceType === 'pdf'
+        ? 'No readable text was found in this PDF, even after OCR. If it is a scan, upload clearer page images; if it is protected, export it again without protection.'
+        : sourceType === 'image'
+          ? 'No readable text was found in this image. Upload a sharper, well-lit photo of the page.'
+          : 'There is no source text to generate questions from.',
+    );
+    this.name = 'EmptySourceError';
+  }
+}
+
+function assertUsableSource(text: string, sourceType: 'pdf' | 'image' | 'text'): void {
+  if (meaningfulLength(text) < MIN_SOURCE_CHARS()) throw new EmptySourceError(sourceType);
 }
 
 /**
@@ -322,7 +418,12 @@ JSON SCHEMA:
   }
 ]
 
-📄 SOURCE MATERIAL:
+${options.guidance && options.guidance.trim()
+  ? `🏫 INSTITUTE GUIDANCE (follow it unless it conflicts with the JSON format above):
+${options.guidance.trim().slice(0, 4000)}
+
+`
+  : ''}📄 SOURCE MATERIAL:
 """
 ${text.slice(0, 50000)}
 """
@@ -343,7 +444,16 @@ ${recreate
     
     // Parse JSON with robust error handling
     const questions = await parseGeneratedQuestions(responseText);
-    
+
+    // `auto` guessed "this is a question paper" from its layout (numbered
+    // lines read that way too) and the model found nothing to reproduce. The
+    // teacher asked for questions, so generate them from the same source
+    // instead of answering with an empty list. Once: 'generate' never retries.
+    if (recreate && mode === 'auto' && questions.length === 0) {
+      console.log('[AI Generation] Nothing to reproduce — generating new questions from the source instead');
+      return generateQuestionsFromText(text, { ...options, mode: 'generate' });
+    }
+
     const processingTime = Date.now() - startTime;
     console.log(`[AI Generation] Successfully generated ${questions.length} questions in ${processingTime}ms`);
     
@@ -435,9 +545,13 @@ async function parseGeneratedQuestions(responseText: string): Promise<GeneratedQ
  */
 export async function generateQuestionsFromPDF(
   buffer: Buffer,
-  options: AIGenerationOptions
+  options: AIGenerationOptions,
+  progress?: GenerationProgress,
 ): Promise<AIGenerationResult> {
-  const extractedText = await extractTextFromPDF(buffer);
+  progress?.onStage?.('reading');
+  const extractedText = await extractTextFromPDF(buffer, progress);
+  assertUsableSource(extractedText, 'pdf');
+  progress?.onStage?.('generating');
   const result = await generateQuestionsFromText(extractedText, options);
   return {
     ...result,
@@ -454,9 +568,18 @@ export async function generateQuestionsFromPDF(
  */
 export async function generateQuestionsFromImage(
   buffer: Buffer,
-  options: AIGenerationOptions
+  options: AIGenerationOptions,
+  progress?: GenerationProgress,
 ): Promise<AIGenerationResult> {
-  const extractedText = await extractTextFromImage(buffer);
+  let extractedText: string;
+  try {
+    progress?.onStage?.('ocr', { page: 1, total: 1 });
+    extractedText = await extractTextFromImage(buffer);
+  } catch {
+    throw new OcrUnavailableError();
+  }
+  assertUsableSource(extractedText, 'image');
+  progress?.onStage?.('generating');
   const result = await generateQuestionsFromText(extractedText, options);
   return {
     ...result,
@@ -475,6 +598,7 @@ export async function generateQuestionsFromDirectText(
   text: string,
   options: AIGenerationOptions
 ): Promise<AIGenerationResult> {
+  assertUsableSource(text, 'text');
   const result = await generateQuestionsFromText(text, options);
   return {
     ...result,

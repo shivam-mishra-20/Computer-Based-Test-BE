@@ -1,5 +1,7 @@
 import { Request, Response } from 'express';
 import OfflineResult from '../models/OfflineResult';
+import User from '../models/User';
+import { staffHolds } from '../middlewares/requirePermission';
 
 // Add a single result
 export const addResult = async (req: Request, res: Response) => {
@@ -127,7 +129,18 @@ export const addBulkResults = async (req: Request, res: Response) => {
 // Get results for a specific student
 export const getStudentResults = async (req: Request, res: Response) => {
   try {
-    const { name, class: className } = req.query;
+    let { name, class: className } = req.query as { name?: string; class?: string };
+
+    // Staff look up any student. Anyone else reads only their OWN marks: the
+    // name and class come from their account, never from the query — it used
+    // to take both from the query, so any signed-in account could read any
+    // student's offline results by typing their name. The apps send the
+    // student's own name and class, so they get exactly the rows they did.
+    if (!(await staffHolds(req, 'results.read'))) {
+      const me = await User.findById((req as any).user?.id).select('name classLevel').lean();
+      name = (me as any)?.name;
+      className = (me as any)?.classLevel;
+    }
 
     if (!name || !className) {
       return res.status(400).json({ 

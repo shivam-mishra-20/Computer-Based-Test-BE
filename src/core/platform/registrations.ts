@@ -24,7 +24,7 @@
  */
 
 import { withoutTenantScope } from '../tenancy/context';
-import { onboardOrganization, type OnboardingResult } from './onboarding';
+import { onboardOrganization, type OnboardingInput, type OnboardingResult } from './onboarding';
 import { applicationToOnboardingInput } from './applicationProvisioning';
 import {
   ORGANIZATION_TYPES,
@@ -363,11 +363,13 @@ export interface ApprovalInput {
    * The initial administrator. Optional: staff may provision the organization
    * first and add the administrator later from the organization screen.
    *
-   * The password is set by STAFF here and never travels through the public
-   * form, never appears in a notification, and is never returned by any
-   * endpoint. See docs/organization-registration.md on how it is handed over.
+   * Normally no password travels here: the applicant chose one on the public
+   * form, stored only as a hash on the registration, and approval creates the
+   * account with it. Without one (an older application, or staff naming a
+   * different person) the account gets a one-time invitation link instead. A
+   * hash is never accepted from this input — only from the registration.
    */
-  admin?: { name: string; email: string; password: string };
+  admin?: { name: string; email: string; password?: string };
 }
 
 export interface ApprovalResult {
@@ -451,6 +453,27 @@ export async function approveRegistration(
   });
   const base = mapped.input;
 
+  // ── The administrator, with the password they chose when applying ───────
+  // Read on its own (select: false) so the hash never rides along on the
+  // document this function returns. It is used only for the person the
+  // applicant named: if staff changed the email to someone else, that person
+  // did not choose this password, and gets an invitation instead.
+  const staffAdmin = input.admin && input.admin.name && input.admin.email
+    ? { name: String(input.admin.name), email: String(input.admin.email), password: input.admin.password || undefined }
+    : undefined;
+  const applicant = mapped.adminPrefill;
+  const stored = await withoutTenantScope('registration:approve-admin-password', async () =>
+    OrganizationRegistration.findById(id).select('+adminPasswordHash').lean(),
+  );
+  const chosenHash: string | undefined = (stored as { adminPasswordHash?: string } | null)?.adminPasswordHash || undefined;
+  let admin: OnboardingInput['admin'] = staffAdmin;
+  if (chosenHash && applicant?.email && !staffAdmin?.password) {
+    const target = staffAdmin ?? { name: applicant.name, email: applicant.email };
+    if (target.email.trim().toLowerCase() === applicant.email.trim().toLowerCase()) {
+      admin = { name: target.name, email: target.email, passwordHash: chosenHash };
+    }
+  }
+
   const onboarding = await onboardOrganization({
     organization: base.organization,
     branding: { ...(base.branding ?? {}), ...(input.branding ?? {}) },
@@ -464,11 +487,18 @@ export async function approveRegistration(
     policy: { ...(base.policy ?? {}), ...(input.policy ?? {}) },
     subscription: input.subscription ?? base.subscription,
     customRoles: input.customRoles,
-    // Never mapped from the application: it carries no password, deliberately.
-    // Staff supply the credential at approval; the console prefills the name
-    // and email from `mapped.adminPrefill`.
-    admin: input.admin,
+    // The applicant's administrator signs in with the password they chose
+    // (above); without one, the account is created with an invitation link.
+    admin,
   });
+
+  // The account exists with that password now; nothing needs the hash again.
+  const adminCreated = onboarding.steps.some((s) => s.step === 'admin-user' && s.ok);
+  if (chosenHash && admin?.passwordHash && adminCreated) {
+    await withoutTenantScope('registration:approve-clear-password', async () =>
+      OrganizationRegistration.updateOne({ _id: registration._id }, { $unset: { adminPasswordHash: 1 } }),
+    );
+  }
 
   registration.status = 'APPROVED';
   registration.orgId = onboarding.orgId as never;

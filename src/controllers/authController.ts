@@ -7,10 +7,11 @@ import { normalizeClassValue, toClassLabel } from '../config/studentBatchConfig'
 import { getStudentBatchConfigFromDatabase, matchBatchName } from '../services/batchConfigService';
 import { putPublicTenantAsset } from '../core/storage/storageService';
 import { signSessionToken, signSessionPair } from '../core/auth/tokens';
-import { currentOrgId } from '../core/tenancy/context';
+import { currentOrgId, runWithTenant } from '../core/tenancy/context';
 import { logAudit } from '../utils/logger';
 import {
   RegistrationRefused,
+  orgIdForApplication,
   registerPublicly,
   registrationPolicyFor,
 } from '../core/registration/publicRegistration';
@@ -189,9 +190,21 @@ export const publicTeacherRegister = async (req: Request, res: Response) => {
  * application from `X-App-Id`, which is checked against it, never used to pick.
  */
 export const register = async (req: Request, res: Response) => {
+  // The organization the app is for — from the routing hint, or else from the
+  // app's own identity (see `orgIdForApplication`) — and the work done inside
+  // that organization's context either way, so the account is stamped with it.
+  const fromHint = currentOrgId();
+  const orgId = fromHint ?? (await orgIdForApplication(req.header('X-App-Id')).catch(() => null));
+  if (orgId && !fromHint) {
+    return runWithTenant({ orgId, userId: null, source: 'claim' }, () => registerWithin(req, res, orgId));
+  }
+  return registerWithin(req, res, orgId);
+};
+
+async function registerWithin(req: Request, res: Response, orgId: string | null) {
   try {
     const result = await registerPublicly({
-      orgId: currentOrgId(),
+      orgId,
       declaredApplication: req.header('X-App-Id') ?? null,
       body: (req.body ?? {}) as Record<string, unknown>,
       source: normalizeRegistrationSource(req.body?.registrationSource),
@@ -271,9 +284,12 @@ export const register = async (req: Request, res: Response) => {
  * form, and one that switches it off is not still showing a form the server
  * will refuse.
  */
-export const registrationPolicy = async (_req: Request, res: Response) => {
+export const registrationPolicy = async (req: Request, res: Response) => {
   try {
-    const view = await registrationPolicyFor(currentOrgId());
+    // From the routing hint, or else the app's own identity — the same
+    // resolution `register` uses, so the screen and the submit agree.
+    const orgId = currentOrgId() ?? (await orgIdForApplication(req.header('X-App-Id')).catch(() => null));
+    const view = await registrationPolicyFor(orgId);
     // Short, because an institute that has just opened registration should not
     // have to wait long for its app to notice.
     res.setHeader('Cache-Control', 'private, max-age=30');

@@ -1,5 +1,6 @@
 import Attempt from '../models/Attempt';
 import Exam from '../models/Exam';
+import { escapeRegex } from '../utils/publicResourceVisibility';
 import Question from '../models/Question';
 import { Types } from 'mongoose';
 
@@ -58,7 +59,17 @@ export async function examInsights(examId: string) {
   return { topicCount, difficultyCount, topicAvg };
 }
 
-export async function getStudentAnalytics(userId: string, mode: 'online' | 'offline' | 'combined' = 'combined') {
+/**
+ * `publishedOnly` limits online EXAM attempts to those whose result has been
+ * published (practice attempts have no publish step and are always included).
+ * A parent's view uses it, so nothing reaches a parent before the teacher
+ * releases it.
+ */
+export async function getStudentAnalytics(
+  userId: string,
+  mode: 'online' | 'offline' | 'combined' = 'combined',
+  opts: { publishedOnly?: boolean } = {},
+) {
   // --- Initialize Aggregates ---
   let totalExams = 0;
   let totalScoreSum = 0;
@@ -74,7 +85,8 @@ export async function getStudentAnalytics(userId: string, mode: 'online' | 'offl
   if (mode === 'online' || mode === 'combined') {
     const rawAttempts = await Attempt.find({
       userId: new Types.ObjectId(userId),
-      status: { $in: ['submitted', 'auto-submitted', 'graded'] }
+      status: { $in: ['submitted', 'auto-submitted', 'graded'] },
+      ...(opts.publishedOnly ? { $or: [{ resultPublished: true }, { practiceTestId: { $exists: true, $ne: null } }] } : {}),
     })
     .sort({ submittedAt: -1 }) // Newest first
     .populate('examId', 'title')
@@ -160,15 +172,16 @@ export async function getStudentAnalytics(userId: string, mode: 'online' | 'offl
     const user = await import('../models/User').then(m => m.default.findById(userId));
     if (user && user.name && user.classLevel) {
        const emailUsername = user.email ? user.email.split('@')[0] : '';
-       const nameRegex = new RegExp(`^${user.name.trim()}$`, 'i');
-       const usernameRegex = new RegExp(`^${emailUsername}$`, 'i');
-
-       const offlineQuery: any = { 
+       // Names are matched literally: escaped, so a name with regex characters
+       // can neither break the query nor match other students' rows. (A row
+       // named just "student" used to match every student in the class — a
+       // test fallback that showed one sheet row to all of them.)
+       const nameRegex = new RegExp(`^${escapeRegex(user.name.trim())}$`, 'i');
+       const offlineQuery: any = {
          class: user.classLevel,
          $or: [
            { name: nameRegex },
-           { name: usernameRegex },
-           { name: /^student$/i } // Explicit fallback for testing
+           ...(emailUsername ? [{ name: new RegExp(`^${escapeRegex(emailUsername)}$`, 'i') }] : []),
          ]
        };
        if (user.batch) {

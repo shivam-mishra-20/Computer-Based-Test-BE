@@ -410,6 +410,16 @@ router.get('/:id/submissions', authMiddleware, async (req: Request, res: Respons
     if (!['admin', 'teacher'].includes(user.role)) {
       return res.status(403).json({ error: 'Not authorized' });
     }
+    // Only its creator or an admin sees a homework's submissions and grades
+    // them — the rule edit and delete already follow. Any teacher could do
+    // both for any homework by id.
+    const homework = await Homework.findById(req.params.id).select('createdBy').lean();
+    if (!homework) {
+      return res.status(404).json({ error: 'Homework not found' });
+    }
+    if (user.role !== 'admin' && String((homework as any).createdBy) !== String(user.id)) {
+      return res.status(403).json({ error: 'Not authorized for this homework' });
+    }
     
     const submissions = await StudentProgress.find({
       targetType: 'homework',
@@ -431,6 +441,16 @@ router.post('/:id/grade/:studentId', authMiddleware, async (req: Request, res: R
     const user = (req as any).user;
     if (!['admin', 'teacher'].includes(user.role)) {
       return res.status(403).json({ error: 'Not authorized' });
+    }
+    // Only its creator or an admin sees a homework's submissions and grades
+    // them — the rule edit and delete already follow. Any teacher could do
+    // both for any homework by id.
+    const homework = await Homework.findById(req.params.id).select('createdBy').lean();
+    if (!homework) {
+      return res.status(404).json({ error: 'Homework not found' });
+    }
+    if (user.role !== 'admin' && String((homework as any).createdBy) !== String(user.id)) {
+      return res.status(403).json({ error: 'Not authorized for this homework' });
     }
     
     const { grade, feedback } = req.body;

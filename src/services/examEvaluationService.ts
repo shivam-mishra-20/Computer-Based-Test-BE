@@ -1,7 +1,7 @@
 import { Types } from 'mongoose';
 import Exam, { IExam } from '../models/Exam';
 import Attempt from '../models/Attempt';
-import Question, { IQuestion } from '../models/Question';
+import { IQuestion } from '../models/Question';
 import User from '../models/User';
 import ExamEvaluation, {
   IExamEvaluation,
@@ -12,7 +12,7 @@ import ExamEvaluation, {
   IQuestionMarks,
 } from '../models/ExamEvaluation';
 import ReviewAuditLog, { ReviewAuditAction } from '../models/ReviewAuditLog';
-import { getClassQuestionModel } from '../models/ClassQuestion';
+import { findExamQuestions } from '../utils/questionSource';
 import { sanitizeQuestion } from '../utils/exam';
 import { gradeObjective, isSubjectiveType } from './attemptService';
 
@@ -61,13 +61,8 @@ export function computeBaseMax(
 // ── Question loading ─────────────────────────────────────────────────────────
 async function loadExamQuestionMap(exam: IExam): Promise<Map<string, IQuestion>> {
   const qids = exam.sections.flatMap((s) => s.questionIds);
-  let questions: IQuestion[];
-  if (exam.classLevel) {
-    const ClassQuestionModel = getClassQuestionModel(exam.classLevel);
-    questions = await ClassQuestionModel.find({ _id: { $in: qids } });
-  } else {
-    questions = await Question.find({ _id: { $in: qids } });
-  }
+  // The class bank, then the general bank for any id not found there.
+  const questions: IQuestion[] = await findExamQuestions(exam.classLevel, qids);
   return new Map<string, IQuestion>(questions.map((q) => [(q as any)._id.toString(), q]));
 }
 
@@ -808,6 +803,8 @@ export async function getReviewSummary(examId: string) {
       rankInTest: a.rankInTest,
       percentile: a.percentile,
       hasManualOverride: (a.answers || []).some((ans: any) => typeof ans.manualScore === 'number'),
+      // Proctoring events the player logged (app/tab left, fullscreen exit, …).
+      violations: (a.activityLogs || []).length,
       hasSubjectivePending: (a.answers || []).some(
         (ans: any) => {
           const q = qmap.get(ans.questionId.toString());

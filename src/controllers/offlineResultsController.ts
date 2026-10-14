@@ -4,6 +4,25 @@ import TestResult, { ITestResult, IStudentResult } from '../models/TestResult';
 import User from '../models/User';
 import { sendStudentNotifications } from '../services/notificationService';
 import { INSTITUTE_ACCOUNT_CLAUSE } from '../utils/instituteAudience';
+import { staffHolds } from '../middlewares/requirePermission';
+
+/**
+ * May this user open or change (read, edit, re-mark, delete) this offline test?
+ *
+ * A teacher changes only the tests they created — the same scope their test
+ * list already has (getAllTests). An admin account manages every test. The
+ * route guards (exams.update / results.publish / exams.delete) still apply on
+ * top: this decides WHICH tests, they decide what kind of change.
+ */
+function canManageTest(user: any, test: { createdBy?: unknown }): boolean {
+  if (String(user?.accountRole ?? user?.role ?? '') === 'admin') return true;
+  return !!test.createdBy && String(test.createdBy) === String(user?.id);
+}
+
+const NOT_YOUR_TEST = {
+  message: 'You can only change offline tests you created. Ask an admin to change this one.',
+  code: 'NOT_TEST_OWNER',
+};
 
 // ── Assignment + notification helpers ────────────────────────────────────────
 // These mirror the Homework module (homeworkRoutes.ts) so offline tests reuse
@@ -170,7 +189,9 @@ export const getAllTests = async (req: Request, res: Response) => {
     const { class: className, batch, subject, search } = req.query;
 
     const query: any = {};
-    if (authUser?.role === 'teacher') query.createdBy = authUser.id;
+    // Staff only (route guard). A teacher lists the tests they created; an
+    // admin account lists all — the same rule canManageTest applies to changes.
+    if (String(authUser?.accountRole ?? authUser?.role ?? '') !== 'admin') query.createdBy = authUser.id;
     if (className) query.class = className;
     if (batch) query.batch = batch;
     if (subject) query.subject = subject;
@@ -221,6 +242,11 @@ export const getTestById = async (req: Request, res: Response) => {
 
     if (!test) {
       return res.status(404).json({ message: 'Test not found' });
+    }
+    // A test carries every student's marks: only its creator or an admin reads
+    // it — the same rule as the teacher's list and every change.
+    if (!canManageTest((req as any).user, test)) {
+      return res.status(403).json({ message: 'You can only open offline tests you created.', code: 'NOT_TEST_OWNER' });
     }
 
     res.json({
@@ -287,6 +313,9 @@ export const updateTestResults = async (req: Request, res: Response) => {
     if (!test) {
       return res.status(404).json({ message: 'Test not found' });
     }
+    if (!canManageTest((req as any).user, test)) {
+      return res.status(403).json(NOT_YOUR_TEST);
+    }
 
     // Track which students already had a graded result so we only notify each
     // student the first time their result becomes available.
@@ -343,6 +372,9 @@ export const updateTestProperties = async (req: Request, res: Response) => {
     if (!test) {
       return res.status(404).json({ message: 'Test not found' });
     }
+    if (!canManageTest((req as any).user, test)) {
+      return res.status(403).json(NOT_YOUR_TEST);
+    }
 
     // If maxMarks changed, we should recalculate percentages for existing students
     const maxMarksChanged = test.maxMarks !== maxMarks;
@@ -398,11 +430,15 @@ export const updateTestProperties = async (req: Request, res: Response) => {
 export const deleteTest = async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    const test = await TestResult.findByIdAndDelete(id);
+    const test = await TestResult.findById(id);
 
     if (!test) {
       return res.status(404).json({ message: 'Test not found' });
     }
+    if (!canManageTest((req as any).user, test)) {
+      return res.status(403).json(NOT_YOUR_TEST);
+    }
+    await TestResult.deleteOne({ _id: test._id });
 
     console.log(`[TestResults] Deleted test: ${test.testName}`);
     res.json({ message: 'Test deleted successfully' });
@@ -418,9 +454,10 @@ export const getStudentResults = async (req: Request, res: Response) => {
     const authUser = (req as any).user;
     const { studentId } = req.params;
 
-    // Verify the request is for the authenticated user (students can only see their own results)
-    // Teachers and admins can see any student's results
-    if (authUser.role === 'student' && authUser.id !== studentId) {
+    // A student sees only their own results; staff with results.read see any.
+    // (This checked only the 'student' role, so a parent or public-learner
+    // account could read any student's marks by id.)
+    if (String(authUser.id) !== String(studentId) && !(await staffHolds(req, 'results.read'))) {
       return res.status(403).json({ message: 'Access denied' });
     }
 

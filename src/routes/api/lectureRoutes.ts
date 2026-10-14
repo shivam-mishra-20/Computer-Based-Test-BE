@@ -230,17 +230,23 @@ router.put('/reorder/batch', authMiddleware, async (req: AuthRequest, res: Respo
   try {
     const { lectureOrders } = req.body; // Array of { id, order }
 
+    // The same rule as editing one lecture (PUT /:id): teachers and admins
+    // only, and a teacher reorders only their own. This used to accept any
+    // signed-in account — a student could reorder any lecture by id.
+    if (req.user?.role !== 'teacher' && req.user?.role !== 'admin') {
+      return res.status(403).json({ error: 'Only teachers can reorder lectures' });
+    }
     if (!Array.isArray(lectureOrders)) {
       return res.status(400).json({ error: 'lectureOrders must be an array' });
     }
 
-    const updates = lectureOrders.map(({ id, order }) => 
-      Lecture.findByIdAndUpdate(id, { order })
+    const ownOnly = req.user?.role === 'admin' ? {} : { instructor: req.user?._id };
+    const results = await Promise.all(
+      lectureOrders.map(({ id, order }) => Lecture.updateOne({ _id: id, ...ownOnly }, { order })),
     );
+    const updated = results.reduce((n, r) => n + (r.matchedCount || 0), 0);
 
-    await Promise.all(updates);
-
-    return res.json({ message: 'Lectures reordered successfully' });
+    return res.json({ message: 'Lectures reordered successfully', updated, skipped: lectureOrders.length - updated });
   } catch (error) {
     console.error('Error reordering lectures:', error);
     return res.status(500).json({ error: 'Failed to reorder lectures' });

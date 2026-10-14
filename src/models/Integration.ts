@@ -61,13 +61,14 @@ integrationSchema.index({ orgId: 1, type: 1 }, { unique: true });
 // Defence in depth: even a sealed envelope should not travel to a client, and
 // `lastError` can quote a provider message containing a credential.
 integrationSchema.set('toJSON', {
-  transform: (_doc, ret: Record<string, unknown>) => {
+  transform: (_doc, doc) => {
+    const ret = doc as unknown as Record<string, unknown>;
     if (ret.credentials) {
       ret.credentials = Object.fromEntries(
         Object.keys(ret.credentials as Record<string, unknown>).map((k) => [k, '<sealed>']),
       );
     }
-    return ret;
+    return doc;
   },
 });
 

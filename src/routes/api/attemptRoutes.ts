@@ -1,4 +1,5 @@
 import { requireStaffPermission } from '../../middlewares/requirePermission';
+import { requireAttemptExamOwner } from '../../middlewares/examOwnership';
 import { Router } from 'express';
 import { authMiddleware, requireRole } from '../../middlewares/authMiddleware';
 import { cacheMiddleware, invalidateCacheOn } from '../../utils/cacheHelpers';
@@ -49,9 +50,10 @@ router.get('/:attemptId/questions/:questionId/explanation', authMiddleware, requ
 });
 
 // Teacher/Admin: publish results
-router.post('/:attemptId/publish', authMiddleware, requireStaffPermission('results.publish'), publishResultCtrl);
+// Attempts of an exam: its creator or an admin.
+router.post('/:attemptId/publish', authMiddleware, requireStaffPermission('results.publish'), requireAttemptExamOwner(), publishResultCtrl);
 router.get('/review/pending', authMiddleware, requireStaffPermission('attempts.grade'), listPendingReviewCtrl);
-router.patch('/:attemptId/adjust', authMiddleware, requireStaffPermission('attempts.grade'), adjustAnswerScoreCtrl);
-router.get('/:attemptId/review', authMiddleware, requireStaffPermission('attempts.grade'), teacherAttemptViewCtrl);
+router.patch('/:attemptId/adjust', authMiddleware, requireStaffPermission('attempts.grade'), requireAttemptExamOwner(), adjustAnswerScoreCtrl);
+router.get('/:attemptId/review', authMiddleware, requireStaffPermission('attempts.grade'), requireAttemptExamOwner(), teacherAttemptViewCtrl);
 
 export default router;

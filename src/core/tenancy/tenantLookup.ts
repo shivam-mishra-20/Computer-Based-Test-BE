@@ -22,6 +22,7 @@
  * never reaches another organization's rows, in any mode but `off`.
  */
 
+import type { PipelineStage } from 'mongoose';
 import { currentOrgId } from './context';
 import { readFilterFor } from './config';
 
@@ -39,7 +40,7 @@ export interface TenantLookupSpec {
 }
 
 /** The `$lookup` stage object, ready to drop into a pipeline. */
-export function tenantLookup(spec: TenantLookupSpec): Record<string, unknown> {
+export function tenantLookup(spec: TenantLookupSpec): PipelineStage.Lookup {
   const plain = {
     $lookup: {
       from: spec.from,

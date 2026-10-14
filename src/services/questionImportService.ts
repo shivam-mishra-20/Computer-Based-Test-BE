@@ -14,6 +14,7 @@ import { extractTextFromImage } from './aiService';
 import { runPdfEnhancerPipeline, runTextEnhancerPipeline } from './scriptsBridge';
 import { runBatch } from '../ai';
 import * as progress from './importProgress';
+import { startImportHeartbeat } from './importBatchLiveness';
 import { sha256, getFileCache, setFileCache } from './importCache';
 
 dotenv.config();
@@ -71,6 +72,7 @@ export class QuestionImportService {
       fileSize: fileStats.size,
       status: 'processing',
       processingStarted: new Date(),
+      heartbeatAt: new Date(),
       ocrProvider: 'pdf-parse',
       processingModel: options.provider === 'nvidia'
         ? `nvidia-${process.env.NVIDIA_MODEL_PRIMARY || 'nemotron-super-49b'}`
@@ -79,13 +81,17 @@ export class QuestionImportService {
     });
     await batch.save();
     progress.initProgress(batch._id);
+    // Liveness beat on the record, so a restart mid-import is reported as
+    // interrupted instead of 'processing' forever (services/importBatchLiveness).
+    const stopHeartbeat = startImportHeartbeat(batch._id);
 
     // Fire-and-forget: progress + status live on the batch; never block the request.
     this.importQuestionPaper(filePath, fileName, fileType, uploadedBy, { ...options, existingBatch: batch })
       .catch((err) => {
         console.error('[Import] Background import failed:', err instanceof Error ? err.message : err);
         progress.failProgress(batch._id, err instanceof Error ? err.message : String(err));
-      });
+      })
+      .finally(stopHeartbeat);
 
     return batch;
   }
@@ -216,7 +222,7 @@ export class QuestionImportService {
       // Persistence happens only when the teacher saves from the preview modal.
       progress.setStage(batchId, 'saving');
       console.log(`[Import] Step 4: Buffering questions for review (no DB write)...`);
-      const savedQuestions = this.bufferExtractedQuestions(
+      const savedQuestions = await this.bufferExtractedQuestions(
         normalizedQuestions,
         batchId,
         {
@@ -395,7 +401,7 @@ export class QuestionImportService {
       // happens only when the teacher saves from the preview modal.
       progress.setStage(batchId, 'saving');
       console.log('[Enhanced Import] Buffering questions for review (no DB write)...');
-      const savedQuestions = this.bufferExtractedQuestions(
+      const savedQuestions = await this.bufferExtractedQuestions(
         normalizedQuestions,
         batchId,
         {
@@ -652,7 +658,7 @@ export class QuestionImportService {
    * saves the ones they want from the preview modal (POST /ai/save-questions).
    * GET /import-paper/batch/:batchId serves this buffer for review.
    */
-  private static bufferExtractedQuestions(
+  private static async bufferExtractedQuestions(
     questions: ExtractedQuestion[],
     batchId: Types.ObjectId,
     metadata?: {
@@ -664,7 +670,7 @@ export class QuestionImportService {
       section?: string;
       marks?: number;
     }
-  ): PreviewQuestion[] {
+  ): Promise<PreviewQuestion[]> {
     const previews: PreviewQuestion[] = questions.map((q, i) => {
       // Filter out empty options to prevent validation errors
       let cleanedOptions = q.options;
@@ -703,7 +709,7 @@ export class QuestionImportService {
       };
     });
 
-    setPreview(batchId, previews);
+    await setPreview(batchId, previews);
     return previews;
   }
 

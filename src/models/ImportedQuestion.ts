@@ -87,7 +87,30 @@ export interface IImportBatch extends Document {
   ocrProvider: 'pdf-parse' | 'nvidia-vision' | 'tesseract' | 'google-vision' | 'groq' | 'gemini';
   processingModel: string;
   totalProcessingTime?: number; // milliseconds
-  
+
+  // Smart Import review buffer (services/importPreview): the extracted
+  // questions, gzipped JSON, until the teacher saves them or it expires.
+  // `select: false` — never part of an ordinary batch read or response.
+  previewData?: Buffer;
+  previewExpiresAt?: Date;
+
+  // What this record tracks. Absent/'smart-import' = a Smart Import upload;
+  // 'ai-generate' = a background AI question-generation job
+  // (services/aiGenerationJobs), which Smart Import listings exclude.
+  kind?: 'smart-import' | 'ai-generate';
+  // Background-job progress (ai-generate): current step, the page being read,
+  // and a liveness beat so a job that died with its process is reported as
+  // interrupted instead of "processing" forever.
+  stage?: 'queued' | 'reading' | 'ocr' | 'generating' | 'completed' | 'failed';
+  currentPage?: number;
+  heartbeatAt?: Date;
+  errorCode?: string;
+  errorMessage?: string;
+  // ai-generate: the request's form fields and the generator's metadata,
+  // returned with the questions exactly as the synchronous endpoint does.
+  generationOptions?: Record<string, unknown>;
+  generationMetadata?: Record<string, unknown>;
+
   // Admin fields
   uploadedBy: Types.ObjectId;
   createdAt: Date;
@@ -195,7 +218,19 @@ const importBatchSchema = new Schema<IImportBatch>(
   ocrProvider: { type: String, enum: ['pdf-parse', 'nvidia-vision', 'tesseract', 'google-vision', 'groq', 'gemini'], default: 'pdf-parse' },
     processingModel: { type: String, default: 'nvidia-llama-3.3-nemotron-super-49b' },
     totalProcessingTime: { type: Number },
-    
+
+    previewData: { type: Buffer, select: false },
+    previewExpiresAt: { type: Date },
+
+    kind: { type: String, enum: ['smart-import', 'ai-generate'] },
+    stage: { type: String, enum: ['queued', 'reading', 'ocr', 'generating', 'completed', 'failed'] },
+    currentPage: { type: Number },
+    heartbeatAt: { type: Date },
+    errorCode: { type: String },
+    errorMessage: { type: String },
+    generationOptions: { type: Schema.Types.Mixed },
+    generationMetadata: { type: Schema.Types.Mixed },
+
     uploadedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true }
   },
   { 

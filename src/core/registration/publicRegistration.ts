@@ -130,6 +130,27 @@ async function loadOrg(orgId: string): Promise<LoadedOrg | null> {
   );
 }
 
+/**
+ * The organization a published app belongs to, from its own identity — the
+ * Android package or iOS bundle id it sends as `X-App-Id`.
+ *
+ * Used only when the request's routing hint resolved no organization (a slug
+ * renamed after the app was built, say): the app still knows exactly which
+ * institute it is, and its register screen should not claim "accounts are
+ * created for you" because a hint went stale. Public information either way —
+ * the identifier is in every copy of the APK.
+ */
+export async function orgIdForApplication(appId: unknown): Promise<string | null> {
+  const value = String(appId ?? '').trim();
+  if (!value || value.length > 200 || !/^[A-Za-z0-9._-]+$/.test(value)) return null;
+  const found = (await withoutTenantScope('registration:org-by-app', async () =>
+    Org.findOne({ $or: [{ 'mobile.androidPackage': value }, { 'mobile.iosBundleId': value }] })
+      .select('_id')
+      .lean(),
+  )) as { _id?: unknown } | null;
+  return found?._id ? String(found._id) : null;
+}
+
 /** The organization's brand, completed — the same function the build uses. */
 function brandOf(org: LoadedOrg): BrandConfig {
   const experience = (org.appExperience ?? {}) as Record<string, unknown>;

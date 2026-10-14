@@ -34,7 +34,7 @@
 import os from 'os';
 import path from 'path';
 import crypto from 'crypto';
-import { promises as fs } from 'fs';
+import { promises as fs, existsSync } from 'fs';
 import { generateBuildConfig, type GeneratedBuildConfig } from './mobileBuild';
 import { materializeNativeAssets, appProjectPath } from './mobileAssets';
 import type { BuildArtifactType } from '../../models/AppBuildJob';
@@ -303,6 +303,34 @@ function constantNameFor(slug: string): string {
   return slug.replace(/-([a-z0-9])/g, (_, c: string) => c.toUpperCase());
 }
 
+/** "host-name (linux)" — which machine said something, for the console. */
+function buildHostLabel(): string {
+  return `${os.hostname()} (${process.platform})`;
+}
+
+/**
+ * Why THIS host cannot build apps, or null when it can.
+ *
+ * Checked before a worker starts taking builds, not only when a build runs,
+ * because the queue can be shared: every server pointed at the same Redis
+ * listens on it. A server without the app project — a deployed API whose
+ * CLIENT_APP_PATH was copied from a developer's machine, say — would otherwise
+ * take builds off the queue and fail each one at "Preparing", while the host
+ * that could have built them sat idle. Not listening leaves the build queued
+ * for a host that can.
+ */
+export function buildHostProblem(): string | null {
+  const source = appProjectPath();
+  if (!source) return 'CLIENT_APP_PATH is not set';
+  if (!path.isAbsolute(source)) {
+    return `CLIENT_APP_PATH (${source}) is not an absolute path on this ${process.platform} host`;
+  }
+  if (!existsSync(path.join(source, 'app.config.ts'))) {
+    return `there is no app.config.ts under CLIENT_APP_PATH (${source})`;
+  }
+  return null;
+}
+
 export function workspaceRootFor(buildId: string): string {
   return path.join(os.tmpdir(), 'central-be-app-builds', String(buildId));
 }
@@ -328,7 +356,7 @@ export async function prepareWorkspace(input: {
   const sourceStat = await fs.stat(path.join(source, 'app.config.ts')).catch(() => null);
   if (!sourceStat) {
     throw new WorkspaceUnavailable(
-      `CLIENT_APP_PATH does not look like the mobile app project — no app.config.ts under ${source}.`,
+      `CLIENT_APP_PATH does not look like the mobile app project — no app.config.ts under ${source} on build host ${buildHostLabel()}.`,
     );
   }
 

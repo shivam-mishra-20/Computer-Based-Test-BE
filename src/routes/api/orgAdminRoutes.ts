@@ -51,8 +51,14 @@ import {
 } from '../../core/platform/organizations';
 import { setAppExperience, RegistrationStorageFailed } from '../../core/platform/appExperience';
 import {
-  loadOrgForRegistration,
-  registrationView,
+  DesignRequestError,
+  orgDesignState,
+  saveDesignDraft,
+  submitDesign,
+  withdrawDesign,
+} from '../../core/platform/appDesign';
+import {
+  registrationViewFor,
   updateRegistrationSettings,
 } from '../../core/platform/registrationSettings';
 import { putPublicTenantAsset } from '../../core/storage/storageService';
@@ -104,6 +110,9 @@ const urlOf = (value: unknown) => {
 function fail(res: Response, err: unknown) {
   const status = (err as { status?: number })?.status;
   if (status && status >= 400 && status < 500) return res.status(status).json({ message: (err as Error).message });
+  if (err instanceof DesignRequestError) {
+    return res.status(err.status).json({ message: err.message, code: err.code });
+  }
   if (err instanceof RegistrationStorageFailed) {
     return res.status(503).json({ message: err.message, code: 'REGISTRATION_STORAGE_FAILED' });
   }
@@ -309,10 +318,10 @@ router.post('/branding/asset', branding, uploadBrandAsset.single('file'), async 
 router.get('/registration', read, async (_req, res) => {
   const orgId = orgOf(res);
   if (!orgId) return;
-  const org = await loadOrgForRegistration(orgId);
-  if (!org) return res.status(404).json({ message: 'Organization not found.' });
   // The storage collection is platform detail; an institute is not shown it.
-  return res.json(registrationView(org, { includeStore: false }));
+  const view = await registrationViewFor(orgId, { includeStore: false });
+  if (!view) return res.status(404).json({ message: 'Organization not found.' });
+  return res.json(view);
 });
 
 router.put('/registration', settings, async (req: Req, res) => {
@@ -324,7 +333,7 @@ router.put('/registration', settings, async (req: Req, res) => {
       policy: req.body?.policy,
       roles: req.body?.roles,
     });
-    return res.json(registrationView(await loadOrgForRegistration(orgId), { includeStore: false }));
+    return res.json(await registrationViewFor(orgId, { includeStore: false }));
   } catch (err) {
     return fail(res, err);
   }
@@ -598,12 +607,76 @@ router.post(
   },
 );
 
+/* ══ App design ═══════════════════════════════════════════════════════════
+ *
+ * The Design Studio's server half. An institute administrator saves a design
+ * as a draft, submits it for review, and may withdraw a submission. Nothing
+ * here changes the app: platform staff approve and activate a design from the
+ * console, and only an activated design is compiled into the next build. The
+ * same `org.branding` permission as branding, because it is branding.
+ */
+
+router.get('/app-design', read, async (_req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    return res.json(await orgDesignState(orgId));
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+router.put('/app-design/draft', branding, async (req: Req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    const request = await saveDesignDraft(orgId, { id: req.user?.id }, req.body);
+    await logAudit(req.user?.id, 'org.app-design.save', orgId, {
+      requestId: request.id,
+      templateId: request.selection.templateId,
+      revision: request.revision,
+    });
+    return res.json({ request });
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+router.post('/app-design/submit', branding, async (req: Req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    const request = await submitDesign(orgId, { id: req.user?.id }, (req.body ?? {}).note);
+    await logAudit(req.user?.id, 'org.app-design.submit', orgId, {
+      requestId: request.id,
+      templateId: request.selection.templateId,
+      revision: request.revision,
+    });
+    return res.json({ request });
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+router.post('/app-design/withdraw', branding, async (req: Req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    const request = await withdrawDesign(orgId, { id: req.user?.id });
+    await logAudit(req.user?.id, 'org.app-design.withdraw', orgId, { requestId: request.id });
+    return res.json({ request });
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
 /** What this administrator may do here, so the panel shows only real actions. */
 router.get('/capabilities', read, async (req, res) => {
   const can = async (...p: string[]) => holds(req, ...p);
   return res.json({
     profile: await can('org.settings'),
     branding: await can('org.branding'),
+    design: await can('org.branding'),
     registration: await can('org.settings'),
     configuration: await can('org.settings'),
     guardians: await can('guardians.manage'),

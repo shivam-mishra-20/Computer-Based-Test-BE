@@ -25,7 +25,7 @@
 // application can ever be written into the legacy database.
 import { requirePlatformDeployment } from '../../middlewares/requirePlatformDeployment';
 import express, { Request, Response } from 'express';
-import { draftEditLimiter, publicFormLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
+import { draftEditLimiter, previewLimiter, publicFormLimiter, uploadLimiter } from '../../middlewares/rateLimiter';
 import { resolveBrandConfig, SUPPORTED_AUTH_ROLES } from '../../core/platform/mobileBuildRules';
 import { uploadBrandAsset } from '../../middlewares/uploadBrandAsset';
 import {
@@ -39,9 +39,11 @@ import {
   DraftNotFound,
   applicantAssetViews,
   createDraft,
+  discardDraft,
   draftView,
   loadDraft,
   saveDraft,
+  setAdminPassword,
   storeAsset,
   submitApplication,
 } from '../../core/platform/applications';
@@ -185,9 +187,11 @@ function handleApplicationError(res: Response, err: unknown, what: string) {
  * the caller already sent. There is nothing here to leak and nothing to
  * authorize against — the onboarding form has no account yet, which is the
  * whole reason it is on this router. It is rate limited because it is public,
- * not because it is sensitive.
+ * not because it is sensitive — and by `previewLimiter`, which is sized for
+ * someone typing, not by the submission limiter (twenty an hour blanked the
+ * preview part-way through one person's first edit).
  */
-router.post('/brand-preview', requirePlatformDeployment, publicFormLimiter, (req: Request, res: Response) => {
+router.post('/brand-preview', requirePlatformDeployment, previewLimiter, (req: Request, res: Response) => {
   const body = (req.body ?? {}) as Record<string, unknown>;
   try {
     return res.json({
@@ -313,6 +317,34 @@ router.post(
     }
   },
 );
+
+/**
+ * Choose the administrator's password. Hashed on arrival and never returned;
+ * approval creates the administrator's account with it, so no invitation link
+ * is needed. Answers with the draft view, which says only `adminPasswordSet`.
+ */
+router.put('/organization-applications/:id/admin-password', requirePlatformDeployment, draftEditLimiter, async (req: Request, res: Response) => {
+  try {
+    const updated = await setAdminPassword(req.params.id, draftTokenOf(req), req.body?.password);
+    return res.json({ draft: draftView(updated) });
+  } catch (err) {
+    return handleApplicationError(res, err, 'admin password');
+  }
+});
+
+/**
+ * Discard an unsubmitted draft — "start a new application". Needs the draft's
+ * token like every other draft call; a submitted application cannot be
+ * discarded from here (409).
+ */
+router.delete('/organization-applications/:id', requirePlatformDeployment, draftEditLimiter, async (req: Request, res: Response) => {
+  try {
+    const { removedFiles } = await discardDraft(req.params.id, draftTokenOf(req));
+    return res.json({ discarded: true, removedFiles });
+  } catch (err) {
+    return handleApplicationError(res, err, 'discard');
+  }
+});
 
 /** Submit. Validates, stamps, and retires the token. */
 router.post('/organization-applications/:id/submit', requirePlatformDeployment, draftEditLimiter, async (req: Request, res: Response) => {

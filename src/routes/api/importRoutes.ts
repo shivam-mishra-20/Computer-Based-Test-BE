@@ -9,6 +9,7 @@ import { requireStaffPermission } from '../../middlewares/requirePermission';
 import { AnswerKeyError, answerKeyErrorBody } from '../../services/questionAnswerKey';
 import { QuestionImportService } from '../../services/questionImportService';
 import { getProgress, stageLabel } from '../../services/importProgress';
+import { reconcileInterruptedImports } from '../../services/importBatchLiveness';
 import { getPreview } from '../../services/importPreview';
 import { ImportBatch, ImportedQuestion } from '../../models/ImportedQuestion';
 import { successResponse, errorResponse } from '../../utils/response';
@@ -21,6 +22,11 @@ import { putPublicTenantAsset } from '../../core/storage/storageService';
 import { attachmentFileFilter } from '../../utils/uploadFileTypes';
 
 const router = express.Router();
+
+const runningHere = (batchId: string) => {
+  const live = getProgress(batchId);
+  return !!live && live.stage !== 'completed' && live.stage !== 'failed';
+};
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -124,7 +130,12 @@ router.get('/import-paper/batches', authMiddleware, requireStaffPermission('ques
     const userId = (req as any).user.id;
     const { page = 1, limit = 10, status } = req.query;
     
-    const query: any = { uploadedBy: userId };
+    // AI question-generation jobs share this record (services/aiGenerationJobs);
+    // they are not Smart Import uploads.
+    // Batches whose processing died with a restart show as failed, not processing.
+    await reconcileInterruptedImports({ uploadedBy: new Types.ObjectId(userId) }, runningHere);
+
+    const query: any = { uploadedBy: userId, kind: { $ne: 'ai-generate' } };
     if (status) {
       query.status = status;
     }
@@ -166,9 +177,12 @@ router.get('/import-paper/batch/:batchId', authMiddleware, requireStaffPermissio
       return errorResponse(res, 'Invalid batch ID', 400);
     }
 
+    await reconcileInterruptedImports({ _id: new Types.ObjectId(batchId), uploadedBy: new Types.ObjectId(userId) }, runningHere);
+
     const batch = await ImportBatch.findOne({ 
       _id: batchId, 
-      uploadedBy: userId 
+      uploadedBy: userId,
+      kind: { $ne: 'ai-generate' },
     }).populate('uploadedBy', 'name email');
 
     if (!batch) {
@@ -177,7 +191,7 @@ router.get('/import-paper/batch/:batchId', authMiddleware, requireStaffPermissio
 
     // Questions live in the in-memory review buffer — nothing is persisted until
     // the teacher saves them from the preview modal (POST /ai/save-questions).
-    const questions = getPreview(batchId) || [];
+    const questions = (await getPreview(batchId)) || [];
 
     // Merge LIVE progress (in-memory) into the response — no schema change.
     const batchObj: any = (batch as any).toObject ? (batch as any).toObject() : batch;
@@ -203,6 +217,10 @@ router.get('/import-paper/batch/:batchId', authMiddleware, requireStaffPermissio
       batchObj.stage = batchObj.status === 'completed' ? 'completed'
         : batchObj.status === 'failed' ? 'failed' : 'enhancing';
       batchObj.stageLabel = stageLabel(batchObj.stage);
+    }
+    if (batchObj.status === 'failed' && !batchObj.error) {
+      const errors = batchObj.processingErrors || [];
+      batchObj.error = batchObj.errorMessage || errors[errors.length - 1]?.error || undefined;
     }
 
     return successResponse(res, {
@@ -387,7 +405,8 @@ router.delete('/import-paper/batch/:batchId', authMiddleware, requireStaffPermis
     // Verify ownership
     const batch = await ImportBatch.findOne({ 
       _id: batchId, 
-      uploadedBy: userId 
+      uploadedBy: userId,
+      kind: { $ne: 'ai-generate' },
     });
 
     if (!batch) {
@@ -419,7 +438,7 @@ router.get('/import-paper/stats', authMiddleware, requireStaffPermission('questi
     const userId = (req as any).user.id;
     
     const stats = await ImportBatch.aggregate([
-      { $match: { uploadedBy: new Types.ObjectId(userId) } },
+      { $match: { uploadedBy: new Types.ObjectId(userId), kind: { $ne: 'ai-generate' } } },
       {
         $group: {
           _id: null,
@@ -433,7 +452,7 @@ router.get('/import-paper/stats', authMiddleware, requireStaffPermission('questi
     ]);
 
     const statusCounts = await ImportBatch.aggregate([
-      { $match: { uploadedBy: new Types.ObjectId(userId) } },
+      { $match: { uploadedBy: new Types.ObjectId(userId), kind: { $ne: 'ai-generate' } } },
       {
         $group: {
           _id: '$status',
@@ -466,8 +485,12 @@ export default router;
 
 /**
  * Imports aggregation routes (subject/topic-wise)
+ *
+ * A teacher's own imported questions. Staff with questions.import only, like
+ * GET /import-paper/questions over the same records: these used to need just
+ * a sign-in, so a student could list a teacher's imported questions.
  */
-router.get('/imports/subjects', authMiddleware, async (req, res) => {
+router.get('/imports/subjects', authMiddleware, requireStaffPermission('questions.import'), async (req, res) => {
   try {
     const userId = (req as any).user.id;
     const subjects = await ImportModel.aggregate([
@@ -482,7 +505,7 @@ router.get('/imports/subjects', authMiddleware, async (req, res) => {
   }
 });
 
-router.get('/imports/topics', authMiddleware, async (req, res) => {
+router.get('/imports/topics', authMiddleware, requireStaffPermission('questions.import'), async (req, res) => {
   try {
     const userId = (req as any).user.id;
     const { subject } = req.query;
@@ -500,7 +523,7 @@ router.get('/imports/topics', authMiddleware, async (req, res) => {
   }
 });
 
-router.get('/imports/questions', authMiddleware, async (req, res) => {
+router.get('/imports/questions', authMiddleware, requireStaffPermission('questions.import'), async (req, res) => {
   try {
     const userId = (req as any).user.id;
     const { subject, topic, page = 1, limit = 20 } = req.query;
@@ -557,7 +580,7 @@ router.post('/import-paper/question/:questionId/diagram', authMiddleware, requir
  * GET /api/blueprints
  * List available blueprints for current user (and shared)
  */
-router.get('/blueprints', authMiddleware, async (req, res) => {
+router.get('/blueprints', authMiddleware, requireStaffPermission('questions.import'), async (req, res) => {
   try {
     const userId = new Types.ObjectId((req as any).user.id);
     const items = await Blueprint.find({ $or: [{ owner: userId }, { shared: true }] }).sort({ createdAt: -1 });

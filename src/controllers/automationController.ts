@@ -6,6 +6,7 @@ import { Types, Model } from 'mongoose';
 import mongoose from 'mongoose';
 import AutomationStatusModel, { IAutomationStatus } from '../models/AutomationStatus';
 import { ChildProcess } from 'child_process';
+import { staffHolds } from '../middlewares/requirePermission';
 
 // Track the current running process
 let currentProcess: ChildProcess | null = null;
@@ -88,6 +89,24 @@ export const bulkImportQuestions = async (req: Request, res: Response) => {
     
     if (!questions || !Array.isArray(questions)) {
       return res.status(400).json({ message: 'Questions array is required' });
+    }
+
+    // `userId` becomes the questions' author. The automation runner names the
+    // configured admin (ADMIN_USER_ID) while calling with the triggering
+    // admin's token, so attributing to someone else needs org.integrations —
+    // otherwise any importer could file questions under another person's name.
+    const callerId = String((req as any).user?.id || '');
+    if (userId && String(userId) !== callerId) {
+      if (!Types.ObjectId.isValid(String(userId))) {
+        return res.status(400).json({ message: 'userId is not a valid id' });
+      }
+      if (!(await staffHolds(req, 'org.integrations'))) {
+        return res.status(403).json({
+          message: 'Only an integrations admin can import questions on behalf of another user.',
+          code: 'PERMISSION_DENIED',
+          required: ['org.integrations'],
+        });
+      }
     }
 
     console.log(`[Bulk Import] Importing ${questions.length} questions from ${fileName || 'unknown source'}`);
