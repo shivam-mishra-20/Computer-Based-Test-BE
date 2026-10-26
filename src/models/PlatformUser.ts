@@ -1,4 +1,5 @@
 import mongoose, { Document, Schema } from 'mongoose';
+import type { SealedSecret } from '../core/config/secrets';
 import bcrypt from 'bcrypt';
 
 /**
@@ -91,6 +92,23 @@ export interface IPlatformUser extends Document {
   /** Bumped to revoke every outstanding token for this account. */
   tokenVersion: number;
   lastLoginAt?: Date;
+  /**
+   * Two-factor sign-in (core/auth/platformMfa). Never selected by default: the
+   * routes that need it ask for `+mfa`, so no listing can return it.
+   */
+  mfa?: {
+    enabled: boolean;
+    /** The active TOTP secret, sealed (AES-256-GCM, CONFIG_ENCRYPTION_KEY). */
+    secret?: SealedSecret | null;
+    /** A secret being enrolled, until its first code confirms it. */
+    pendingSecret?: SealedSecret | null;
+    pendingAt?: Date | null;
+    /** The last time step a code was accepted for — a code cannot be used twice. */
+    lastUsedStep?: number;
+    /** SHA-256 of each unused recovery code. */
+    recoveryCodeHashes?: string[];
+    enabledAt?: Date | null;
+  };
   createdAt: Date;
   updatedAt: Date;
   comparePassword(password: string): Promise<boolean>;
@@ -105,6 +123,19 @@ const platformUserSchema = new Schema<IPlatformUser>(
     isActive: { type: Boolean, default: true },
     tokenVersion: { type: Number, default: 0 },
     lastLoginAt: { type: Date },
+    mfa: {
+      type: {
+        enabled: { type: Boolean, default: false },
+        secret: { type: Schema.Types.Mixed, default: null },
+        pendingSecret: { type: Schema.Types.Mixed, default: null },
+        pendingAt: { type: Date, default: null },
+        lastUsedStep: { type: Number, default: 0 },
+        recoveryCodeHashes: { type: [String], default: [] },
+        enabledAt: { type: Date, default: null },
+      },
+      select: false,
+      default: () => ({ enabled: false }),
+    },
   },
   { timestamps: true, tenantScoped: false } as never,
 );

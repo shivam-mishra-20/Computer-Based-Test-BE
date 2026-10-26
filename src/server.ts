@@ -250,6 +250,10 @@ connectDB().then(async () => {
     // Initialize daily 8 PM IST reminder for teacher EOD work reports
     const { TeacherEodReminderCron } = require('./services/TeacherEodReminderCron');
     TeacherEodReminderCron.init();
+
+    // Subscriptions belong to organizations: the platform runtime only.
+    const { SubscriptionLifecycleCron } = require('./services/SubscriptionLifecycleCron');
+    if (SubscriptionLifecycleCron.shouldRun()) SubscriptionLifecycleCron.init();
     console.log(`✅ [Worker ${WORKER_ID}] Cron jobs initialized`);
   } else {
     console.log(`ℹ️ [Worker ${WORKER_ID}] Skipping cron initialization: ${cronSkipped}`);

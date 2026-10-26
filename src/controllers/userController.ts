@@ -2,7 +2,8 @@ import { Request, Response } from 'express';
 import User, { IUser, UserRole } from '../models/User';
 import { logAudit } from '../utils/logger';
 import { INSTITUTE_ACCOUNT_CLAUSE, instituteStudentFilter } from '../utils/instituteAudience';
-import { requireTenantScope, tenantScope, withoutTenantScope } from '../core/tenancy';
+import { currentTenantOrgId, requireTenantScope, tenantScope, withoutTenantScope } from '../core/tenancy';
+import { auditRefusal, seatOf, sendUsageError, withCapacity, type SeatResource } from '../core/subscriptions/usage';
 import { holdsAny } from '../middlewares/requirePermission';
 import { getOrgConfiguration, resolveClassKey } from '../core/config/orgConfig';
 import {
@@ -49,7 +50,7 @@ export async function mayActOn(
  * they are in the caller's own organization. Naming another organization's
  * user would disclose them.
  */
-async function takenAnywhere(
+export async function takenAnywhere(
 	field: 'email' | 'empCode',
 	value: string,
 	exceptId?: string,
@@ -227,10 +228,29 @@ export const adminApproveUser = async (req: Request, res: Response) => {
 
 		const user = await User.findOne({ _id: req.params.id, ...scope });
 		if (!user) return res.status(404).json({ message: 'User not found' });
-		
+
 		user.status = 'approved';
 		user.empCode = sanitizedEmpCode;
-		await user.save();
+		// Approving (or re-approving a rejected account) takes a seat. Approving
+		// someone who already holds one is not a second seat.
+		const seat = seatOf({ role: user.role, status: 'approved', accountType: (user as any).accountType });
+		try {
+			if (!seat) await user.save();
+			else {
+				await withCapacity({
+					orgId: currentTenantOrgId(),
+					resource: seat,
+					subjectId: String(user._id),
+					run: async () => user.save(),
+				});
+			}
+		} catch (limitError) {
+			if (sendUsageError(res, limitError)) {
+				await auditRefusal(currentTenantOrgId(), (req as any).user?.id, limitError);
+				return;
+			}
+			throw limitError;
+		}
 		
 		await logAudit((req as any).user?.id, 'admin.user.approve', String(user._id), { email: user.email, name: user.name, empCode: sanitizedEmpCode });
 		res.json({ message: 'User approved successfully', user: { id: user._id, name: user.name, email: user.email, status: user.status, empCode: user.empCode } });
@@ -313,16 +333,32 @@ export const adminCreateUser = async (req: Request, res: Response) => {
 			if (existingEmp) return res.status(400).json({ message: 'empCode already in use by another user' });
 		}
 
-	const user = await User.create({
-		name,
-		email: lcEmail,
-		password,
-		role,
-		classLevel: role === 'student' ? normalizedClassLevel : undefined,
-		batch: role === 'student' ? normalizedBatch : undefined,
-		empCode: sanitizedEmpCode,
-		registrationSource: 'admin',
-	});
+	// An admin-created account is approved, so it takes a seat — inside the
+	// organization's limit, counted and created as one step (core/subscriptions/usage).
+	let user;
+	try {
+		user = await withCapacity({
+			orgId: currentTenantOrgId(),
+			resource: seatOf({ role, status: 'approved' }) as SeatResource,
+			run: () =>
+				User.create({
+					name,
+					email: lcEmail,
+					password,
+					role,
+					classLevel: role === 'student' ? normalizedClassLevel : undefined,
+					batch: role === 'student' ? normalizedBatch : undefined,
+					empCode: sanitizedEmpCode,
+					registrationSource: 'admin',
+				}),
+		});
+	} catch (limitError) {
+		if (sendUsageError(res, limitError)) {
+			await auditRefusal(currentTenantOrgId(), currentUser?.id, limitError);
+			return;
+		}
+		throw limitError;
+	}
 		await logAudit(currentUser.id, 'admin.user.create', String(user._id), { name, email: lcEmail, role, empCode: sanitizedEmpCode });
 		res.status(201).json({ id: user._id, name: user.name, email: user.email, role: user.role, empCode: user.empCode });
 	} catch (err) {
@@ -423,6 +459,7 @@ export const adminUpdateUser = async (req: Request, res: Response) => {
 		
 		const oldName = user.name;
 		const currentClass = (user as any).classLevel;
+		const currentRoleBeforeEdit = user.role;
 
 		if (name) user.name = name;
 		if (role) {
@@ -473,7 +510,28 @@ export const adminUpdateUser = async (req: Request, res: Response) => {
 			user.email = email.toLowerCase();
 		}
 
-		await user.save();
+		// A role change moves an approved account into another pool (a student
+		// becoming a teacher takes a teacher seat). Any other edit takes nothing.
+		const seatBefore = seatOf({ role: currentRoleBeforeEdit, status: user.status, accountType: (user as any).accountType });
+		const seatAfter = seatOf({ role: user.role, status: user.status, accountType: (user as any).accountType });
+		try {
+			if (seatAfter && seatAfter !== seatBefore) {
+				await withCapacity({
+					orgId: currentTenantOrgId(),
+					resource: seatAfter,
+					subjectId: String(user._id),
+					run: async () => user.save(),
+				});
+			} else {
+				await user.save();
+			}
+		} catch (limitError) {
+			if (sendUsageError(res, limitError)) {
+				await auditRefusal(currentTenantOrgId(), currentUser?.id, limitError);
+				return;
+			}
+			throw limitError;
+		}
 		await logAudit(currentUser.id, 'admin.user.update', String(user._id), { name, email, role, classLevel, batch, empCode: user.empCode });
 		
         // Sync name changes to offline results

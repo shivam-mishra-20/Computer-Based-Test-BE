@@ -93,6 +93,13 @@ export interface IExamEvaluation extends Document {
   // True when marks/answer key changed since the last publish and a republish
   // is pending (used to surface "changes not yet published" in the UI).
   pendingRepublish: boolean;
+  /**
+   * Students already told their result is out (services/resultNotifications).
+   * Claimed atomically before anyone is notified, so a retried, repeated or
+   * concurrent publish — or an unpublish followed by a republish — never sends
+   * the same student a second "result published" notification.
+   */
+  resultsNotifiedUserIds: string[];
   versions: IEvaluationVersion[];
   stats: IEvaluationStats;
   createdAt: Date;
@@ -164,6 +171,7 @@ const examEvaluationSchema = new Schema<IExamEvaluation>(
     publishedAt: { type: Date, default: null },
     publishedBy: { type: Schema.Types.ObjectId, ref: 'User', default: null },
     pendingRepublish: { type: Boolean, default: false },
+    resultsNotifiedUserIds: { type: [String], default: [] },
     versions: { type: [versionSchema], default: [] },
     stats: {
       totalAttempts: { type: Number, default: 0 },

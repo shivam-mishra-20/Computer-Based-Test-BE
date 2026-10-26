@@ -81,6 +81,7 @@ const EXAM_PATH_PREFIXES = ['/api/attempts', '/api/exams', '/api/tests', '/api/s
 const isExemptPath = (path: string): boolean =>
   path === '/health' ||
   path === '/api/health' ||
+  path === '/api/health/ready' ||
   EXAM_PATH_PREFIXES.some((p) => path.startsWith(p));
 
 /**
@@ -162,6 +163,24 @@ export const guardianVerifyLimiter = rateLimit({
   validate: false,
 });
 
+/**
+ * `POST /api/notifications/devices/release` — the one notification route that
+ * takes no session (a phone signed out offline releases its push registration
+ * with its installation id and exact token). It can only delete, and only a
+ * pair nobody else holds, but it is public: bounded per IP so it cannot be used
+ * to hammer the database. Sized for a school Wi-Fi where many phones sign out.
+ */
+export const deviceReleaseLimiter = rateLimit({
+  windowMs: envNumber('DEVICE_RELEASE_RATE_LIMIT_WINDOW_MS', 15 * 60 * 1000),
+  max: envNumber('DEVICE_RELEASE_RATE_LIMIT_MAX', 120),
+  message: { message: 'Too many requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: createRedisStore('rl:device-release:'),
+  passOnStoreError: true,
+  validate: false,
+});
+
 export const publicFormLimiter = rateLimit({
   windowMs: envNumber('PUBLIC_FORM_RATE_LIMIT_WINDOW_MS', 60 * 60 * 1000),
   max: envNumber('PUBLIC_FORM_RATE_LIMIT_MAX', 20),
@@ -173,6 +192,34 @@ export const publicFormLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   store: createRedisStore('rl:public-form:'),
+  passOnStoreError: true,
+  validate: false,
+});
+
+/**
+ * The admission application behind a family's personal link: loading the form,
+ * saving it and uploading documents. Sized for one family filling a long form
+ * with a dozen uploads; the 192-bit link token is the real control.
+ */
+export const admissionApplicationLimiter = rateLimit({
+  windowMs: envNumber('ADMISSION_APPLICATION_RATE_LIMIT_WINDOW_MS', 60 * 60 * 1000),
+  max: envNumber('ADMISSION_APPLICATION_RATE_LIMIT_MAX', 120),
+  message: { message: 'Too many requests from this device, please try again in a little while.', code: 'ADMISSION_RATE_LIMITED' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: createRedisStore('rl:admission-app:'),
+  passOnStoreError: true,
+  validate: false,
+});
+
+/** Registration-ID lookups (the fee page). Low, so IDs cannot be walked. */
+export const admissionLookupLimiter = rateLimit({
+  windowMs: envNumber('ADMISSION_LOOKUP_RATE_LIMIT_WINDOW_MS', 60 * 60 * 1000),
+  max: envNumber('ADMISSION_LOOKUP_RATE_LIMIT_MAX', 30),
+  message: { message: 'Too many lookups from this device, please try again later.', code: 'ADMISSION_RATE_LIMITED' },
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: createRedisStore('rl:admission-lookup:'),
   passOnStoreError: true,
   validate: false,
 });

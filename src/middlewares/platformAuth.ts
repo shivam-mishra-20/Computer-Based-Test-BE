@@ -14,6 +14,7 @@
 import { NextFunction, Request, Response } from 'express';
 import { verifyToken, TokenAudienceMismatch } from '../core/auth/tokens';
 import { platformCapabilities, satisfiesCapability } from '../models/PlatformUser';
+import { isEnrollmentPath, MFA_ENROLLMENT_REQUIRED, mfaRequiredFor } from '../core/auth/platformMfa';
 
 export interface PlatformRequestUser {
   id: string;
@@ -59,7 +60,7 @@ export async function platformAuthMiddleware(req: Request, res: Response, next: 
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const PlatformUser = require('../models/PlatformUser').default;
-    const staff = await PlatformUser.findById(claims.id).lean();
+    const staff = await PlatformUser.findById(claims.id).select('+mfa').lean();
 
     if (!staff || !staff.isActive) {
       return res.status(401).json({ message: 'Platform account not found or disabled.' });
@@ -71,6 +72,15 @@ export async function platformAuthMiddleware(req: Request, res: Response, next: 
       return res.status(401).json({
         message: 'Credentials have been revoked.',
         code: 'TOKEN_REVOKED',
+      });
+    }
+
+    // A role that must have two-factor sign-in, signed in without it (a session
+    // from before the requirement), may reach only enrollment.
+    if (mfaRequiredFor(staff.role) && !staff.mfa?.enabled && !isEnrollmentPath(req.originalUrl || req.url)) {
+      return res.status(MFA_ENROLLMENT_REQUIRED.status).json({
+        message: MFA_ENROLLMENT_REQUIRED.message,
+        code: MFA_ENROLLMENT_REQUIRED.code,
       });
     }
 

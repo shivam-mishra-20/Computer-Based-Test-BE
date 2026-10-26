@@ -126,10 +126,14 @@ async function readBatches(explicitOrgId?: string | null): Promise<ResolvedBatch
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const Batch = require('../../models/Batch').default;
 
-  const rows = await Batch.find(batchReadScope(explicitOrgId))
-    .select('name classLevels')
-    .sort({ name: 1 })
-    .lean();
+  const query = () =>
+    Batch.find(batchReadScope(explicitOrgId)).select('name classLevels').sort({ name: 1 }).lean();
+  // An explicit organization is its own scope — the filter names exactly one.
+  // The console asks with no tenant context at all (platform staff belong to
+  // no organization), which enforce would otherwise refuse outright. Every
+  // caller passes an orgId from the principal or the platform, never from the
+  // request. Without one, the live context decides, exactly as before.
+  const rows = explicitOrgId ? await withoutTenantScope('config:read-org-batches', query) : await query();
 
   return (rows as ResolvedBatch[]).map((b) => ({
     name: b.name,

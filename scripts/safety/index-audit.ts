@@ -47,7 +47,16 @@ registerTenancy();
 const NON_TENANT_MODELS = new Set([
   'Org',
   'Plan',
+  'PlanVersion',
   'Subscription',
+  'SubscriptionEvent',
+  'Payment',
+  'Invoice',
+  'InvoiceCounter',
+  'BillingProfile',
+  'SubscriptionRequest',
+  'ProviderEvent',
+  'UsageLock',
   'Entitlement',
   'UsageRecord',
   'PlatformUser',
@@ -74,6 +83,14 @@ const INTENTIONAL: Record<string, string> = {
   'User.empCode_1':
     'Employee codes are Abhigyan-specific and sparse. Flagged for review before ' +
     'a second organization uses them; see the readiness report.',
+  'PushDevice.token_1':
+    'A push token names one physical app installation, so it belongs to one account at a ' +
+    'time across ALL organizations — that is what stops a phone that switches account ' +
+    'receiving the previous person\'s notifications. Registration detaches it from any ' +
+    'other account first (withoutTenantScope "push:detach-device"), so enforce mode is safe.',
+  'PushDevice.installationId_1':
+    'Same reason as the token: one installation is one device, bound to one account at a ' +
+    'time; registration moves it across organizations explicitly ("push:detach-device").',
 };
 
 interface Row {

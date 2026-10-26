@@ -181,6 +181,26 @@ export async function saveDraft(
     Object.assign(found, clean);
   }
 
+  // The plan the institute would like. A preference, never a grant (see
+  // IApplicationCommercial) — but it must name a plan that is actually offered,
+  // so a reviewer is never shown a typo or a retired plan as the applicant's
+  // choice.
+  if (patch.commercial && typeof patch.commercial === 'object') {
+    const raw = (patch.commercial as { planPreference?: unknown }).planPreference;
+    if (raw === undefined || raw === null || raw === '') {
+      delete (patch.commercial as { planPreference?: unknown }).planPreference;
+    } else {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { listPublicPlans } = require('../subscriptions/catalogue');
+      const offered = (await listPublicPlans()) as { key: string }[];
+      const key = String(raw).trim().toLowerCase();
+      if (!offered.some((p) => p.key === key)) {
+        throw new RegistrationValidationError({ 'commercial.planPreference': 'Choose one of the plans offered.' });
+      }
+      (patch.commercial as { planPreference?: string }).planPreference = key;
+    }
+  }
+
   const current = (found.application ?? { version: 1 }) as IOrganizationApplication;
   const SECTIONS: (keyof IOrganizationApplication)[] = [
     'organization', 'branding', 'appExperience', 'academic', 'policy',

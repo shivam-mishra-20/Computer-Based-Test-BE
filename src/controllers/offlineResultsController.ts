@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import TestResult, { ITestResult, IStudentResult } from '../models/TestResult';
+import { entryForStudent } from '../services/writtenTests';
 import User from '../models/User';
 import { sendStudentNotifications } from '../services/notificationService';
 import { INSTITUTE_ACCOUNT_CLAUSE } from '../utils/instituteAudience';
@@ -476,8 +477,13 @@ export const getStudentResults = async (req: Request, res: Response) => {
 
     // Extract only this student's results from each test
     const studentResults = tests.map((test: any) => {
-      const studentResult = test.studentResults.find(
-        (r: IStudentResult) => r.studentId === studentId || r.studentName === user.name
+      const studentResult = entryForStudent(
+        test.studentResults as IStudentResult[],
+        {
+          id: studentId,
+          firebaseUid: (user as any).firebaseUid,
+          name: user.name,
+        },
       );
 
       return {

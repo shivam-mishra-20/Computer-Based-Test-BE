@@ -32,12 +32,14 @@ import AppBuildJob, {
   type IAppBuildJob,
 } from '../../models/AppBuildJob';
 import { withoutTenantScope } from '../tenancy/context';
+import { withCapacity } from '../subscriptions/usage';
 import { getMobileConfig } from './mobileBuild';
 import { nativeAssetState, syncAssetsReady } from './mobileAssets';
 import { isEasConfigured } from './easClient';
 import { profileNameFor } from './appBuildWorkspace';
 import { designBuildProblem, designForBuildView } from './appDesign';
 import { checkApiConnection, type ApiConnection } from './apiConnectionCheck';
+import { pushReadiness } from './pushConfig';
 import type { SelectableBuildProfile } from './mobileBuildRules';
 import {
   DEFAULT_BUILD_MS,
@@ -225,6 +227,38 @@ export async function buildReadiness(
     else if (connection?.detail) warnings.push(connection.detail);
   }
 
+  // Push notifications (core/platform/pushConfig): a broken or incomplete
+  // configuration is a problem the administrator can name the fix for; no
+  // configuration at all is a warning unless the host requires push.
+  const push = pushReadiness(String(id.androidPackage ?? ''));
+  if (push.message) (push.required ? problems : warnings).push(push.message);
+  if (push.state === 'ready') {
+    // The other half lives in EAS and cannot be read back non-interactively:
+    // report what delivery has actually seen.
+    const failing = await withoutTenantScope(
+      'app-build:push-credentials',
+      async () => {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const PushDevice = require('../../models/PushDevice').default;
+        return PushDevice.countDocuments({
+          orgId: {
+            $in: [
+              orgId,
+              ...(mongoose.isValidObjectId(orgId)
+                ? [new mongoose.Types.ObjectId(orgId)]
+                : []),
+            ],
+          },
+          lastError: 'InvalidCredentials',
+        });
+      },
+    ).catch(() => 0);
+    warnings.push(
+      failing > 0
+        ? `Push notifications: Expo rejected deliveries to ${failing} device(s) of this app for missing FCM credentials. Attach the platform FCM V1 key to this organization's EAS project (eas credentials -p android).`
+        : "Push notifications: this build includes Firebase. Delivery also needs the platform FCM V1 key attached to this organization's EAS project (one-time: eas credentials -p android).",
+    );
+  }
   return {
     ready: problems.length === 0,
     profile,
@@ -350,6 +384,25 @@ export async function startBuild(input: StartBuildInput): Promise<StartBuildResu
 
   if (existing && !input.force) return { build: existing, created: false };
 
+  // A new build counts against the plan's builds per month (live, completed,
+  // or reached EAS — core/subscriptions/usage). Returning the live build above
+  // consumed nothing; only the supersede-and-create below is counted, as one
+  // step, so two simultaneous requests cannot both take the last build.
+  return withCapacity({
+    orgId: input.orgId,
+    resource: 'appBuildsMonthly',
+    run: () => createBuild(input, existing, slug, appProfile, readiness, org),
+  });
+}
+
+async function createBuild(
+  input: StartBuildInput,
+  existing: IAppBuildJob | null,
+  slug: string,
+  appProfile: SelectableBuildProfile,
+  readiness: Awaited<ReturnType<typeof buildReadiness>>,
+  org: Awaited<ReturnType<typeof loadOrg>>,
+): Promise<StartBuildResult> {
   if (existing && input.force) {
     // An explicit rebuild. The old row leaves the live set so the index frees
     // up, and records what replaced it rather than vanishing from the history.

@@ -23,6 +23,7 @@ import {
 import { pptFeaturesEnabled, PPT_DISABLED_MESSAGE } from '../config/features';
 import { uploadArtifact, deleteArtifact, stageSourceFile } from '../services/aiContent/artifactStore';
 import { enqueuePptPipelineJob, cancelPptPipelineJob } from '../queues/pptPipelineQueue';
+import { attachUsageSubject, refundForSubject, releaseRequestUsage } from '../core/subscriptions/usage';
 import { pptxBuilder, buildSlidesPreviewHtml } from '../services/aiContent/ppt/pptxBuilder';
 import { resolveTheme } from '../services/aiContent/ppt/theme/themeRegistry';
 import { renderSlidesPdf } from '../services/aiContent/ppt/pdfExport';
@@ -212,6 +213,8 @@ async function enqueuePptGeneration(params: {
     createdBy: owner,
     pipeline: { currentStage: '', stages: [], warnings: [] },
   });
+  // The queued job decides whether this generation counted (refunded if it fails).
+  await attachUsageSubject(req, 'AiGeneration', doc._id);
 
   let stagedFileRef: { storagePath: string; mimeType: string; originalName: string } | undefined;
   if (file) {
@@ -262,6 +265,8 @@ async function enqueuePaperGeneration(params: {
     createdBy: owner,
     pipeline: { currentStage: '', stages: [], warnings: [] },
   });
+  await attachUsageSubject(req, 'AiGeneration', doc._id);
+
 
   let stagedFileRef: { storagePath: string; mimeType: string; originalName: string } | undefined;
   if (file) {
@@ -364,6 +369,8 @@ export const cancel = async (req: Request, res: Response) => {
     doc.status = 'failed';
     doc.error = 'Cancelled by user';
     await doc.save();
+    // Cancelled before it produced anything: not counted against the plan.
+    await refundForSubject('AiGeneration', doc._id, 'cancelled by user');
     return res.json({ success: true, generation: doc.toObject() });
   } catch (err: any) {
     console.error('[aiContent] cancel failed:', err);
@@ -639,6 +646,8 @@ export const regenerate = async (req: Request, res: Response) => {
     // the PDF, never re-spending minutes of LLM time on the same questions.
     const renderFailedPaper = prev.feature === 'question_paper' && prev.status === 'failed';
     if ((!hasInputs || renderFailedPaper) && prev.contentJSON) {
+      // Re-rendering stored content calls no model: not an AI generation.
+      releaseRequestUsage(req, 're-render only (no model call)');
       const newDoc = await AiGeneration.create({
         feature: prev.feature,
         source: prev.source,
@@ -724,6 +733,7 @@ export const regenerate = async (req: Request, res: Response) => {
           createdBy: owner2,
           pipeline: { currentStage: '', stages: [], warnings: [] },
         });
+        await attachUsageSubject(req, 'AiGeneration', newDoc._id);
         const jobId = await enqueuePptPipelineJob({
           generationId: newDoc._id.toString(),
           ownerId: owner2.toString(),

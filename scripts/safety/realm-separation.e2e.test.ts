@@ -235,7 +235,7 @@ async function main() {
       PLATFORM_MONGODB_URI_DIRECT: '',
       LEGACY_DB_NAMES: '',
       TENANT_MODE: 'claim',
-      TENANT_ENFORCEMENT: 'warn',
+      TENANT_ENFORCEMENT: process.env.E2E_TENANT_ENFORCEMENT || 'warn',
       ORG_ID: '',
       LEGACY_DATA_ORG_ID: '',
       ENABLE_CRON: 'false',
@@ -263,7 +263,7 @@ async function main() {
     t.check('/platform-api/* is up (the platform runtime, through the gateway)', ready, server.log().slice(-1500));
     t.check(
       'the boot log names both realms and their databases',
-      /existing system — serves \/api\/\* on database "abhigyangurukul_console_scratch_app"/.test(server.log()) &&
+      new RegExp(`existing system — serves /api/\\* on database "${EXISTING_DB}"`).test(server.log()) &&
         new RegExp(`platform runtime on 127\\.0\\.0\\.1:\\d+ \\(database "${PLATFORM_DB}"\\)`).test(server.log()),
       server.log().split('\n').filter((l) => /realm|platform/.test(l)).slice(0, 12).join('\n'),
     );
@@ -444,6 +444,7 @@ async function main() {
     const statuses: Record<string, number> = {};
     const orgAnswers: string[] = [];
     const unauthorized: string[] = [];
+    const serverErrors: string[] = [];
     let swept = 0;
     let skipped = 0;
     // Routes that reach an EXTERNAL live system (Firestore, the AI provider,
@@ -464,9 +465,11 @@ async function main() {
       statuses[res.status] = (statuses[res.status] || 0) + 1;
       if (ORG_SYSTEM_CODES.has(codeOf(res))) orgAnswers.push(`${m[1]} → ${res.status} ${codeOf(res)}`);
       if (res.status === 401) unauthorized.push(`${m[1]} → 401`);
+      if (res.status >= 500) serverErrors.push(`${m[1]} → ${res.status}${res.json?.requestId ? ` (request ${res.json.requestId})` : ''}`);
       if (m[1].startsWith('/api/org-admin') && res.status !== 404) orgAnswers.push(`${m[1]} → ${res.status} (expected 404)`);
     }
     console.log(`      swept ${swept} routes (${skipped} external-system routes not called); statuses ${JSON.stringify(statuses)}`);
+    for (const e of serverErrors) console.log(`      5xx: ${e}`);
     t.check('no route answers with an organization-system refusal', orgAnswers.length === 0, orgAnswers.slice(0, 12).join('\n      '));
     t.check('no route answers 401 to a valid session', unauthorized.length === 0, unauthorized.slice(0, 12).join('\n      '));
 

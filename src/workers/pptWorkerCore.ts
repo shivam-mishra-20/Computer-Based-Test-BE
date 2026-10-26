@@ -13,6 +13,7 @@
  * Running both at once is harmless (they share the queue; concurrency adds up).
  */
 import { Worker, type Job } from 'bullmq';
+import { refundForSubject } from '../core/subscriptions/usage';
 import { Emitter } from '@socket.io/redis-emitter';
 import { redisPublisher } from '../config/redis';
 import { bucket } from '../config/firebase';
@@ -263,6 +264,8 @@ async function processJobInContext(job: Job<PptPipelineJobData>): Promise<void> 
       doc.status = 'failed';
       doc.error = PPT_DISABLED_MESSAGE;
       await doc.save();
+      // Produced nothing: not counted against the plan (idempotent).
+      await refundForSubject('AiGeneration', generationId, 'feature disabled');
       emitProgress(ownerId, { generationId, status: 'failed', error: PPT_DISABLED_MESSAGE });
       deleteStagedFile(stagedFileRef);
       return;
@@ -397,6 +400,9 @@ async function processJobInContext(job: Job<PptPipelineJobData>): Promise<void> 
       doc.status = 'failed';
       doc.error = message;
       await doc.save();
+      // The final attempt failed: not counted against the plan (idempotent —
+      // the worker's failed handler below may report the same failure).
+      await refundForSubject('AiGeneration', generationId, 'generation failed');
       emitProgress(ownerId, { generationId, status: 'failed', error: message });
       deleteStagedFile(stagedFileRef);
     }
@@ -438,6 +444,9 @@ export function startPptPipelineWorker(): Worker<PptPipelineJobData> {
       { $set: { status: 'failed', error: err?.message || 'Generation failed' } },
     )
       .then((res) => {
+        // Refunded whether this handler or the processor marked it failed;
+        // a reservation is refunded at most once.
+        refundForSubject('AiGeneration', job.data.generationId, 'generation failed').catch(() => undefined);
         if (res.modifiedCount > 0) {
           emitProgress(job.data.ownerId, {
             generationId: job.data.generationId,

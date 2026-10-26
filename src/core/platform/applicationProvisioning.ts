@@ -325,6 +325,12 @@ export interface MappedOnboarding {
   adminPrefill: { name: string; email: string } | null;
   /** Module keys that were requested but are not in the registry. */
   droppedModules: string[];
+  /**
+   * The plan the applicant asked for, as a key — or null. NOT in `input`:
+   * whether it becomes the trial plan depends on the catalogue and on whether a
+   * subscription already exists, which approval decides (registrations.ts).
+   */
+  planPreference: string | null;
 }
 
 /**
@@ -464,5 +470,7 @@ export function applicationToOnboardingInput(
     ...(addOns.length ? { subscription: { addOns, status: 'trialing' } } : {}),
   };
 
-  return { input, adminPrefill, droppedModules };
+  const planPreference = text(app.commercial?.planPreference).toLowerCase() || null;
+
+  return { input, adminPrefill, droppedModules, planPreference };
 }

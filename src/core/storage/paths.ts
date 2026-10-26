@@ -50,6 +50,9 @@ export const STORAGE_MODULES = [
   // An organization's own brand images (logo, splash) uploaded by its
   // administrators. Public assets, under the organization's prefix.
   'branding',
+  // Documents a family uploads with an admission application (report card,
+  // photo, certificates). Private; staff read them through signed links.
+  'admissions',
 ] as const;
 
 export type StorageModule = (typeof STORAGE_MODULES)[number];

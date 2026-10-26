@@ -1,6 +1,7 @@
 import { requireStaffPermission } from '../../middlewares/requirePermission';
 import { Router } from 'express';
 import { authMiddleware} from '../../middlewares/authMiddleware';
+import { deviceReleaseLimiter } from '../../middlewares/rateLimiter';
 import {
   getUserNotifications,
   markNotificationAsRead,
@@ -11,6 +12,9 @@ import {
   createBulkNotifications,
   registerToken,
   unregisterToken,
+  registerDevice,
+  unregisterDevice,
+  releaseDevice,
   sendTestPush,
 } from '../../controllers/notificationController';
 
@@ -26,6 +30,11 @@ router.delete('/read/clear', authMiddleware, deleteAllReadNotifications);
 router.post('/register-token', authMiddleware, registerToken);
 router.delete('/unregister-token', authMiddleware, unregisterToken);
 
+// Organization apps: one registration per installation (PushDevice)
+router.post('/devices', authMiddleware, registerDevice);
+router.delete('/devices/:installationId', authMiddleware, unregisterDevice);
+// No session by design — see releaseDevice: removal only, proven by installation id + token.
+router.post('/devices/release', deviceReleaseLimiter, releaseDevice);
 // Debug: send a test push to the authenticated user
 router.post('/test-push', authMiddleware, sendTestPush);
 

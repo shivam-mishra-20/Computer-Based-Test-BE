@@ -13,6 +13,8 @@
 
 import { Router, Request, Response } from 'express';
 import { platformAuthMiddleware, requirePlatformCapability } from '../../middlewares/platformAuth';
+import { completePlatformSignIn } from '../../core/platform/platformSignIn';
+import { mfaRequiredFor, signMfaStepToken } from '../../core/auth/platformMfa';
 import { withoutTenantScope } from '../../core/tenancy';
 import { getEntitlement } from '../../core/entitlements/resolve';
 import { listPlatformAudit, recordPlatformAction } from '../../core/platform/audit';
@@ -101,6 +103,51 @@ import {
   OrgSlugTaken,
 } from '../../core/platform/organizations';
 import type { PlatformRequestUser } from '../../middlewares/platformAuth';
+import {
+  SubscriptionError,
+  assignPlan,
+  getSubscriptionDetail,
+  listSubscriptions,
+  movePlanSubscribers,
+  recordManualPayment,
+  recordPaymentFailure,
+  startManaging,
+  startOrExtendTrial,
+  transition as subscriptionTransition,
+  type Actor as SubscriptionActor,
+} from '../../core/subscriptions/service';
+import {
+  CatalogueError,
+  LIMIT_KEYS,
+  applyRecommendedCatalogue,
+  listPlanVersions,
+  recommendedCatalogueDiff,
+  seedDefaultCatalogue,
+  setPlanActive,
+} from '../../core/subscriptions/catalogue';
+import { SUBSCRIPTION_STATUSES } from '../../core/subscriptions/lifecycle';
+import { sendUsageError, usageSummary } from '../../core/subscriptions/usage';
+import {
+  BillingError,
+  createDraftInvoice,
+  deleteDraftInvoice,
+  getBillingProfile,
+  getInvoice,
+  getOrgBilling,
+  gstReadiness,
+  issueInvoice,
+  listInvoices,
+  settleInvoice,
+  updateBillingProfile,
+  updateDraftInvoice,
+  updateOrgBilling,
+  voidInvoice,
+} from '../../core/billing/invoices';
+import { listSubscriptionRequests, resolveSubscriptionRequest } from '../../core/billing/requests';
+import { acceptOrder, applyOrderPlan, declineOrder, listOrders } from '../../core/billing/selfServe';
+import { listProviders } from '../../core/billing/provider';
+import { sendInvoiceDocument } from '../../core/billing/document';
+import { GST_STATE_CODES } from '../../core/billing/gst';
 import PlatformUserModel, { PLATFORM_ROLES, platformCapabilities } from '../../models/PlatformUser';
 import UserModel from '../../models/User';
 import { issueInvite, issueResetLink } from '../../core/accounts/accountLinks';
@@ -108,7 +155,6 @@ import { runWithTenant } from '../../core/tenancy/context';
 import Org from '../../models/Org';
 import mongoose from 'mongoose';
 import {
-  signPlatformSession,
   signPlatformToken,
   verifyPlatformRefreshToken,
   verifyToken,
@@ -160,7 +206,7 @@ router.post('/login', authLimiter, async (req: Request, res: Response) => {
 
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const PlatformUser = require('../../models/PlatformUser').default;
-    const staff = await PlatformUser.findOne({ email });
+    const staff = await PlatformUser.findOne({ email }).select('+mfa');
 
     /**
      * ONE message for unknown-account, wrong-password and disabled-account.
@@ -181,47 +227,25 @@ router.post('/login', authLimiter, async (req: Request, res: Response) => {
       return res.status(401).json(DENIED);
     }
 
+    // Two-factor sign-in (core/auth/platformMfa): an enrolled account gets a
+    // short code-step token, never a session, until POST /login/mfa.
+    if (staff.mfa?.enabled) {
+      return res.json({
+        mfaRequired: true,
+        mfaToken: signMfaStepToken('platform-mfa', { id: String(staff._id), tokenVersion: Number(staff.tokenVersion ?? 0) || 0 }),
+      });
+    }
+    // A role that must have MFA and has none may only enroll.
+    if (mfaRequiredFor(staff.role)) {
+      return res.json({
+        mfaEnrollmentRequired: true,
+        enrollToken: signMfaStepToken('platform-mfa-enroll', { id: String(staff._id), tokenVersion: Number(staff.tokenVersion ?? 0) || 0 }),
+      });
+    }
+
     // A 15-minute platform token, as before, plus a refresh token that renews
     // it for at most TOKEN_TTL.platformSession — see POST /refresh below.
-    const session = signPlatformSession({
-      id: String(staff._id),
-      role: staff.role,
-      // Carried so a bump to `tokenVersion` revokes this token immediately,
-      // rather than at expiry. `platformAuthMiddleware` compares them.
-      tokenVersion: staff.tokenVersion,
-    });
-
-    staff.lastLoginAt = new Date();
-    await staff.save();
-
-    // The audit actor is normally read from `req.platformUser`, which the
-    // guard sets — and the guard did not run here. Setting it now is accurate:
-    // authentication has just succeeded, and this IS who acted.
-    (req as Request & { platformUser?: PlatformRequestUser }).platformUser = {
-      id: String(staff._id),
-      role: staff.role,
-      capabilities: platformCapabilities(staff.role),
-    };
-    await recordPlatformAction(req, {
-      action: 'platform.login',
-      entity: 'PlatformUser',
-      entityId: String(staff._id),
-    });
-
-    // No password, no hash, no tokenVersion. The console needs identity and
-    // capabilities; anything else here is a field someone later logs.
-    return res.json({
-      token: session.token,
-      refreshToken: session.refreshToken,
-      expiresIn: session.expiresIn,
-      user: {
-        id: String(staff._id),
-        name: staff.name,
-        email: staff.email,
-        role: staff.role,
-        capabilities: platformCapabilities(staff.role),
-      },
-    });
+    return completePlatformSignIn(req, res, staff, 'password');
   } catch (error) {
     console.error('[platform/login] failed:', (error as Error).message);
     return res.status(500).json({ message: 'Login failed.' });
@@ -352,6 +376,8 @@ router.post('/logout', authLimiter, async (req: Request, res: Response) => {
   }
 });
 
+// Two-factor sign-in routes (the code step, enrollment, resets) are their own
+// router, mounted ahead of this one in app.ts — routes/api/platformMfaRoutes.
 router.use(platformAuthMiddleware);
 
 /**
@@ -379,6 +405,12 @@ router.param('orgId', (req, res, next, orgId) => {
 });
 
 /** Wrap a handler so a thrown error becomes a clean 500 rather than a hang. */
+/** The staff member making this request, as the subscription history records them. */
+function staffActor(req: Request): SubscriptionActor {
+  const staff = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+  return { kind: 'platform', id: staff?.id, role: staff?.role };
+}
+
 function handle(fn: (req: Request, res: Response) => Promise<unknown>) {
   return async (req: Request, res: Response) => {
     try {
@@ -411,6 +443,21 @@ function handle(fn: (req: Request, res: Response) => Promise<unknown>) {
       if (error instanceof DesignRequestError) {
         return res.status(error.status).json({ message: error.message, code: error.code });
       }
+      // Lifecycle and catalogue refusals: each carries a stable code (see
+      // docs/subscriptions-plan.md) and, for a refused transition, from where.
+      if (error instanceof SubscriptionError) {
+        return res.status(error.status).json({ message: error.message, code: error.code, ...error.details });
+      }
+      if (error instanceof CatalogueError) {
+        return res.status(error.status).json({ message: error.message, code: error.code });
+      }
+      // A plan limit (a build beyond the month's allowance), or a usage check
+      // that could not get its lease in time.
+      if (sendUsageError(res, error)) return undefined;
+      // Invoices, billing details and subscription requests.
+      if (error instanceof BillingError) {
+        return res.status(error.status).json({ message: error.message, code: error.code, ...error.details });
+      }
       console.error(`[platform] ${req.method} ${req.path} failed:`, error);
       return res.status(500).json({ message: (error as Error).message || 'Platform request failed' });
     }
@@ -438,11 +485,33 @@ router.get(
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const Subscription = require('../../models/Subscription').default;
 
-      const [orgs, byStatus, users, subs] = await Promise.all([
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const Invoice = require('../../models/Invoice').default;
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const SubscriptionRequest = require('../../models/SubscriptionRequest').default;
+      const soon = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+      const now = new Date();
+
+      const [orgs, byStatus, users, subs, overdueInvoices, openInvoices, openRequests, endingSoon, openOrders] = await Promise.all([
         Org.countDocuments({}),
         Org.aggregate([{ $group: { _id: '$status', n: { $sum: 1 } } }]),
         User.countDocuments({}),
         Subscription.aggregate([{ $group: { _id: '$status', n: { $sum: 1 } } }]),
+        Invoice.countDocuments({ status: 'issued', dueAt: { $lt: now } }),
+        Invoice.countDocuments({ status: 'issued' }),
+        SubscriptionRequest.countDocuments({ status: 'open' }),
+        // Trials ending, renewals due and grace periods closing in the next week.
+        Subscription.countDocuments({
+          isPlatformOwned: { $ne: true },
+          managedSince: { $exists: true },
+          $or: [
+            { status: 'trialing', trialEndsAt: { $lte: soon } },
+            { status: 'active', periodEnd: { $lte: soon } },
+            { status: 'past_due', graceEndsAt: { $lte: soon } },
+          ],
+        }),
+        // Institutes' own orders still waiting for the platform (draft or unpaid).
+        Invoice.countDocuments({ origin: 'self-serve', status: { $in: ['draft', 'issued'] } }),
       ]);
 
       return {
@@ -455,6 +524,7 @@ router.get(
           (subs as { _id: string; n: number }[]).map((r) => [r._id ?? 'unknown', r.n]),
         ),
         modules: listModules().length,
+        billing: { overdueInvoices, openInvoices, openRequests, dueWithinWeek: endingSoon, openOrders },
       };
     });
 
@@ -507,7 +577,7 @@ router.post(
     if (!req.body?.organization?.name || !req.body?.organization?.slug) {
       return res.status(400).json({ message: 'organization.name and organization.slug are required' });
     }
-    const result = await onboardOrganization(req.body);
+    const result = await onboardOrganization(req.body, { actor: staffActor(req) });
     await recordPlatformAction(req, {
       action: 'org.onboard',
       orgId: result.orgId,
@@ -759,7 +829,7 @@ router.put(
   // are paying for.
   requirePlatformCapability('subscription.manage'),
   handle(async (req, res) => {
-    const entitlement = await setSubscription(req.params.orgId, req.body ?? {});
+    const entitlement = await setSubscription(req.params.orgId, req.body ?? {}, staffActor(req));
     await recordPlatformAction(req, {
       action: 'org.subscription.update',
       orgId: req.params.orgId,
@@ -768,6 +838,192 @@ router.put(
       metadata: { modules: entitlement.modules.length, version: entitlement.version },
     });
     return res.json({ entitlement });
+  }),
+);
+
+// ── Subscription lifecycle ─────────────────────────────────────────────────
+// Every change below goes through core/subscriptions: validated against the
+// lifecycle table, conditional on the revision it read, written to the
+// subscription's own history AND to the platform audit. Reasons are required
+// for staff decisions. Nothing here is reachable with a tenant token.
+
+router.get(
+  '/orgs/:orgId/subscription',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const [detail, entitlement] = await Promise.all([
+      getSubscriptionDetail(req.params.orgId),
+      getEntitlement(req.params.orgId),
+    ]);
+    const usage = await usageSummary(req.params.orgId, entitlement);
+    return res.json({ ...detail, entitlement, usage });
+  }),
+);
+
+/**
+ * Bring a subscription from before the lifecycle under it, as it stands: its
+ * status and limits are enforced from now on. Body: { reason }. The response's
+ * entitlement and usage say what the organization can now do.
+ */
+router.post(
+  '/orgs/:orgId/subscription/manage',
+  requirePlatformCapability('subscription.manage'),
+  handle(async (req, res) => {
+    const result = await startManaging(req.params.orgId, { actor: staffActor(req), reason: req.body?.reason });
+    await recordPlatformAction(req, {
+      action: 'org.subscription.manage',
+      orgId: req.params.orgId,
+      entity: 'Subscription',
+      changes: req.body,
+      metadata: { changed: result.changed, writable: result.entitlement?.writable, status: result.subscription?.status },
+    });
+    return res.json({ ...result, usage: await usageSummary(req.params.orgId, result.entitlement) });
+  }),
+);
+
+/** Start a trial, or extend the running one. Body: { days?, reason, planKey?, billingInterval? } */
+router.post(
+  '/orgs/:orgId/subscription/trial',
+  requirePlatformCapability('subscription.manage'),
+  handle(async (req, res) => {
+    const body = req.body ?? {};
+    const result = await startOrExtendTrial(req.params.orgId, {
+      actor: staffActor(req),
+      reason: body.reason,
+      days: body.days === undefined ? undefined : Number(body.days),
+      planKey: body.planKey,
+      planVersion: body.planVersion === undefined ? undefined : Number(body.planVersion),
+      billingInterval: body.billingInterval,
+    });
+    await recordPlatformAction(req, {
+      action: 'org.subscription.trial',
+      orgId: req.params.orgId,
+      entity: 'Subscription',
+      changes: body,
+      metadata: { status: result.subscription?.status, trialEndsAt: result.subscription?.trialEndsAt },
+    });
+    return res.json(result);
+  }),
+);
+
+/** Put the subscription on a plan (and version). Body: { planKey, planVersion?, billingInterval?, reason? } */
+router.post(
+  '/orgs/:orgId/subscription/plan',
+  requirePlatformCapability('subscription.manage'),
+  handle(async (req, res) => {
+    const body = req.body ?? {};
+    if (!body.planKey) return res.status(400).json({ message: 'planKey is required', code: 'SUBSCRIPTION_INVALID' });
+    const result = await assignPlan(req.params.orgId, {
+      planKey: String(body.planKey),
+      planVersion: body.planVersion === undefined ? undefined : Number(body.planVersion),
+      billingInterval: body.billingInterval,
+      actor: staffActor(req),
+      reason: body.reason,
+    });
+    await recordPlatformAction(req, {
+      action: 'org.subscription.plan',
+      orgId: req.params.orgId,
+      entity: 'Subscription',
+      changes: body,
+      metadata: { planKey: result.subscription?.planKey, planVersion: result.subscription?.planVersion, changed: result.changed },
+    });
+    return res.json(result);
+  }),
+);
+
+const STAFF_TRANSITIONS = ['activate', 'suspend', 'reactivate', 'cancel', 'expire'] as const;
+
+/** A staff decision. Body: { event: activate|suspend|reactivate|cancel|expire, reason, periodEnd?, planKey? } */
+router.post(
+  '/orgs/:orgId/subscription/transition',
+  requirePlatformCapability('subscription.manage'),
+  handle(async (req, res) => {
+    const body = req.body ?? {};
+    if (!(STAFF_TRANSITIONS as readonly string[]).includes(body.event)) {
+      return res.status(400).json({
+        message: `event must be one of: ${STAFF_TRANSITIONS.join(', ')}. Trials use /trial; payments use /payments.`,
+        code: 'SUBSCRIPTION_INVALID',
+      });
+    }
+    const result = await subscriptionTransition(req.params.orgId, body.event, {
+      actor: staffActor(req),
+      reason: body.reason,
+      periodEnd: body.periodEnd,
+      billingInterval: body.billingInterval,
+      planKey: body.planKey,
+    });
+    await recordPlatformAction(req, {
+      action: `org.subscription.${body.event}`,
+      orgId: req.params.orgId,
+      entity: 'Subscription',
+      changes: body,
+      metadata: { status: result.subscription?.status },
+    });
+    return res.json(result);
+  }),
+);
+
+/**
+ * Record a payment staff have confirmed (bank transfer, UPI, cheque…) and apply
+ * it. Idempotent on the reference. There is no "the client says it was paid"
+ * path: a payment exists here only when a platform staff member records it.
+ */
+router.post(
+  '/orgs/:orgId/payments',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const result = await recordManualPayment(req.params.orgId, req.body ?? {}, staffActor(req));
+    await recordPlatformAction(req, {
+      action: result.duplicate ? 'org.payment.record.duplicate' : 'org.payment.record',
+      orgId: req.params.orgId,
+      entity: 'Payment',
+      entityId: String(result.payment?._id ?? ''),
+      metadata: {
+        reference: result.payment?.reference,
+        amountMinor: result.payment?.amountMinor,
+        applied: result.applied,
+        periodEnd: result.payment?.periodEnd,
+      },
+    });
+    return res.status(result.duplicate ? 200 : 201).json(result);
+  }),
+);
+
+/** Record a failed payment. An active subscription enters its grace period. */
+router.post(
+  '/orgs/:orgId/payments/failed',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const result = await recordPaymentFailure(req.params.orgId, req.body ?? {}, staffActor(req));
+    await recordPlatformAction(req, {
+      action: 'org.payment.failed',
+      orgId: req.params.orgId,
+      entity: 'Payment',
+      entityId: String(result.payment?._id ?? ''),
+      metadata: { reference: result.payment?.reference, lifecycle: result.lifecycle, duplicate: result.duplicate },
+    });
+    return res.status(result.duplicate ? 200 : 201).json(result);
+  }),
+);
+
+/** Subscriptions by status, or with a trial end / renewal / grace end within N days. */
+router.get(
+  '/subscriptions',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+    if (status && !(SUBSCRIPTION_STATUSES as string[]).includes(status)) {
+      return res.status(400).json({ message: 'Unknown status', code: 'SUBSCRIPTION_INVALID' });
+    }
+    const due = req.query.dueWithinDays === undefined ? undefined : Number(req.query.dueWithinDays);
+    const items = await listSubscriptions({
+      status,
+      dueWithinDays: due !== undefined && Number.isFinite(due) ? due : undefined,
+      limit: Number(req.query.limit) || undefined,
+      withUsage: req.query.withUsage === 'true',
+      overLimit: req.query.overLimit === 'true',
+    });
+    return res.json({ items });
   }),
 );
 
@@ -782,25 +1038,340 @@ router.get(
 router.get(
   '/plans',
   requirePlatformCapability('org.read'),
-  handle(async (_req, res) => res.json({ plans: await listPlans() })),
+  handle(async (_req, res) => res.json({ plans: await listPlans(), limitKeys: LIMIT_KEYS })),
 );
 
+router.get(
+  '/plans/:key/versions',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => res.json({ versions: await listPlanVersions(req.params.key) })),
+);
+
+/**
+ * Create or edit a plan. Changing its terms (modules, limits, price, custom
+ * pricing, trial length) writes a new version; organizations already on the
+ * plan keep the version they were sold until they are moved explicitly.
+ */
 router.put(
   '/plans',
   requirePlatformCapability('plan.manage'),
   handle(async (req, res) => {
-    const { key, name, modules } = req.body ?? {};
-    if (!key || !name || !Array.isArray(modules)) {
-      return res.status(400).json({ message: 'key, name and modules[] are required' });
+    const { key, name } = req.body ?? {};
+    if (!key || !name) {
+      return res.status(400).json({ message: 'key and name are required', code: 'PLAN_INVALID' });
     }
-    const plan = await upsertPlan(req.body);
+    const staff = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+    const result = await upsertPlan(req.body, { id: staff?.id });
     await recordPlatformAction(req, {
-      action: 'plan.upsert',
+      action: result.newVersion ? 'plan.version' : 'plan.update',
       entity: 'Plan',
-      entityId: String((plan as { _id?: unknown })?._id ?? key),
+      entityId: String(result.plan?._id ?? key),
       changes: req.body,
+      metadata: { version: result.version, newVersion: result.newVersion },
+    });
+    return res.json(result);
+  }),
+);
+
+/** Put a plan on sale, or take it off. Existing subscribers are unaffected either way. */
+router.post(
+  '/plans/:key/active',
+  requirePlatformCapability('plan.manage'),
+  handle(async (req, res) => {
+    const active = req.body?.active;
+    if (typeof active !== 'boolean') return res.status(400).json({ message: 'active must be true or false', code: 'PLAN_INVALID' });
+    const plan = await setPlanActive(req.params.key, active);
+    await recordPlatformAction(req, {
+      action: active ? 'plan.activate' : 'plan.deactivate',
+      entity: 'Plan',
+      entityId: String((plan as { _id?: unknown })._id),
+      metadata: { key: req.params.key },
     });
     return res.json({ plan });
+  }),
+);
+
+/** Create the default plans that do not exist yet. Never overwrites a plan. */
+router.post(
+  '/plans/seed-defaults',
+  requirePlatformCapability('plan.manage'),
+  handle(async (req, res) => {
+    const staff = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+    const result = await seedDefaultCatalogue({ id: staff?.id });
+    await recordPlatformAction(req, { action: 'plan.seed-defaults', entity: 'Plan', metadata: result });
+    return res.json(result);
+  }),
+);
+
+/** The recommended catalogue next to each plan's current terms, with subscribers per version. */
+router.get(
+  '/plans/recommended',
+  requirePlatformCapability('org.read'),
+  handle(async (_req, res) => res.json({ plans: await recommendedCatalogueDiff(), limitKeys: LIMIT_KEYS })),
+);
+
+/** Adopt the recommended terms: new versions where they differ; subscribers stay where they are until moved. */
+router.post(
+  '/plans/apply-recommended',
+  requirePlatformCapability('plan.manage'),
+  handle(async (req, res) => {
+    const staff = (req as Request & { platformUser?: PlatformRequestUser }).platformUser;
+    const results = await applyRecommendedCatalogue({ id: staff?.id });
+    await recordPlatformAction(req, { action: 'plan.apply-recommended', entity: 'Plan', metadata: { results } });
+    return res.json({ results });
+  }),
+);
+
+/** Move a plan's subscribers on older versions to its current one. Body: { reason, includeUnmanaged? } */
+router.post(
+  '/plans/:key/move-subscribers',
+  requirePlatformCapability('subscription.manage'),
+  handle(async (req, res) => {
+    const result = await movePlanSubscribers(req.params.key, {
+      actor: staffActor(req),
+      reason: req.body?.reason,
+      includeUnmanaged: req.body?.includeUnmanaged === true,
+    });
+    await recordPlatformAction(req, {
+      action: 'plan.move-subscribers',
+      entity: 'Plan',
+      metadata: { key: result.planKey, version: result.version, moved: result.moved.length, skipped: result.skipped.length, reason: req.body?.reason },
+    });
+    return res.json(result);
+  }),
+);
+
+// ── Billing: the seller profile, invoices, requests ────────────────────────
+// Invoices are admin-managed: staff draft, issue and void them, and record the
+// payment that settles one (core/billing/invoices). Nothing here is reachable
+// with a tenant token, and no route accepts "it was paid" from a client.
+
+router.get(
+  '/billing/profile',
+  requirePlatformCapability('org.read'),
+  handle(async (_req, res) => {
+    const profile = await getBillingProfile();
+    return res.json({ profile, gst: gstReadiness(profile), stateCodes: GST_STATE_CODES, providers: listProviders() });
+  }),
+);
+
+router.put(
+  '/billing/profile',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const profile = await updateBillingProfile(req.body ?? {}, staffActor(req));
+    await recordPlatformAction(req, { action: 'billing.profile.update', entity: 'BillingProfile', changes: req.body });
+    return res.json({ profile, gst: gstReadiness(profile) });
+  }),
+);
+
+router.get(
+  '/orgs/:orgId/billing-details',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => res.json({ billing: await getOrgBilling(req.params.orgId) })),
+);
+
+router.put(
+  '/orgs/:orgId/billing-details',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const billing = await updateOrgBilling(req.params.orgId, req.body ?? {});
+    await recordPlatformAction(req, { action: 'org.billing.update', orgId: req.params.orgId, entity: 'Org', changes: req.body });
+    return res.json({ billing });
+  }),
+);
+
+router.get(
+  '/orgs/:orgId/invoices',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => res.json({ invoices: await listInvoices({ orgId: req.params.orgId }) })),
+);
+
+/** Draft an invoice. Body: { fromSubscription: true } or { lines: [{description, quantity?, unitPrice}], periodStart?, periodEnd?, notes? } */
+router.post(
+  '/orgs/:orgId/invoices',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const invoice = await createDraftInvoice(req.params.orgId, req.body ?? {}, staffActor(req));
+    await recordPlatformAction(req, { action: 'invoice.draft', orgId: req.params.orgId, entity: 'Invoice', entityId: invoice.id, metadata: { totalMinor: invoice.totalMinor } });
+    return res.status(201).json({ invoice });
+  }),
+);
+
+/** Invoices across organizations: ?status=draft|issued|paid|void, ?overdue=true */
+router.get(
+  '/invoices',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+    if (status && !['draft', 'issued', 'paid', 'void'].includes(status)) {
+      return res.status(400).json({ message: 'Unknown status', code: 'BILLING_INVALID' });
+    }
+    return res.json({ invoices: await listInvoices({ status, overdue: req.query.overdue === 'true', limit: Number(req.query.limit) || undefined }) });
+  }),
+);
+
+router.get(
+  '/invoices/:id',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => res.json({ invoice: await getInvoice(req.params.id) })),
+);
+
+router.patch(
+  '/invoices/:id',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const invoice = await updateDraftInvoice(req.params.id, req.body ?? {});
+    await recordPlatformAction(req, { action: 'invoice.update', orgId: String(invoice.orgId), entity: 'Invoice', entityId: invoice.id, changes: req.body });
+    return res.json({ invoice });
+  }),
+);
+
+router.delete(
+  '/invoices/:id',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    await deleteDraftInvoice(req.params.id);
+    await recordPlatformAction(req, { action: 'invoice.delete', entity: 'Invoice', entityId: req.params.id });
+    return res.json({ deleted: true });
+  }),
+);
+
+router.post(
+  '/invoices/:id/issue',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const invoice = await issueInvoice(req.params.id, staffActor(req));
+    await recordPlatformAction(req, {
+      action: 'invoice.issue',
+      orgId: String(invoice.orgId),
+      entity: 'Invoice',
+      entityId: invoice.id,
+      metadata: { number: invoice.number, totalMinor: invoice.totalMinor, taxInvoice: invoice.taxInvoice },
+    });
+    return res.json({ invoice });
+  }),
+);
+
+router.post(
+  '/invoices/:id/void',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const invoice = await voidInvoice(req.params.id, req.body?.reason, staffActor(req));
+    await recordPlatformAction(req, { action: 'invoice.void', orgId: String(invoice.orgId), entity: 'Invoice', entityId: invoice.id, metadata: { number: invoice.number, reason: invoice.voidReason } });
+    return res.json({ invoice });
+  }),
+);
+
+/** Settle an issued invoice with the payment staff have confirmed. Body: { amount, method, reference, receivedAt?, notes? } */
+router.post(
+  '/invoices/:id/payments',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const result = await settleInvoice(req.params.id, req.body ?? {}, staffActor(req));
+    await recordPlatformAction(req, {
+      action: result.duplicate ? 'invoice.payment.duplicate' : 'invoice.payment',
+      orgId: String(result.invoice.orgId),
+      entity: 'Invoice',
+      entityId: result.invoice.id,
+      metadata: { number: result.invoice.number, reference: result.payment?.reference, lifecycle: (result as { lifecycle?: unknown }).lifecycle },
+    });
+    return res.status(result.duplicate ? 200 : 201).json(result);
+  }),
+);
+
+/** The invoice as a printable page (default) or a PDF (?format=pdf). */
+router.get(
+  '/invoices/:id/document',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => sendInvoiceDocument(res, await getInvoice(req.params.id), String(req.query.format ?? 'html'))),
+);
+
+// ── Institute orders (self-serve) ──────────────────────────────────────────
+// An institute's own order from its admin panel is an invoice (origin
+// 'self-serve'). Staff accept it by recording the payment — which applies the
+// ordered plan — or put the institute on the plan before payment, or decline
+// it with a reason the institute is shown. core/billing/selfServe.
+
+/** ?status=open (default) | all, ?orgId= */
+router.get(
+  '/orders',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const status = req.query.status === 'all' ? 'all' : 'open';
+    const orgId = typeof req.query.orgId === 'string' ? req.query.orgId : undefined;
+    return res.json({ orders: await listOrders({ status, orgId, limit: Number(req.query.limit) || undefined }) });
+  }),
+);
+
+/** The money arrived. Body: { method, reference, receivedAt?, notes?, amount? (defaults to the balance) } */
+router.post(
+  '/orders/:id/accept',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const result = await acceptOrder(req.params.id, req.body ?? {}, staffActor(req));
+    await recordPlatformAction(req, {
+      action: result.duplicate ? 'order.accept.duplicate' : 'order.accept',
+      orgId: String(result.invoice.orgId),
+      entity: 'Invoice',
+      entityId: result.invoice.id,
+      metadata: {
+        number: result.invoice.number,
+        planKey: result.invoice.planKey,
+        reference: result.payment?.reference,
+        issuedNow: result.issuedNow,
+        lifecycle: (result as { lifecycle?: unknown }).lifecycle,
+      },
+    });
+    return res.status(result.duplicate ? 200 : 201).json(result);
+  }),
+);
+
+/** Put the institute on the ordered plan before payment; the invoice stays open. Body: { reason? } */
+router.post(
+  '/orders/:id/apply-plan',
+  requirePlatformCapability('subscription.manage'),
+  handle(async (req, res) => {
+    const result = await applyOrderPlan(req.params.id, req.body ?? {}, staffActor(req));
+    await recordPlatformAction(req, {
+      action: 'order.apply-plan',
+      orgId: result.subscription ? String(result.subscription.orgId) : undefined,
+      entity: 'Invoice',
+      entityId: req.params.id,
+      metadata: { planKey: result.subscription?.planKey, reason: req.body?.reason },
+    });
+    return res.json(result);
+  }),
+);
+
+/** Body: { reason } — shown to the institute. */
+router.post(
+  '/orders/:id/decline',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const result = await declineOrder(req.params.id, req.body ?? {}, staffActor(req));
+    await recordPlatformAction(req, { action: 'order.decline', orgId: result.orgId, entity: 'Invoice', entityId: req.params.id, metadata: { reason: req.body?.reason } });
+    return res.json(result);
+  }),
+);
+
+router.get(
+  '/subscription-requests',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+    return res.json({ requests: await listSubscriptionRequests({ status }) });
+  }),
+);
+
+/** Close a request once it has been acted on (through the subscription endpoints) or declined. Body: { status: resolved|declined, note } */
+router.post(
+  '/subscription-requests/:id/resolve',
+  requirePlatformCapability('subscription.manage'),
+  handle(async (req, res) => {
+    const request = await resolveSubscriptionRequest(req.params.id, req.body ?? {}, staffActor(req));
+    await recordPlatformAction(req, { action: `subscription.request.${request.status}`, orgId: String(request.orgId), entity: 'SubscriptionRequest', entityId: req.params.id, metadata: { kind: request.kind, note: request.resolution } });
+    return res.json({ request });
   }),
 );
 
@@ -813,7 +1384,10 @@ router.get(
     const staff = await withoutTenantScope('platform:list-staff', async () => {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const PlatformUser = require('../../models/PlatformUser').default;
-      return PlatformUser.find({}).select('name email role isActive lastLoginAt createdAt').lean();
+      const rows = await PlatformUser.find({}).select('name email role isActive lastLoginAt createdAt +mfa').lean();
+      // Whether two-factor sign-in is on — never the record (sealed secret,
+      // recovery-code hashes).
+      return rows.map(({ mfa, ...row }: { mfa?: { enabled?: boolean } }) => ({ ...row, mfaEnabled: Boolean(mfa?.enabled) }));
     });
     return res.json({ staff });
   }),
@@ -1584,6 +2158,7 @@ router.post(
         steps: result.onboarding.steps,
         createdOrganization: result.created,
         droppedModules: result.droppedModules,
+        plan: result.plan,
       },
     });
 
@@ -1592,6 +2167,7 @@ router.post(
       onboarding: result.onboarding,
       created: result.created,
       droppedModules: result.droppedModules,
+      plan: result.plan,
     });
   }),
 );

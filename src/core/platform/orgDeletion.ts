@@ -72,8 +72,14 @@ import { deleteEasProject, isEasConfigured } from './easClient';
 
 /** An organization must be taken out of service before it can be deleted. */
 export const DELETABLE_STATUSES = ['suspended', 'cancelled', 'terminated'];
-/** The platform's record of what happened. Never deleted from. */
-const RETAINED = new Set(['platformaudits']);
+/**
+ * The platform's record of what happened, and of money billed and received.
+ * Never deleted from. Payments, invoices and payment-provider events are
+ * financial evidence: deleting an organization removes its data, not the record
+ * of what it was billed and paid (the retention period is a policy decision
+ * recorded in docs/subscriptions-plan.md).
+ */
+const RETAINED = new Set(['platformaudits', 'payments', 'invoices', 'providerevents']);
 /** The organization registry. Its one document is the LAST thing removed. */
 const REGISTRY = 'orgs';
 /** Documents per delete. Small enough to keep each round trip short. */
@@ -91,6 +97,8 @@ const FRIENDLY: Record<string, string> = {
   appbuildjobs: 'App build records',
   entitlements: 'Entitlements',
   subscriptions: 'Subscriptions',
+  subscriptionevents: 'Subscription history',
+  subscriptionrequests: 'Plan change requests',
   usagerecords: 'Usage records',
   roles: 'Roles',
   auditlogs: 'Organization audit log',

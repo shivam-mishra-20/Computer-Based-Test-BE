@@ -10,11 +10,12 @@
  * sequential duplicates; build the index with the index CLI before launch.
  *
  * ── Lifecycle ───────────────────────────────────────────────────────────────
- * new → contacted → qualified → agts_completed → counselling → follow_up →
- * enrolled, plus lost and nurture. The ONLY automatic move is to
- * `agts_completed`, and only from a status before it in the pipeline — a
- * completed test is a fact, not a decision. Counselling, enrolment and loss
- * are always a person's call.
+ * new → contacted → qualified → agts_completed → counselling → applied →
+ * offered / waitlisted → enrolled, plus follow_up, lost and nurture. The
+ * automatic moves are facts, never decisions: to `agts_completed` when a test
+ * is graded, and to `applied` when an application is submitted
+ * (services/admissions) — each only from a status before it. Counselling,
+ * offers, enrolment and loss are always a person's call.
  */
 
 import { Types } from 'mongoose';
@@ -55,9 +56,14 @@ const PRE_AGTS_STATUSES: LeadStatus[] = ['new', 'contacted', 'qualified'];
 /**
  * Create or update the lead for a registration. Contact details and consent
  * are refreshed on every registration (the latest is the most accurate);
- * status, notes and history are never touched here.
+ * status, notes and history are never touched here. `created` is true only
+ * for a family we had never heard from — the case staff are alerted about.
  */
-export async function upsertLeadFromRegistration(input: RegistrationInput, now = new Date()): Promise<ILead> {
+export async function upsertLeadFromRegistration(
+  input: RegistrationInput,
+  now = new Date(),
+  session?: string,
+): Promise<{ lead: ILead; created: boolean }> {
   const touch = input.attribution ? { ...input.attribution, capturedAt: now } : null;
   const set: Record<string, unknown> = {
     phone: input.phone,
@@ -78,6 +84,8 @@ export async function upsertLeadFromRegistration(input: RegistrationInput, now =
     statusHistory: [{ to: 'new', at: now, automatic: true, note: 'Registered for AGTS' }],
   };
   if (touch) setOnInsert['attribution.first'] = touch;
+  // A family new this season belongs to the session admissions are open for.
+  if (session) setOnInsert['admission.session'] = session;
 
   const update = {
     $set: set,
@@ -85,18 +93,32 @@ export async function upsertLeadFromRegistration(input: RegistrationInput, now =
     $addToSet: { channels: 'agts', studentNames: input.studentName },
   };
 
-  const run = () =>
-    Lead.findOneAndUpdate({ phoneNormalized: input.phoneNormalized }, update, {
+  return upsertLeadByPhone(input.phoneNormalized, update);
+}
+
+/**
+ * The one upsert every channel uses: keyed on the normalized phone number,
+ * retried once as an update when it loses the insert race to the unique index.
+ */
+export async function upsertLeadByPhone(
+  phoneNormalized: string,
+  update: Record<string, unknown>,
+): Promise<{ lead: ILead; created: boolean }> {
+  const run = async () => {
+    const res: any = await Lead.findOneAndUpdate({ phoneNormalized }, update, {
       upsert: true,
       new: true,
       setDefaultsOnInsert: true,
       runValidators: true,
+      includeResultMetadata: true,
     });
+    return { lead: res.value as ILead, created: !res.lastErrorObject?.updatedExisting };
+  };
 
   try {
-    return (await run()) as ILead;
+    return await run();
   } catch (err: any) {
-    if (err?.code === 11000) return (await run()) as ILead; // lost the insert race — now an update
+    if (err?.code === 11000) return run(); // lost the insert race — now an update
     throw err;
   }
 }
@@ -169,12 +191,28 @@ export async function recordGuidanceRequest(
 // ── Admin reads ─────────────────────────────────────────────────────────────
 
 const LIST_PROJECTION =
-  'phone email student studentNames guardian status consent.contact consent.grantedAt agts followUpAt lastContactedAt lastContactChannel guidance.requested guidance.requestedAt guidance.preferredTime attribution.first.source attribution.first.medium attribution.first.campaign createdAt updatedAt';
+  'phone email student studentNames guardian status channels consent.contact consent.grantedAt agts followUpAt lastContactedAt lastContactChannel guidance.requested guidance.requestedAt guidance.preferredTime attribution.first.source attribution.first.medium attribution.first.campaign admission owner enquiry.count enquiry.lastAt enquiry.source application.submittedAt application.registrationId application.tokenIssuedAt offer.classLevel offer.stream offer.holdUntil enrolment.paidAt createdAt updatedAt';
+
+/**
+ * The filter every count shares: organization and channel. No channel means
+ * AGTS leads only, which is what the /api/agts desk has always listed.
+ */
+function scopeFilter(query: Pick<LeadListQuery, 'channel' | 'session'>): Record<string, unknown> {
+  const filter: Record<string, unknown> = { ...requireTenantScope('agts:leads') };
+  const channel = query.channel ?? 'agts';
+  if (channel !== 'all') filter.channels = channel;
+  if (query.session) filter['admission.session'] = query.session;
+  return filter;
+}
 
 function listFilter(query: LeadListQuery, now = new Date()): Record<string, unknown> {
-  const filter: Record<string, unknown> = { ...requireTenantScope('agts:leads'), channels: 'agts' };
+  const filter: Record<string, unknown> = scopeFilter(query);
   if (query.status) filter.status = query.status;
   if (query.classLevel) filter['student.classLevel'] = query.classLevel;
+  if (query.admissionClass) filter['admission.classLevel'] = query.admissionClass;
+  if (query.stream) filter['admission.stream'] = query.stream;
+  if (query.owner === 'none') filter['owner.id'] = null;
+  else if (query.owner && Types.ObjectId.isValid(query.owner)) filter['owner.id'] = new Types.ObjectId(query.owner);
   if (query.guidance) filter['guidance.requested'] = true;
   if (query.from || query.to) {
     const range: Record<string, Date> = {};
@@ -225,9 +263,9 @@ export async function listLeads(query: LeadListQuery, now = new Date()) {
   const [items, total, counts, due, guidance] = await Promise.all([
     Lead.find(sortFilter).select(LIST_PROJECTION).sort(SORTS[query.sort]).skip(skip).limit(query.limit).lean(),
     Lead.countDocuments(sortFilter),
-    Lead.aggregate([{ $match: { ...requireTenantScope('agts:leads'), channels: 'agts' } }, { $group: { _id: '$status', n: { $sum: 1 } } }]),
-    Lead.countDocuments(listFilter({ page: 1, limit: 1, sort: 'recent', followUp: 'due' }, now)),
-    Lead.countDocuments(listFilter({ page: 1, limit: 1, sort: 'recent', guidance: true }, now)),
+    Lead.aggregate([{ $match: scopeFilter(query) }, { $group: { _id: '$status', n: { $sum: 1 } } }]),
+    Lead.countDocuments(listFilter({ channel: query.channel, session: query.session, page: 1, limit: 1, sort: 'recent', followUp: 'due' }, now)),
+    Lead.countDocuments(listFilter({ channel: query.channel, session: query.session, page: 1, limit: 1, sort: 'recent', guidance: true }, now)),
   ]);
 
   const byStatus: Record<string, number> = {};
@@ -247,7 +285,20 @@ export async function listLeads(query: LeadListQuery, now = new Date()) {
   };
 }
 
-async function findScopedLead(leadId: string) {
+/**
+ * A lead as staff see it. The application link's token hash stays on the
+ * server: it is a credential's fingerprint, and no screen needs it.
+ */
+export function staffLeadView(lead: ILead | Record<string, any>): Record<string, any> {
+  const plain: Record<string, any> = typeof (lead as ILead).toObject === 'function' ? (lead as ILead).toObject() : { ...lead };
+  if (plain.application) {
+    const { tokenHash, ...application } = plain.application;
+    plain.application = { ...application, linkActive: Boolean(tokenHash) && new Date(application.tokenExpiresAt || 0).getTime() > Date.now() };
+  }
+  return plain;
+}
+
+export async function findScopedLead(leadId: string) {
   if (!Types.ObjectId.isValid(leadId)) throw new LeadNotFound();
   const lead = await Lead.findOne({ _id: new Types.ObjectId(leadId), ...requireTenantScope('agts:lead') });
   if (!lead) throw new LeadNotFound();
@@ -265,7 +316,7 @@ export async function getLead(leadId: string) {
     .limit(50)
     .lean();
   return {
-    lead: lead.toObject(),
+    lead: staffLeadView(lead),
     attempts: attempts.map(({ questions, ...attempt }: any) => ({
       ...attempt,
       displayName: attemptDisplayName({ ...attempt, questions }),
@@ -301,7 +352,7 @@ export async function updateLeadStatus(leadId: string, status: LeadStatus, note:
   if (note) lead.notes.push({ text: `Status → ${status}: ${note}`, at: now, by: actorId(actor), byName: actorName(actor) });
   await lead.save();
   await logAudit(actor.id, 'agts.lead.status', String(lead._id), { from, to: status });
-  return lead.toObject();
+  return staffLeadView(lead);
 }
 
 export async function addLeadNote(leadId: string, text: string, actor: Actor) {
@@ -310,7 +361,7 @@ export async function addLeadNote(leadId: string, text: string, actor: Actor) {
   if (lead.notes.length > 500) lead.notes.splice(0, lead.notes.length - 500);
   await lead.save();
   await logAudit(actor.id, 'agts.lead.note', String(lead._id));
-  return lead.toObject();
+  return staffLeadView(lead);
 }
 
 export async function setLeadFollowUp(leadId: string, followUpAt: Date | null, note: string, actor: Actor) {
@@ -325,7 +376,7 @@ export async function setLeadFollowUp(leadId: string, followUpAt: Date | null, n
   });
   await lead.save();
   await logAudit(actor.id, 'agts.lead.follow-up', String(lead._id), { followUpAt: followUpAt ? followUpAt.toISOString() : null });
-  return lead.toObject();
+  return staffLeadView(lead);
 }
 
 /** An admin opened a call or WhatsApp to the family. Status is NOT changed automatically. */

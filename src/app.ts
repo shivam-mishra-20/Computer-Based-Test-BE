@@ -58,6 +58,7 @@ import eodRoutes from './routes/api/eodRoutes';
 import playlistRoutes from './routes/api/playlistRoutes';
 import scholarshipRoutes from './routes/api/scholarshipRoutes';
 import agtsRoutes from './routes/api/agtsRoutes';
+import admissionRoutes from './routes/api/admissionRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import { globalLimiter } from './middlewares/rateLimiter';
 import { tenantContextMiddleware } from './middlewares/tenantContext';
@@ -66,9 +67,16 @@ import subjectRoutes from './routes/api/subjectRoutes';
 import { requireModule } from './middlewares/requireModule';
 import orgPublicRoutes from './routes/api/orgPublicRoutes';
 import platformRoutes from './routes/api/platformRoutes';
+import platformMfaRoutes from './routes/api/platformMfaRoutes';
 import { requirePlatformDeployment } from './middlewares/requirePlatformDeployment';
 import { serviceRealm } from './core/realm/realm';
 import { createPlatformGateway, platformRuntimeEntry } from './core/realm/platformGateway';
+import { platformRuntimeTarget } from './core/realm/platformRuntime';
+import { readinessOf } from './core/health/readiness';
+import { requestId } from './middlewares/requestId';
+import { corsPolicyFromEnv, corsVerdict } from './core/http/corsPolicy';
+import { resolveOrgFromRequest } from './core/tenancy/hostResolution';
+import mongoose from 'mongoose';
 import path from 'path';
 // Use require to avoid transient module resolution issues in some TS setups
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -99,6 +107,10 @@ app.set('trust proxy', 1);
  * Nothing of the platform's request pipeline runs for /api/*, and nothing of
  * the existing system's (CORS, limits, parsing) runs twice for /platform-api/*.
  */
+// First of all, so the gateway forwards the same id and every log line —
+// in either process — can carry it (middlewares/requestId).
+app.use(requestId);
+
 if (serviceRealm() === 'platform') {
   app.use(platformRuntimeEntry);
 } else {
@@ -108,80 +120,38 @@ if (serviceRealm() === 'platform') {
   app.use('/platform-api', createPlatformGateway({ cors: (req, res, next) => cors(corsOptions)(req, res, next) }));
 }
 
-// CORS configuration - allow credentials and Authorization header
-// When credentials is true, origin cannot be '*', so we use a function to dynamically allow origins
-const allowedOrigins = process.env.CORS_ORIGIN
-	? process.env.CORS_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean)
-	: [
-		'http://localhost:3000',
-		'http://localhost:3001',
-		'http://127.0.0.1:3000',
-		'http://localhost:5173',
-		'https://computer-based-test.vercel.app',
-		'https://examease-pi.vercel.app',
-		'https://computer-based-test-be-production.up.railway.app',
-		// Abhigyan Gurukul website
-		'https://abhigyangurukul.com',
-		'https://www.abhigyangurukul.com',
-		'http://abhigyangurukul.com',
-		'http://www.abhigyangurukul.com',
-	];
-
-const allowedOriginSet = new Set(allowedOrigins.map((o) => o.toLowerCase()));
-const allowedHostSet = new Set(
-	allowedOrigins
-		.map((originValue) => {
-			try {
-				return new URL(originValue).hostname.toLowerCase();
-			} catch {
-				return null;
-			}
-		})
-		.filter((hostname): hostname is string => Boolean(hostname))
-);
-
-const parseOriginHostname = (origin: string): string | null => {
-	try {
-		return new URL(origin).hostname.toLowerCase();
-	} catch {
-		return null;
-	}
-};
+// CORS — explicitly configured origins only (core/http/corsPolicy). An org's
+// own domain is checked against the database on the platform realm, where the
+// organizations live; the existing realm has none to check.
+const corsPolicy = corsPolicyFromEnv();
+const legacyOriginsLogged = new Set<string>();
 
 const corsOptions: cors.CorsOptions = {
 	origin: (origin, callback) => {
-		// Allow requests with no origin (Postman/curl/native) and null-origin webviews.
+		// Requests with no Origin (curl, native apps) and null-origin webviews carry
+		// no browser credentials for another site to borrow.
 		if (!origin || origin === 'null') return callback(null, true);
 
-		// Allow all origins if CORS_ORIGIN is explicitly set to '*'
-		if (process.env.CORS_ORIGIN === '*') return callback(null, true);
-
-		const originLower = origin.toLowerCase();
-		if (allowedOriginSet.has(originLower)) {
+		const verdict = corsVerdict(origin, corsPolicy);
+		if (verdict === 'allow') return callback(null, true);
+		if (verdict === 'allow-legacy') {
+			if (!legacyOriginsLogged.has(origin)) {
+				legacyOriginsLogged.add(origin);
+				console.warn(`[CORS] allowed ONLY by CORS_LEGACY_WILDCARDS: ${origin} — add it to CORS_ORIGIN before removing the switch`);
+			}
 			return callback(null, true);
 		}
-
-		const hostname = parseOriginHostname(originLower);
-		if (!hostname) {
-			console.warn('[CORS] Rejected malformed origin:', origin);
-			return callback(new Error('Not allowed by CORS'));
+		if (verdict === 'check-org-domain' && serviceRealm() === 'platform') {
+			const host = new URL(origin).hostname;
+			resolveOrgFromRequest({ host })
+				.then((orgId) => {
+					if (orgId) return callback(null, true);
+					console.warn('[CORS] Rejected origin:', origin);
+					return callback(new Error('Not allowed by CORS'));
+				})
+				.catch(() => callback(new Error('Not allowed by CORS')));
+			return;
 		}
-
-		// Allow listed hostnames irrespective of protocol.
-		if (allowedHostSet.has(hostname)) {
-			return callback(null, true);
-		}
-
-		// For development, allow localhost/127.0.0.1 with any port and protocol.
-		if (hostname === 'localhost' || hostname === '127.0.0.1') {
-			return callback(null, true);
-		}
-
-		// Allow Railway/Vercel preview deployments.
-		if (hostname.endsWith('.railway.app') || hostname.endsWith('.up.railway.app') || hostname.endsWith('.vercel.app')) {
-			return callback(null, true);
-		}
-
 		console.warn('[CORS] Rejected origin:', origin);
 		return callback(new Error('Not allowed by CORS'));
 	},
@@ -209,7 +179,7 @@ const corsOptions: cors.CorsOptions = {
 		'X-Org-Id',
 		'X-App-Id',
 	],
-	exposedHeaders: ['Content-Range', 'X-Content-Range'],
+	exposedHeaders: ['Content-Range', 'X-Content-Range', 'X-Request-Id'],
 	methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
 	optionsSuccessStatus: 200,
 };
@@ -295,6 +265,17 @@ app.get('/api/health', (_req, res) => {
 	});
 });
 
+// Readiness for a load balancer: 503 while the database is not connected or the
+// platform runtime is not listening (core/health/readiness). States only.
+app.get('/api/health/ready', (_req, res) => {
+	const target = platformRuntimeTarget();
+	const verdict = readinessOf({
+		mongoReadyState: mongoose.connection.readyState,
+		platform: { configured: target.configured, listening: target.port !== null, restarts: target.restarts },
+	});
+	res.status(verdict.ready ? 200 : 503).json({ status: verdict.ready ? 'ready' : 'not-ready', ...verdict.checks });
+});
+
 // Chrome DevTools sometimes probes this path; return 200 to avoid 404 noise
 app.get('/.well-known/appspecific/com.chrome.devtools.json', (_req, res) => {
 	res.json({});
@@ -356,7 +337,9 @@ const MODULE_GATED_ROUTES: [string, string][] = [
   ['/api/analytics', 'analytics'],
   ['/api/admin-analytics', 'analytics'],
   ['/api/reports', 'analytics'],
-  ['/api/ai', 'ai'],
+  // /api/ai is gated PER ROUTE in aiRoutes.ts: it serves AI generation (`ai`)
+  // and the class question bank (`questionBank`), and one key for both refused
+  // organizations their own question bank for not having bought AI.
   ['/api/courses', 'courses'],
   ['/api/lectures', 'courses'],
   ['/api/playlist', 'courses'],
@@ -393,6 +376,9 @@ for (const [mountPath, moduleKey] of MODULE_GATED_ROUTES) {
  * see the middleware for why the refusal is an indistinguishable 404 rather
  * than a 403.
  */
+// BEFORE platformRoutes: its router-wide console guard would otherwise refuse
+// the two-factor code step, which by definition has no session yet.
+app.use('/api/platform', requirePlatformDeployment, platformMfaRoutes);
 app.use('/api/platform', requirePlatformDeployment, platformRoutes);
 app.use('/api/me', meContextRoutes);
 app.use('/api/org', orgPublicRoutes);
@@ -475,6 +461,8 @@ app.use('/api/playlist', playlistRoutes);
 
 // AGTS — Abhigyan Gurukul Test Series (public test flow + staff lead desk)
 app.use('/api/agts', agtsRoutes);
+// Admissions — website enquiries, the application link, offers, enrolment, seats
+app.use('/api/admissions', admissionRoutes);
 // Pre-AGTS scholarship routes: kept for links and admin tooling already in use
 app.use('/api/scholarship', scholarshipRoutes);
 

@@ -284,6 +284,18 @@ export interface IOrgAppDesign {
   };
 }
 
+export interface IOrgBilling {
+  legalName?: string;
+  gstin?: string;
+  address?: string;
+  city?: string;
+  pincode?: string;
+  /** GST state code (place of supply), e.g. "27" for Maharashtra. */
+  stateCode?: string;
+  email?: string;
+  phone?: string;
+}
+
 export interface IOrgLocale {
   timezone?: string;
   currency?: string;
@@ -312,6 +324,22 @@ export interface IOrg extends Document {
    * else — only the commercial layer needs to know the difference.
    */
   isPlatformOwned?: boolean;
+  /**
+   * Set when the platform creates the organization (createOrganization). It
+   * decides what "no subscription" means: for a marked organization, core
+   * modules only — no paid entitlement until a subscription grants one. An
+   * organization created before subscriptions existed has no marker and keeps
+   * today's behaviour until the platform decides how to bring it onto a plan.
+   * Never defaulted in the schema: a default would mark every existing record.
+   */
+  subscriptionRequired?: boolean;
+  /**
+   * The organization as the BUYER on its invoices: legal name, GSTIN, billing
+   * address and GST state code. Entered by the organization's admins (it is
+   * their own data) or by platform staff; copied onto an invoice when it is
+   * issued. The GSTIN's format is checked, never its registration.
+   */
+  billing?: IOrgBilling;
   notes?: string;
   createdAt: Date;
   updatedAt: Date;
@@ -478,6 +506,21 @@ const orgSchema = new Schema<IOrg>(
     },
     domains: [{ type: String, lowercase: true, trim: true }],
     isPlatformOwned: { type: Boolean, default: false },
+    subscriptionRequired: { type: Boolean },
+    billing: {
+      type: {
+        legalName: String,
+        gstin: String,
+        address: String,
+        city: String,
+        pincode: String,
+        stateCode: String,
+        email: String,
+        phone: String,
+      },
+      required: false,
+      _id: false,
+    },
     notes: { type: String },
   },
   {

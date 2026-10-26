@@ -1,5 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { MulterError } from 'multer';
+import { requestIdOf } from './requestId';
+import { serviceRealm } from '../core/realm/realm';
 
 const isHttpErrorStatus = (value: unknown): value is number => {
   return typeof value === 'number' && value >= 400 && value < 600;
@@ -30,8 +32,25 @@ export const errorHandler = (err: any, req: Request, res: Response, _next: NextF
     return res.status(status).json({ message: err?.message || 'Request failed' });
   }
 
+  const id = requestIdOf(req);
+  // One JSON line per server error, for log search and alerting: which
+  // request, where, and what — never the body, query string or headers.
+  console.error(
+    JSON.stringify({
+      level: 'error',
+      at: new Date().toISOString(),
+      requestId: id,
+      realm: serviceRealm(),
+      method: req.method,
+      path: req.path,
+      status: 500,
+      error: err?.name || 'Error',
+      message: String(err?.message || '').slice(0, 300),
+    }),
+  );
   console.error(`[${req.method} ${req.originalUrl}]`, err);
   return res.status(500).json({
     message: process.env.NODE_ENV === 'production' ? 'Server Error' : err?.message || 'Server Error',
+    ...(id ? { requestId: id } : {}),
   });
 };

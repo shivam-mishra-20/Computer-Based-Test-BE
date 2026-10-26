@@ -12,6 +12,10 @@ export interface INotification extends Document {
   data?: any;
   read: boolean;
   actionUrl?: string;
+  /** When this notification was handed to push delivery (services/pushDelivery) — set once, so it is pushed once. */
+  pushedAt?: Date | null;
+  /** Which delivery call claimed it. */
+  pushClaim?: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -30,6 +34,8 @@ const notificationSchema = new Schema<INotification>({
   data: { type: Schema.Types.Mixed },
   read: { type: Boolean, default: false, index: true },
   actionUrl: { type: String },
+  pushedAt: { type: Date, default: null },
+  pushClaim: { type: String, default: null },
 }, { timestamps: true });
 
 // Index for efficient queries

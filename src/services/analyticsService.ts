@@ -226,6 +226,63 @@ export async function getStudentAnalytics(
     }
   }
 
+  // --- 3. Written tests (TestResult) — the marks teachers actually enter ---
+  // The legacy sheet model above (OfflineResult) is not where the offline-tests
+  // module writes, so written-test marks never reached this average — a
+  // parent's included. Same pooling rule as everything above (Σ obtained ÷
+  // Σ max); an absence carries no mark and is left out, as on the leaderboard.
+  // Which tests and which entry are the student's is decided by the same
+  // helpers the student's own results use (services/writtenTests).
+  if (mode === 'offline' || mode === 'combined') {
+    const User = (await import('../models/User')).default;
+    const student = await User.findById(userId)
+      .select('name classLevel batch firebaseUid')
+      .lean();
+    if (student) {
+      const { buildStudentTestMatch, countableWrittenMarks } = await import(
+        './writtenTests'
+      );
+      const TestResult = (await import('../models/TestResult')).default;
+      const tests = await TestResult.find({
+        $or: buildStudentTestMatch({
+          id: String(student._id),
+          classLevel: (student as any).classLevel,
+          batch: (student as any).batch,
+        }),
+      })
+        .select('testName subject testDate maxMarks studentResults')
+        .lean();
+      const marks = countableWrittenMarks(tests as any[], {
+        id: String(student._id),
+        firebaseUid: (student as any).firebaseUid,
+        name: (student as any).name,
+      });
+      totalExams += marks.length;
+      for (const m of marks) {
+        totalScoreSum += m.marks;
+        totalMaxScoreSum += m.outOf;
+        recentGraph.push({
+          label: m.subject || 'Written test',
+          percent: Math.round((m.marks / m.outOf) * 100),
+          date: Number.isNaN(Date.parse(m.testDate))
+            ? new Date().toISOString()
+            : new Date(m.testDate).toISOString(),
+          type: 'offline',
+        });
+        if (mode === 'offline') {
+          const subject = m.subject || 'General';
+          if (!subjectStats[subject])
+            subjectStats[subject] = {
+              correct: 0,
+              total: 0,
+              attemptIds: new Set(),
+            };
+          subjectStats[subject].correct += m.marks;
+          subjectStats[subject].total += m.outOf;
+        }
+      }
+    }
+  }
   // --- Final Formatting ---
 
   // Sort combined graph by date (newest first)

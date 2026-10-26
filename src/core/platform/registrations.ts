@@ -383,6 +383,8 @@ export interface ApprovalResult {
    * them anyway, and reporting them is how a typo gets noticed.
    */
   droppedModules: string[];
+  /** What happened to the plan the applicant chose. */
+  plan: PlanOutcome;
 }
 
 /**
@@ -474,6 +476,10 @@ export async function approveRegistration(
     }
   }
 
+  // ── The plan: staff decide; the applicant's preference is the default ────
+  const plan = await planForApproval(registration, mapped.planPreference, input.subscription, base.subscription);
+  const subscription = input.subscription ?? plan.subscription ?? base.subscription;
+
   const onboarding = await onboardOrganization({
     organization: base.organization,
     branding: { ...(base.branding ?? {}), ...(input.branding ?? {}) },
@@ -485,12 +491,12 @@ export async function approveRegistration(
     locale: { ...(base.locale ?? {}), ...(input.locale ?? {}) },
     configuration: (input.configuration ?? base.configuration) as never,
     policy: { ...(base.policy ?? {}), ...(input.policy ?? {}) },
-    subscription: input.subscription ?? base.subscription,
+    subscription,
     customRoles: input.customRoles,
     // The applicant's administrator signs in with the password they chose
     // (above); without one, the account is created with an invitation link.
     admin,
-  });
+  }, { actor: { kind: 'platform', id: staff.id } });
 
   // The account exists with that password now; nothing needs the hash again.
   const adminCreated = onboarding.steps.some((s) => s.step === 'admin-user' && s.ok);
@@ -518,7 +524,76 @@ export async function approveRegistration(
     onboarding,
     created: !alreadyProvisioned,
     droppedModules: mapped.droppedModules,
+    plan: plan.outcome,
   };
+}
+
+/**
+ * What the applicant's plan preference means at approval.
+ *
+ *   staff named a subscription   staff win; the preference is only reported
+ *   a subscription exists        nothing — a retry must never move an
+ *                                organization back to the plan it asked for
+ *                                after staff changed it
+ *   self-serve plan on sale      a dated trial on that plan (with the modules
+ *                                the application asked for as add-ons)
+ *   custom pricing (Enterprise), not self-serve, or no longer on sale
+ *                                no trial is started on it: terms are agreed
+ *                                first, and staff set them in the console
+ *
+ * The trial itself is idempotent: onboarding checks for an existing
+ * subscription and the orgId index is unique.
+ */
+async function planForApproval(
+  registration: IOrganizationRegistration,
+  preference: string | null,
+  staffSubscription: ApprovalInput['subscription'],
+  baseSubscription: ApprovalInput['subscription'],
+): Promise<{ subscription?: ApprovalInput['subscription']; outcome: PlanOutcome }> {
+  if (!preference) return { outcome: { preference: null, applied: false, note: 'No plan was chosen on the application.' } };
+  if (staffSubscription) {
+    return { outcome: { preference, applied: false, note: 'The reviewer chose the subscription at approval.' } };
+  }
+  if (registration.orgId) {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const Subscription = require('../../models/Subscription').default;
+    const exists = await withoutTenantScope('registration:approve-sub-exists', async () =>
+      Subscription.exists({ orgId: registration.orgId }),
+    );
+    if (exists) return { outcome: { preference, applied: false, note: 'The organization already has a subscription.' } };
+  }
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { listPublicPlans } = require('../subscriptions/catalogue');
+  const offered = ((await listPublicPlans()) as { key: string; name: string; selfServe: boolean; customPricing: boolean }[])
+    .find((p) => p.key === preference);
+  if (!offered) {
+    return { outcome: { preference, applied: false, note: `"${preference}" is no longer offered; assign a plan in the console.` } };
+  }
+  if (offered.customPricing || !offered.selfServe) {
+    return {
+      outcome: {
+        preference,
+        applied: false,
+        note: `${offered.name} is agreed with the platform team, so no trial was started on it. Set its terms in the console.`,
+      },
+    };
+  }
+  // The modules the application asked for (known ones, mapped) stay add-ons.
+  const addOns = baseSubscription?.addOns ?? [];
+  return {
+    subscription: { planKey: offered.key, status: 'trialing', ...(addOns.length ? { addOns } : {}) },
+    outcome: {
+      preference,
+      applied: true,
+      note: `${offered.name} trial started${addOns.length ? ', with the modules the application asked for as add-ons' : ''}.`,
+    },
+  };
+}
+
+export interface PlanOutcome {
+  preference: string | null;
+  applied: boolean;
+  note: string;
 }
 
 /**

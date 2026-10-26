@@ -489,7 +489,10 @@ async function main() {
       // each authorised by a credential of its own that names one account.
       // 32 since 2026-09-28: the nine AGTS routes (the renamed scholarship
       // flow) — test metadata, registration, and per-attempt-key routes.
-      PUBLIC_ROUTE_ALLOWLIST.length === 32,
+      // 39 since 2026-10-25: the seven admissions routes — seats, the website
+      // enquiry, the application behind a family's personal link (four), and
+      // the registration-ID lookup for the fee page.
+      PUBLIC_ROUTE_ALLOWLIST.length === 39,
       `got ${PUBLIC_ROUTE_ALLOWLIST.length} — if intentional, update the test`,
     );
     check(

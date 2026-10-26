@@ -34,6 +34,18 @@ export interface IEntitlement extends Document {
   resolvedAt: Date;
   /** Why this resolution happened — invaluable when an entitlement surprises someone. */
   reason?: string;
+  /**
+   * When the subscription next changes by itself (trial end, period end, grace
+   * end). A read past this moment re-resolves, so a trial ends on time even
+   * where the daily sweep is not running.
+   */
+  nextTransitionAt?: Date | null;
+  /**
+   * Whether `limits` are enforced. True only for a subscription the lifecycle
+   * manages (Subscription.managedSince); a subscription from before the
+   * lifecycle shows its limits without being held to them.
+   */
+  limitsEnforced?: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -48,6 +60,8 @@ const entitlementSchema = new Schema<IEntitlement>(
     version: { type: Number, default: 1 },
     resolvedAt: { type: Date, default: Date.now },
     reason: { type: String },
+    nextTransitionAt: { type: Date, default: null },
+    limitsEnforced: { type: Boolean, default: false },
   },
   { timestamps: true, tenantScoped: false } as never,
 );

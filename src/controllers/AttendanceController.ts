@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import QueueService from '../services/QueueService';
 import Attendance from '../models/Attendance';
 import absentService from '../services/absentCalculationService';
+import { studentStarts, workingDatesFor } from '../services/attendanceStart';
 import {
   classifyDay,
   getEffectiveRule,
@@ -641,7 +642,7 @@ export class AttendanceController {
         userQuery.$or = [{ name: regex }, { empCode: regex }];
       }
       const users = await User.find(userQuery)
-        .select('name email empCode role classLevel batch')
+        .select('name email empCode role classLevel batch createdAt')
         .sort({ name: 1 })
         .lean();
 
@@ -755,20 +756,32 @@ export class AttendanceController {
       let totalAbsent = 0;
       let totalLate = 0;
 
+      // A student's working days start when they joined (services/attendanceStart);
+      // staff rows are unchanged.
+      const exportStarts = await studentStarts(users as any[]);
       const exportUsers = users.map((u: any) => {
         const records = (rowsByUser.get(String(u._id)) || []).sort(
           (a: any, b: any) => new Date(b.date).getTime() - new Date(a.date).getTime()
+        );
+        const userWorkingDates = workingDatesFor(
+          workingDates,
+          u.role,
+          exportStarts.get(String(u._id)) ?? null,
         );
 
         const presentDates = new Set(
           records.filter((row: any) => row.countsPresent).map((row: any) => row.date)
         );
-        const absentDates = workingDates.filter((d) => !presentDates.has(d));
+        const absentDates = userWorkingDates.filter(
+          (d) => !presentDates.has(d),
+        );
         const lateCount = records.filter(
           (row: any) => row.state === 'LATE' || Number(row.lateMinutes || 0) > 0
         ).length;
         // Present working days = working days with a qualifying attendance record.
-        const presentWorkingDays = workingDates.filter((d) => presentDates.has(d)).length;
+        const presentWorkingDays = userWorkingDates.filter((d) =>
+          presentDates.has(d),
+        ).length;
         // Extra days = qualifying attendance that landed on a non-working day (Sunday/holiday).
         const extraDays = records.filter(
           (row: any) => row.countsPresent && !workingDateSet.has(row.date)
@@ -790,10 +803,10 @@ export class AttendanceController {
             present: presentWorkingDays,
             absent: absentDates.length,
             late: lateCount,
-            expected: workingDates.length,
+            expected: userWorkingDates.length,
             holidays: 0,
             extraDays,
-            total: workingDates.length,
+            total: userWorkingDates.length,
           },
           absentDates,
           records: records.map(({ countsPresent, ...rest }: any) => {
@@ -888,7 +901,7 @@ export class AttendanceController {
         userQuery.$or = [{ name: regex }, { empCode: regex }];
       }
       const users = await User.find(userQuery)
-        .select('name email empCode role classLevel batch')
+        .select('name email empCode role classLevel batch createdAt')
         .sort({ name: 1 })
         .lean();
 
@@ -990,15 +1003,23 @@ export class AttendanceController {
       let gFullDays = 0, gPartialDays = 0, gHalfDays = 0, gAbsentDays = 0, gLateDays = 0;
       let gDeductionUnits = 0;
 
+      // Students' working days start when they joined (services/attendanceStart).
+      // Staff — whose units feed pay — are deliberately unchanged.
+      const summaryStarts = await studentStarts(filteredUsers as any[]);
       const summaryUsers = filteredUsers.map((u: any) => {
         const uid = String(u._id);
         const rule = ruleMap.get(uid)!;
         const userAtt = attByUser.get(uid) || new Map();
+        const userWorkingDates = workingDatesFor(
+          workingDates,
+          u.role,
+          summaryStarts.get(uid) ?? null,
+        );
 
         let fullDays = 0, partialFullDays = 0, halfDays = 0, absentDays = 0, lateDays = 0;
         let totalDeductionUnits = 0;
 
-        workingDates.forEach((dateStr) => {
+        userWorkingDates.forEach((dateStr) => {
           const record = userAtt.get(dateStr);
           const cls = classifyDay(
             record?.inTime ?? null,
@@ -1045,7 +1066,7 @@ export class AttendanceController {
           requiredWorkingHours: rule.userType === 'half_time' ? rule.halfTimeRequiredHours : rule.fullDayMinHours,
           officialInTime: rule.officialInTime,
           stats: {
-            workingDays: workingDates.length,
+            workingDays: userWorkingDates.length,
             fullDays,
             partialFullDays,
             halfDays,

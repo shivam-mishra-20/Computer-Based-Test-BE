@@ -9,6 +9,7 @@ import { getDeadline, getStartWindowState, getSubmitUnlockAt, isPastDeadline } f
 import { gradeSubjectiveAnswerGroq } from './aiService';
 import { tenantScope } from '../core/tenancy';
 import { findExamQuestions } from '../utils/questionSource';
+import { subjectLabel, subjectsForExams } from './examSubjects';
 import {
   FILL_TYPES,
   INTEGER_TYPES,
@@ -91,9 +92,15 @@ export async function listAssignedExams(userId: string) {
     attemptByExam.set(a.examId.toString(), a);
   }
 
+  // The exam's subject(s), from its questions (services/examSubjects) — the
+  // section titles clients used to read are "Section 1" on real papers.
+  const subjects = await subjectsForExams(exams as any[]).catch(
+    () => new Map<string, string | null>(),
+  );
   return exams.map((e: any) => {
     const a = attemptByExam.get(e._id.toString());
-    if (!a) return { ...e, attempt: null };
+    const subject = subjects.get(e._id.toString()) ?? null;
+    if (!a) return { ...e, subject, attempt: null };
     // Score stays hidden until results are published (the exams list must not
     // reveal a score right after submission). Status/resultPublished are still
     // sent so the client can show the correct "Awaiting results" / "View result"
@@ -101,6 +108,7 @@ export async function listAssignedExams(userId: string) {
     const published = !!a.resultPublished;
     return {
       ...e,
+      subject,
       attempt: {
         _id: a._id,
         status: a.status,
@@ -900,6 +908,15 @@ export async function publishResult(attemptId: string, publish = true) {
     { resultPublished: publish, status: 'graded' },
     { new: true }
   );
+  // The one student whose result this makes visible hears about it — once
+  // (services/resultNotifications; loaded lazily, as it reaches back into the
+  // evaluation service, which imports this file).
+  if (publish && attempt?.examId && attempt.submittedAt) {
+    const examId = String(attempt.examId);
+    void import('./resultNotifications').then((m) =>
+      m.notifyPublishedResults(examId, { attemptId: String(attempt._id) }),
+    );
+  }
   return attempt;
 }
 
@@ -946,14 +963,19 @@ export async function listAttemptsForUser(userId: string, opts: { published?: bo
   if (opts.published) criteria.resultPublished = true;
   const attempts = await Attempt.find(criteria)
     .sort({ submittedAt: -1, createdAt: -1 })
-    .populate('examId', 'title')
-    .populate('practiceTestId', 'title')
+    .populate('examId', 'title classLevel sections subject meta')
+    .populate('practiceTestId', 'title subjects')
     .lean();
 
   // Exclude orphaned attempts whose exam (or practice test) has been deleted.
   // After populate these have a null ref and would otherwise surface as
   // "Exam Not Found" in the student's results / recent attempts.
   const validAttempts = attempts.filter((a) => a.examId || a.practiceTestId);
+  const examSubjects = await subjectsForExams(
+    validAttempts
+      .map((a) => a.examId)
+      .filter((e: any) => e && typeof e === 'object' && e._id) as any[],
+  ).catch(() => new Map<string, string | null>());
 
   return validAttempts.map(a => {
     // Determine if this is a practice test or regular exam
@@ -1006,11 +1028,23 @@ export async function listAttemptsForUser(userId: string, opts: { published?: bo
         ? Math.round(((totalScore || 0) / maxScore) * 10000) / 100
         : 0;
 
+    // The subject a student reads on the result row: an exam's from its
+    // questions; a practice test's from the subjects it was built from.
+    const subject = isPracticeTest
+      ? subjectLabel(
+          Array.isArray((a.practiceTestId as any)?.subjects)
+            ? (a.practiceTestId as any).subjects
+            : [],
+        )
+      : id
+        ? (examSubjects.get(id) ?? null)
+        : null;
     return {
       _id: a._id,
       examId: !isPracticeTest ? id : null,
       practiceTestId: isPracticeTest ? id : null,
       examTitle: title,
+      subject,
       isPracticeTest,
       submittedAt: a.submittedAt,
       totalScore: published ? totalScore : null,

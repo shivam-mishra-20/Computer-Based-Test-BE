@@ -1,5 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import { legacyTokenNotBefore, refusesLongLivedToken, SESSION_REISSUE_REQUIRED } from '../core/auth/platformSessionPolicy';
+import { serviceRealm } from '../core/realm/realm';
 import {
   getTenantContext,
   runWithTenant,
@@ -12,7 +14,7 @@ import { resolveUserPermissions, type ResolvedAccess } from '../core/rbac/resolv
 import { LEGACY_ROLE_PERMISSIONS, PERMISSIONS } from '../core/rbac/permissions';
 import { orgStateOf, READ_ONLY_STATUSES } from '../core/tenancy/orgState';
 import { ORGANIZATION_ACCOUNT_REFUSAL, refusesOrganizationAccounts } from '../core/tenancy/dataSource';
-import { moduleRefusal } from './requireModule';
+import { moduleRefusal, subscriptionWriteRefusal } from './requireModule';
 
 /**
  * WHOSE organization an authenticated request runs in.
@@ -349,6 +351,15 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
       });
     }
 
+    // A ten-year platform token issued before PLATFORM_LEGACY_TOKEN_NOT_BEFORE
+    // is no longer honoured (core/auth/platformSessionPolicy). Unset: no change.
+    if (serviceRealm() === 'platform' && refusesLongLivedToken(decoded as { aud?: string; iat?: number; exp?: number }, legacyTokenNotBefore())) {
+      return res.status(SESSION_REISSUE_REQUIRED.status).json({
+        message: SESSION_REISSUE_REQUIRED.message,
+        code: SESSION_REISSUE_REQUIRED.code,
+      });
+    }
+
     // Fetch user from DB to get profile and latest role/assignment metadata.
     //
     // UNSCOPED, by the signed id: this is identity, and whose organization the
@@ -416,6 +427,17 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
           module: unentitled.module,
         });
       }
+      // An expired, suspended or cancelled subscription is read-only — the
+      // commercial counterpart of ORG_READ_ONLY above. Server-side, because a
+      // hidden button is not a refused write.
+      const readOnly = await subscriptionWriteRefusal(req, principalOrg);
+      if (readOnly) {
+        return res.status(readOnly.status).json({
+          message: readOnly.message,
+          code: readOnly.code,
+          subscriptionStatus: readOnly.subscriptionStatus,
+        });
+      }
     }
     // The organization handlers see is the one the request is scoped to — for
     // a legacy user with no `orgId`, that is the legacy data owner.
@@ -459,6 +481,10 @@ export const optionalAuthMiddleware = async (
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET as string) as AuthPayload;
+    // An ended long-lived platform session is treated as no session at all.
+    if (serviceRealm() === 'platform' && refusesLongLivedToken(decoded as { aud?: string; iat?: number; exp?: number }, legacyTokenNotBefore())) {
+      return next();
+    }
     const User = require('../models/User').default;
     // Unscoped, by the signed id — see authMiddleware.
     const user = await withoutTenantScope('auth:principal', async () =>
@@ -478,7 +504,11 @@ export const optionalAuthMiddleware = async (
     // served the guest view — the same as any other credential that may not
     // widen what an optional route shows.
     const tenantOrg = principal?.kind === 'tenant' ? principal.orgId : null;
-    const blocked = tenantOrg ? (await orgRefusal(req, tenantOrg)) || (await moduleRefusal(req, tenantOrg)) : null;
+    const blocked = tenantOrg
+      ? (await orgRefusal(req, tenantOrg)) ||
+        (await moduleRefusal(req, tenantOrg)) ||
+        (await subscriptionWriteRefusal(req, tenantOrg))
+      : null;
     if (
       user &&
       decision &&

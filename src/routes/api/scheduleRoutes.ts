@@ -475,6 +475,26 @@ async function checkScheduleConflict(
 // BATCH MANAGEMENT
 // ========================
 
+/**
+ * The fields a client may set on a batch. Never `orgId` (the organization is
+ * the caller's, stamped by the tenancy plugin) and never `_id` or timestamps:
+ * spreading the body let a request name another organization, which the plugin
+ * then refused with a 500 rather than simply ignoring.
+ */
+function batchFields(body: unknown): Record<string, unknown> {
+  const input = (body ?? {}) as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  if (typeof input.name === 'string') out.name = input.name.trim();
+  if (typeof input.isDefault === 'boolean') out.isDefault = input.isDefault;
+  if (typeof input.description === 'string') out.description = input.description;
+  return out;
+}
+
+/** A batch name already used by this organization (unique per organization). */
+function isDuplicateBatchName(error: unknown): boolean {
+  return (error as { code?: number })?.code === 11000;
+}
+
 // Get all batches
 
 router.get('/batches', authMiddleware, async (req: Request, res: Response) => {
@@ -508,12 +528,15 @@ router.post('/batches', authMiddleware, async (req: Request, res: Response) => {
     }
     
     const batch = new Batch({
-      ...req.body,
+      ...batchFields(req.body),
       classLevels: normalizedClassLevels,
     });
     await batch.save();
     res.status(201).json(batch);
   } catch (error: any) {
+    if (isDuplicateBatchName(error)) {
+      return res.status(409).json({ error: 'A batch with this name already exists' });
+    }
     res.status(500).json({ error: error.message });
   }
 });
@@ -525,7 +548,7 @@ router.put('/batches/:id', authMiddleware, async (req: Request, res: Response) =
       return res.status(403).json({ error: 'Only admins can update batches' });
     }
 
-    const updatePayload: Record<string, unknown> = { ...req.body };
+    const updatePayload: Record<string, unknown> = batchFields(req.body);
 
     if (Object.prototype.hasOwnProperty.call(req.body || {}, 'classLevels')) {
       const normalizedClassLevels = normalizeClassLevels(req.body?.classLevels);
@@ -549,6 +572,9 @@ router.put('/batches/:id', authMiddleware, async (req: Request, res: Response) =
 
     return res.json(updatedBatch);
   } catch (error: any) {
+    if (isDuplicateBatchName(error)) {
+      return res.status(409).json({ error: 'A batch with this name already exists' });
+    }
     return res.status(500).json({ error: error.message });
   }
 });

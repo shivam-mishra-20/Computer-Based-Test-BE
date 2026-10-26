@@ -143,7 +143,8 @@ export async function bootScratchApp(extraEnv: Record<string, string> = {}): Pro
     MONGODB_URI: '',
     PLATFORM_MONGODB_URI: '',
     TENANT_MODE: 'claim',
-    TENANT_ENFORCEMENT: 'warn',
+    // E2E_TENANT_ENFORCEMENT=enforce runs a suite under enforce mode instead.
+    TENANT_ENFORCEMENT: process.env.E2E_TENANT_ENFORCEMENT || 'warn',
     ENABLE_CRON: 'false',
     PPT_WORKER_EMBEDDED: 'false',
     REDIS_ENABLED: 'false',

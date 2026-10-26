@@ -5,6 +5,7 @@ import { extractTextFromPdf, extractTextFromImage, generateQuestionsFromTextGemi
 import { saveBatchValidatedQuestions, type EnhancedQuestionData } from '../services/questionValidationService';
 import Guidance from '../models/Guidance';
 import type { PaperBlueprint } from '../services/aiService';
+import { attachUsageSubject } from '../core/subscriptions/usage';
 import { 
   generateQuestionsFromPDF, 
   generateQuestionsFromImage, 
@@ -446,6 +447,8 @@ async function aiGenerateFromUpload(req: Request, res: Response, source: Generat
         options,
         userId: (req as any).user.id,
       });
+      // The job, not this response, decides whether the generation counted.
+      await attachUsageSubject(req, 'ImportBatch', jobId);
       res.setHeader('Location', `${req.baseUrl}/ai-generate/jobs/${jobId}`);
       return res.status(202).json({ success: true, data: { jobId, status: 'processing', stage: 'queued' } });
     }

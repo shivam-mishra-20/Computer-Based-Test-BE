@@ -4,7 +4,6 @@ import { runSyncAndRecord } from './attendanceSyncRuns';
 import { assessAutoSync, autoSyncRange } from './etimeSyncLogic';
 import AuditLog from '../models/AuditLog';
 import { broadcastNotification } from './notificationService';
-import Notification from '../models/Notification';
 
 /**
  * AttendanceCron - Schedules automatic attendance sync 4 times daily:
@@ -13,6 +12,35 @@ import Notification from '../models/Notification';
  * - 9:00 PM IST
  * - 3:00 AM IST
  */
+/**
+ * "Attendance Updated" — the inbox entry AND the push, from ONE call.
+ *
+ * Both sync paths used to `Notification.create({ body })` and then call
+ * broadcastNotification. The model requires `message`, so every create was
+ * rejected, `Promise.all` threw, and the broadcast after it never ran: no inbox
+ * entry and no push for any attendance sync. Renaming the field alone would
+ * have stored each notification twice, because broadcastNotification
+ * (sendStudentNotifications) already persists one per recipient — with
+ * `message` — before pushing. So it is now the only call.
+ */
+export const ATTENDANCE_SYNC_NOTICE = {
+  title: 'Attendance Updated',
+  body: 'Your attendance has been synced. Check your attendance records for the latest updates.',
+  type: 'attendance',
+  data: {
+    type: 'attendance',
+    role: 'student',
+    screen: '/(student)/modules/attendance',
+  },
+} as const;
+
+export async function notifyAttendanceSynced(userIds: string[]): Promise<void> {
+  if (!userIds.length) return;
+  await broadcastNotification(userIds, {
+    ...ATTENDANCE_SYNC_NOTICE,
+    data: { ...ATTENDANCE_SYNC_NOTICE.data },
+  });
+}
 export class AttendanceCron {
   private static scheduled = false;
 
@@ -121,26 +149,7 @@ export class AttendanceCron {
         try {
           console.log(`[AttendanceCron] Sending notifications to ${result.updatedUserIds.length} users...`);
           
-          // Create in-app notifications for each user
-          const notificationPromises = result.updatedUserIds.map(userId => 
-            Notification.create({
-              userId,
-              title: 'Attendance Updated',
-              body: 'Your attendance has been synced. Check your attendance records for the latest updates.',
-              type: 'attendance',
-              read: false,
-              data: { type: 'attendance', role: 'student', screen: '/(student)/modules/attendance' },
-            })
-          );
-          await Promise.all(notificationPromises);
-          
-          // Send push notifications
-          await broadcastNotification(result.updatedUserIds, {
-            title: 'Attendance Updated',
-            body: 'Your attendance has been synced. Check your attendance records for the latest updates.',
-            type: 'attendance',
-            data: { type: 'attendance', role: 'student', screen: '/(student)/modules/attendance' }
-          });
+          await notifyAttendanceSynced(result.updatedUserIds);
           
           notified = result.updatedUserIds.length;
           console.log(`[AttendanceCron] Successfully notified ${notified} users`);
@@ -192,26 +201,7 @@ export class AttendanceCron {
       let notified = 0;
       if (result.updatedUserIds.length > 0) {
         try {
-          // Create in-app notifications
-          const notificationPromises = result.updatedUserIds.map(userId => 
-            Notification.create({
-              userId,
-              title: 'Attendance Updated',
-              body: 'Your attendance has been synced. Check your attendance records for the latest updates.',
-              type: 'attendance',
-              read: false,
-              data: { type: 'attendance', role: 'student', screen: '/(student)/modules/attendance' },
-            })
-          );
-          await Promise.all(notificationPromises);
-          
-          // Send push notifications
-          await broadcastNotification(result.updatedUserIds, {
-            title: 'Attendance Updated',
-            body: 'Your attendance has been synced. Check your attendance records for the latest updates.',
-            type: 'attendance',
-            data: { type: 'attendance', role: 'student', screen: '/(student)/modules/attendance' }
-          });
+          await notifyAttendanceSynced(result.updatedUserIds);
           
           notified = result.updatedUserIds.length;
         } catch (notifError: any) {

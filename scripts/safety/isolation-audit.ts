@@ -163,6 +163,14 @@ const CLASSIFIED: Finding[] = [
     why: 'Runs once per organization, each inside its own context.',
   },
   {
+    file: 'services/SubscriptionLifecycleCron.ts',
+    match: 'runLifecycleSweep(',
+    verdict: 'GLOBAL',
+    why:
+      'Reads and advances Subscription, a platform collection (tenantScoped: false), through named ' +
+      'withoutTenantScope reasons. It touches no tenant data; each subscription is matched by its own orgId.',
+  },
+  {
     file: 'services/QueueService.ts',
     match: "{ orgId: job.orgId, source: 'job' }",
     verdict: 'CONTEXTUALISED',

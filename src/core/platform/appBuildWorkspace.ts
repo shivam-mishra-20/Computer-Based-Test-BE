@@ -39,6 +39,11 @@ import { generateBuildConfig, type GeneratedBuildConfig } from './mobileBuild';
 import { materializeNativeAssets, appProjectPath } from './mobileAssets';
 import type { BuildArtifactType } from '../../models/AppBuildJob';
 import type { SelectableBuildProfile } from './mobileBuildRules';
+import {
+  googleServicesFor,
+  platformGoogleServices,
+  pushReadiness,
+} from './pushConfig';
 
 export class WorkspaceUnavailable extends Error {
   readonly code = 'WORKSPACE_UNAVAILABLE';
@@ -87,6 +92,10 @@ const COPIED_CONFIG_ENTRIES = [
   // fails to resolve './config/withCleartextTraffic' and the whole build dies
   // in the config phase — this list is not a convenience, it is the file set.
   'withCleartextTraffic.js',
+  // app.config.ts imports it to decide whether this build compiles Firebase
+  // (GOOGLE_SERVICES_FILE). Missing, every build dies in the config phase.
+  'pushBuild.js',
+  'pushBuild.d.ts',
 ];
 
 /**
@@ -142,6 +151,8 @@ export function easJsonFor(input: {
   artifactType: BuildArtifactType;
   apiBaseUrl: string;
   appProfile: SelectableBuildProfile;
+  /** Present when this build compiles Firebase for push (core/platform/pushConfig). */
+  googleServicesFile?: string;
 }): string {
   const androidBuildType = input.artifactType === 'apk' ? 'apk' : 'app-bundle';
   const config = {
@@ -166,6 +177,11 @@ export function easJsonFor(input: {
           // had gated it on 'production'. Two validators, two answers, and the
           // console's was the one nobody could act on.
           APP_PROFILE: input.appProfile,
+          // Read by app.config.ts → android.googleServicesFile. Only set when
+          // the workspace actually contains the file.
+          ...(input.googleServicesFile
+            ? { GOOGLE_SERVICES_FILE: input.googleServicesFile }
+            : {}),
         },
       },
     },
@@ -416,6 +432,30 @@ export async function prepareWorkspace(input: {
     registryFor(slug, constantNameFor(slug)),
     'utf8',
   );
+  // Push: this organization's entry of the platform Firebase project, and
+  // nothing about any other organization (core/platform/pushConfig). Refused
+  // here with the administrator's fix when the host requires push or its
+  // configuration names a problem; absent (inbox only) when it has none.
+  const androidPackage = String(generated.identity.androidPackage ?? '');
+  const pushState = pushReadiness(androidPackage);
+  let googleServicesFile: string | undefined;
+  if (pushState.state === 'ready') {
+    const own = googleServicesFor(
+      platformGoogleServices().file!,
+      androidPackage,
+    );
+    await fs.writeFile(
+      path.join(root, 'google-services.json'),
+      `${JSON.stringify(own, null, 2)}\n`,
+      'utf8',
+    );
+    googleServicesFile = './google-services.json';
+  } else if (pushState.required) {
+    throw new WorkspaceUnavailable(
+      pushState.message ??
+        'Push notifications are not configured for this build.',
+    );
+  }
   await fs.writeFile(
     path.join(root, 'eas.json'),
     easJsonFor({
@@ -424,6 +464,7 @@ export async function prepareWorkspace(input: {
       artifactType: input.artifactType,
       apiBaseUrl: String(generated.identity.apiBaseUrl ?? ''),
       appProfile,
+      googleServicesFile,
     }),
     'utf8',
   );

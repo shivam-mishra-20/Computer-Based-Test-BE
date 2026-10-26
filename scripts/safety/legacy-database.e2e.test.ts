@@ -31,6 +31,7 @@
  */
 
 import { spawnSync } from 'child_process';
+import { join } from 'path';
 import { randomBytes } from 'crypto';
 import { bootScratchApp, Checks, request } from './e2eHarness';
 
@@ -304,14 +305,22 @@ async function main() {
     t.section(
       'the index CLI uses MONGO_URI only and never changes a legacy database',
     );
+    // The CLI by absolute path, on this Node with ts-node's register hook —
+    // not `npx ts-node <relative path>`, which only resolved when the suite
+    // was started from the repository root, and could fetch ts-node from the
+    // network when it was not.
     const cli = (env: Record<string, string>) =>
       spawnSync(
-        'npx',
-        ['ts-node', '--transpile-only', 'src/config/indexes.ts', 'create'],
+        process.execPath,
+        [
+          '-r',
+          require.resolve('ts-node/register/transpile-only'),
+          join(__dirname, '..', '..', 'src', 'config', 'indexes.ts'),
+          'create',
+        ],
         {
           env: { ...process.env, ...env },
           encoding: 'utf8',
-          shell: process.platform === 'win32',
           timeout: 120000,
         },
       );

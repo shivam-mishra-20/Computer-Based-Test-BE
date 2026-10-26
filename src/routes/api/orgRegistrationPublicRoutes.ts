@@ -214,6 +214,25 @@ router.post('/brand-preview', requirePlatformDeployment, previewLimiter, (req: R
   }
 });
 
+/**
+ * GET /api/public/plans — the plans an institute can ask for on the form.
+ *
+ * Read-only catalogue data, the same an organization admin sees when choosing
+ * an upgrade: name, price, trial length, limits and modules of the plans on
+ * sale. Choosing one on the form records a PREFERENCE; the plan is granted (or
+ * not) by platform staff at approval.
+ */
+router.get('/plans', requirePlatformDeployment, previewLimiter, async (_req: Request, res: Response) => {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { listPublicPlans } = require('../../core/subscriptions/catalogue');
+    return res.json({ plans: await listPublicPlans() });
+  } catch (err) {
+    console.error('[public-plans] failed:', err);
+    return res.status(500).json({ message: 'Could not load plans right now.' });
+  }
+});
+
 /** Start an application. Returns the id and the only copy of the token. */
 router.post('/organization-applications', requirePlatformDeployment, publicFormLimiter, async (req: Request, res: Response) => {
   try {

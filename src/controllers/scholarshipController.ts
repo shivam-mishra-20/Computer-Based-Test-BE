@@ -191,6 +191,8 @@ export async function getShareLinkCtrl(req: Request, res: Response) {
     const link = await getTestShareLink(testId);
     res.json(link);
   } catch (err: any) {
+    // A missing test is the caller's mistake, not a server failure.
+    if (err?.message === 'Test not found') return res.status(404).json({ error: 'Test not found' });
     res.status(500).json({ error: err.message || 'Failed to generate share link' });
   }
 }

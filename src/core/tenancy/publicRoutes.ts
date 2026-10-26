@@ -38,6 +38,14 @@ export interface PublicRouteEntry {
   reason: string;
   /** Why this is safe to run unscoped. Reviewed, not assumed. */
   justification: string;
+  /**
+   * The handler reads or writes TENANT data (an organization's tests, batches,
+   * subjects…). Unscoped, on a multi-tenant (claim-mode) server, that is every
+   * organization's data at once — so there, with no organization resolved from
+   * the request (X-Org-Id or Host), it is refused (400 ORG_REQUIRED) instead of
+   * bypassed. A single-organization deployment is unaffected.
+   */
+  tenantData?: true;
 }
 
 export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
@@ -72,6 +80,9 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
     method: 'POST',
     path: '/api/auth/public-register',
     classification: 'pre-auth',
+    // Validates the chosen batch against the institute's batches and names them
+    // in its error — that institute's, so it must know which one.
+    tenantData: true,
     reason: 'auth:public-register',
     justification: 'Institute self-registration, pending admin approval. No session yet.',
   },
@@ -139,6 +150,7 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
     method: 'GET',
     path: '/api/auth/public-student-batch-config',
     classification: 'pre-auth',
+    tenantData: true,
     reason: 'auth:public-batch-config',
     justification:
       'Populates the registration form before an account exists. Returns configuration, ' +
@@ -150,6 +162,7 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
     method: 'GET',
     path: '/api/class-requests/options',
     classification: 'public-global',
+    tenantData: true,
     reason: 'public:class-request-options',
     justification: 'Dropdown options for the guest enquiry form. No tenant data.',
   },
@@ -157,6 +170,7 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
     method: 'GET',
     path: '/api/scholarship/tests',
     classification: 'public-global',
+    tenantData: true,
     reason: 'public:scholarship-browse',
     justification: 'Scholarship tests are deliberately open to prospective students with no account.',
   },
@@ -164,6 +178,7 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
     method: 'GET',
     path: '/api/scholarship/tests/:testId',
     classification: 'public-global',
+    tenantData: true,
     reason: 'public:scholarship-browse',
     justification:
       'Single scholarship test detail, same open-by-design audience as the list. ' +
@@ -173,6 +188,7 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
     method: 'POST',
     path: '/api/scholarship/attempts',
     classification: 'public-global',
+    tenantData: true,
     reason: 'public:scholarship-attempt',
     justification:
       'Guest sits a scholarship test. Subsequent calls are authorised by the ' +
@@ -217,6 +233,7 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
     method: 'GET',
     path: '/api/agts/tests',
     classification: 'public-global',
+    tenantData: true,
     reason: 'public:agts-browse',
     justification: 'Active AGTS test names, classes, subjects and durations for the public landing page. No candidate data.',
   },
@@ -224,6 +241,7 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
     method: 'GET',
     path: '/api/agts/tests/:ref',
     classification: 'public-global',
+    tenantData: true,
     reason: 'public:agts-browse',
     justification: 'One AGTS test resolved from a share link. Metadata only; never questions or answers.',
   },
@@ -231,6 +249,7 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
     method: 'POST',
     path: '/api/agts/register',
     classification: 'public-global',
+    tenantData: true,
     reason: 'public:agts-register',
     justification:
       'A family registers with consent and starts a test. Rate limited per network and per phone; ' +
@@ -277,6 +296,68 @@ export const PUBLIC_ROUTE_ALLOWLIST: PublicRouteEntry[] = [
     classification: 'public-global',
     reason: 'public:agts-result',
     justification: 'A result link an admin chose to share; the 160-bit token is the authorisation. No contact details are returned.',
+  },
+
+  // Admissions — the same audience as AGTS: a family with no account.
+  {
+    method: 'GET',
+    path: '/api/admissions/seats',
+    classification: 'public-global',
+    tenantData: true,
+    reason: 'public:admissions-seats',
+    justification: 'Seats left per class for the admissions page: capacities and counts only, no family data.',
+  },
+  {
+    method: 'POST',
+    path: '/api/admissions/enquiry',
+    classification: 'public-global',
+    tenantData: true,
+    reason: 'public:admissions-enquiry',
+    justification:
+      'A family sends an admission enquiry with consent. Rate limited; every stored field is validated and ' +
+      'allow-listed server-side, and the answer never reveals whether the phone number was already known.',
+  },
+  {
+    method: 'GET',
+    path: '/api/admissions/application/:token',
+    classification: 'public-global',
+    tenantData: true,
+    reason: 'public:admissions-application',
+    justification: "The family's own application. Authorised by the 192-bit personal link token, stored only as its hash.",
+  },
+  {
+    method: 'POST',
+    path: '/api/admissions/application/:token',
+    classification: 'public-global',
+    tenantData: true,
+    reason: 'public:admissions-application',
+    justification: 'Submits the application the personal link token names. Validated and allow-listed; rate limited.',
+  },
+  {
+    method: 'POST',
+    path: '/api/admissions/application/:token/documents',
+    classification: 'public-global',
+    tenantData: true,
+    reason: 'public:admissions-application',
+    justification: 'Uploads one document to the application the link token names. Stored privately; 5 MB, PDF or image only.',
+  },
+  {
+    method: 'DELETE',
+    path: '/api/admissions/application/:token/documents/:documentId',
+    classification: 'public-global',
+    tenantData: true,
+    reason: 'public:admissions-application',
+    justification: 'Removes a document from the application the link token names, before a decision is made.',
+  },
+  {
+    method: 'GET',
+    path: '/api/admissions/registration/:registrationId',
+    classification: 'public-global',
+    tenantData: true,
+    reason: 'public:admissions-registration',
+    justification:
+      'Fee-page lookup by registration ID. Returns the student name, class and status only — no phone, date of ' +
+      'birth or address. Rate limited so IDs cannot be walked.',
   },
 
   // ── Diagnostics ──────────────────────────────────────────────────────────

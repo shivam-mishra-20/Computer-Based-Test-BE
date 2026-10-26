@@ -50,6 +50,8 @@ import {
   recordGuidanceRequest,
   upsertLeadFromRegistration,
 } from './leadService';
+import { notifyAdmissionsStaff } from '../admissions/admissionAlerts';
+import { currentAdmissionSession } from '../admissions/admissionValidation';
 
 export class AgtsError extends Error {
   constructor(
@@ -232,8 +234,11 @@ export async function registerAndStart(input: RegistrationInput, now = new Date(
     }
   }
 
-  // 2. The lead — created or refreshed, never duplicated.
-  const lead = await upsertLeadFromRegistration(input, now);
+  // 2. The lead — created or refreshed, never duplicated. A family we had
+  //    never heard from joins the season admissions are open for, and the
+  //    desk is told about them.
+  const { lead, created: newLead } = await upsertLeadFromRegistration(input, now, currentAdmissionSession());
+  if (newLead) void notifyAdmissionsStaff('agts_registration', lead);
 
   // 3. Abuse ceiling on NEW attempts per phone number.
   const since = new Date(now.getTime() - 24 * 3600 * 1000);
@@ -622,6 +627,8 @@ export async function requestGuidance(attemptId: string, key: string, body: any)
   }
   const input = validateGuidance(body);
   await recordGuidanceRequest(attempt.leadId as Types.ObjectId, { ...input, attemptId: attempt.attemptId });
+  const lead = await Lead.findById(attempt.leadId).select('student admission owner').lean();
+  if (lead) void notifyAdmissionsStaff('guidance', lead, input.preferredTime);
   return { requested: true };
 }
 

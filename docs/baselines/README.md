@@ -96,6 +96,104 @@ guard addition as a mass deletion is one nobody will trust the next time it
 goes red, so mount-level middleware is now parsed and attributed to every route
 under the prefix.
 
+## The contract diff, 2026-09-29 → 2026-10-21
+
+Reviewed line by line before re-snapshotting. **No endpoint was removed.**
+577 → 619 endpoints.
+
+- **38 altered, all guard additions or re-keying, none a loosening:**
+  - `/api/ai/*` (25): gated per route instead of as a router — generation and
+    guidance on `requireModule(ai)`, the class question bank on
+    `requireModule(questionBank)`; generation routes also carry
+    `meter(aiGenerationsMonthly)`. Organizations with `ai` always hold
+    `questionBank` (a dependency), so the only access this adds is the
+    question bank for plans without AI.
+  - `/api/teacher/ai/generate`, `/regenerate`, `/blueprint/approve` (3): now
+    `requireModule(ai)` (they had no module gate); the first two are metered.
+    History, export, cancel and delete are deliberately not gated.
+  - `/api/import-paper/*` (10): `requireModule(questionImport)` — an earlier
+    phase.
+  - `POST /api/public/brand-preview`: `publicFormLimiter` → `previewLimiter` —
+    an earlier phase.
+- **42 added:** subscriptions and billing (11: `/api/platform/orgs/:orgId/subscription*`,
+  `/payments*`, `/api/platform/subscriptions`, `/api/platform/plans/*`), and
+  from earlier uncommitted phases: console MFA and sessions (9), app design
+  (11), notification devices (3), parent ward views (2), attendance sync status
+  (2), organization-application drafts (2), and the background AI job
+  read/discard pair (2).
+
+**Re-snapshotted the same day after S3 (invoices), 619 → 642, 23 additions, no
+removals or alterations:** `/api/platform/billing/profile` (GET org.read, PUT
+billing.manage); `/api/platform/orgs/:orgId/billing-details` and
+`/orgs/:orgId/invoices`; `/api/platform/invoices` and `/invoices/:id`
+(GET/PATCH/DELETE), `/issue`, `/void`, `/payments`, `/document` — reads on
+`org.read`, every write on `billing.manage`; `/api/platform/subscription-requests`
+(GET org.read) and `/:id/resolve` (subscription.manage). Organization side,
+behind `authMiddleware` with staff permissions checked in the router:
+`/api/org-admin/billing/details` (GET/PUT), `/billing/invoices`,
+`/billing/invoices/:id`, `/billing/invoices/:id/document`,
+`/subscription/requests` (GET/POST). Nothing records a payment or changes a
+plan from the organization side.
+
+**Re-snapshotted again after S4–S7 (admin screens), 642 → 644, 2 additions, no
+removals or alterations:** `GET /api/public/plans` (the catalogue the
+registration form shows; read-only, rate limited, platform deployment only)
+and `GET /api/org-admin/plans` (the same catalogue for an organization admin,
+marked with its current plan). Both read; neither changes a plan.
+
+## The contract diff, 2026-10-21 → 2026-10-23 (self-serve subscription)
+
+`api-contract-2026-10-23.txt`, 644 → 655: **11 additions, no removals or
+alterations.** All under `/api/org-admin/subscription`, behind
+`authMiddleware`, with staff permissions checked in the router (`org.read` for
+the GET, `org.settings` for every POST), and the organization taken from the
+principal: `GET /subscription` (what the institute may do now), `POST
+/subscription/trial`, `/switch-plan`, `/orders`, `/orders/:id/withdraw`,
+`/cancel`, `/resume`. They stay open while read-only (the existing
+`/api/org-admin/subscription*` allowlist entry). An order creates an invoice;
+nothing on this side records a payment — the plan changes when staff settle the
+invoice. See core/billing/selfServe.ts and docs/subscriptions-plan.md.
+
+Staff side, the same day (4): `GET /api/platform/orders` (org.read — institute
+orders, open by default, `?status=all`, `?orgId=`), `POST /orders/:id/accept`
+(billing.manage — issues a draft if needed, then settles it with the payment
+staff record, which applies the ordered plan), `POST /orders/:id/apply-plan`
+(subscription.manage — the plan before payment; the invoice stays open),
+`POST /orders/:id/decline` (billing.manage — reason required, shown to the
+institute). Only invoices with `origin: 'self-serve'` are orders; any other id
+is a 404.
+
+## The contract diff, 2026-10-23 → 2026-10-24 (recommended plan terms)
+
+`api-contract-2026-10-24.txt`, 655 → 658: **3 additions, no removals or
+alterations.** `GET /api/platform/plans/recommended` (org.read — the
+recommended catalogue next to each plan's terms and subscribers per version),
+`POST /plans/apply-recommended` (plan.manage — a new version of each plan whose
+terms differ; nobody is moved), `POST /plans/:key/move-subscribers`
+(subscription.manage, reason required — older-version subscribers to the
+current version; platform-owned and pre-lifecycle subscriptions skipped unless
+`includeUnmanaged`).
+
+### The parser now reads route-level gate keys
+
+A route-level `requireModule('ai')` used to print as a bare `requireModule`, so
+changing a module key — the exact change above — was invisible. Keys are read
+for `requireModule(...)` and `meterRequest(...)`. Seat limits are checked inside
+handlers (core/subscriptions/usage) and do not appear here.
+
+## The contract diff, 2026-10-24 → 2026-10-25 (admissions pipeline)
+
+`api-contract-2026-10-25.txt`, 658 → 677: **19 additions, no removals or
+alterations**, all under the new `/api/admissions` mount. Seven are public and
+allowlisted in core/tenancy/publicRoutes: `GET /seats`, `POST /enquiry`
+(publicFormLimiter), the four `/application/:token` routes (the family's
+personal link; admissionApplicationLimiter) and `GET /registration/:registrationId`
+(the fee page; admissionLookupLimiter). Twelve are staff routes under
+`/admin/*`, each `authMiddleware` + `requireStaffPermission('enquiries.manage')`
+(the parser prints the first guard only); creating a student login from
+`POST /admin/leads/:leadId/enrol` additionally checks `students.create` inside
+the handler. The existing `/api/agts` routes are unchanged.
+
 ## Re-checking
 
 ```

@@ -2,7 +2,11 @@ import { Request, Response } from 'express';
 import { Expo } from 'expo-server-sdk';
 import Notification from '../models/Notification';
 import * as notificationService from '../services/notificationService';
+import { presentNotification } from '../services/notificationFormat';
 import User from '../models/User';
+import PushDevice from '../models/PushDevice';
+import { pushNotifications } from '../services/pushDelivery';
+import { withoutTenantScope } from '../core/tenancy/context';
 
 const expo = new Expo();
 
@@ -84,7 +88,7 @@ export const sendTestPush = async (req: Request, res: Response) => {
     }
 
     // Persist an in-app notification too
-    await Notification.create({
+    const created = await Notification.create({
       userId: user._id,
       type: 'general',
       title: safeTitle,
@@ -92,9 +96,31 @@ export const sendTestPush = async (req: Request, res: Response) => {
       data: { type: 'test' },
       priority: 'high',
       read: false,
-    }).catch(() => {
-      // Don't fail the request if DB insert fails
-    });
+    }).catch(() => null); // Don't fail the request if DB insert fails
+
+    // Organization apps register installations (PushDevice): send through the
+    // same delivery every real notification uses, and say what Expo answered.
+    const devices = await PushDevice.countDocuments({ userId: user._id });
+    if (devices > 0) {
+      const outcome = created
+        ? await pushNotifications([created as any])
+        : { claimed: 0, sent: 0 };
+      const failing = await PushDevice.find({
+        userId: user._id,
+        lastError: { $ne: null },
+      })
+        .select('lastError appId -_id')
+        .lean();
+      return res.json({
+        message:
+          outcome.sent > 0
+            ? 'Test push accepted by Expo for delivery.'
+            : 'Test push was not accepted for any device.',
+        devices,
+        sent: outcome.sent,
+        failing,
+      });
+    }
 
     if (!user.pushToken) {
       return res.status(400).json({
@@ -130,6 +156,144 @@ export const sendTestPush = async (req: Request, res: Response) => {
   }
 };
 
+// ── Organization-app installations (PushDevice) ────────────────────────────
+const INSTALLATION_ID = /^[A-Za-z0-9_-]{8,128}$/;
+
+/**
+ * POST /notifications/devices  { token, installationId, platform, appId?, projectId? }
+ *
+ * Binds this installation to the signed-in account, in the account's own
+ * organization (the tenancy plugin stamps it). The same physical token or
+ * installation is first detached from anyone else, anywhere — that is what
+ * stops a phone that changed hands, accounts or organizations from receiving
+ * the previous person's notifications.
+ */
+export const registerDevice = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+    if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+    const body = (req.body || {}) as Record<string, unknown>;
+    const token = typeof body.token === 'string' ? body.token.trim() : '';
+    const installationId =
+      typeof body.installationId === 'string' ? body.installationId.trim() : '';
+    const platform =
+      body.platform === 'ios'
+        ? 'ios'
+        : body.platform === 'android'
+          ? 'android'
+          : null;
+    const appId =
+      typeof body.appId === 'string'
+        ? body.appId.trim().slice(0, 256)
+        : undefined;
+    const projectId =
+      typeof body.projectId === 'string'
+        ? body.projectId.trim().slice(0, 64)
+        : undefined;
+
+    if (!Expo.isExpoPushToken(token))
+      return res
+        .status(400)
+        .json({ message: 'token must be an Expo push token' });
+    if (!INSTALLATION_ID.test(installationId))
+      return res.status(400).json({ message: 'installationId is invalid' });
+    if (!platform)
+      return res
+        .status(400)
+        .json({ message: 'platform must be android or ios' });
+
+    await withoutTenantScope('push:detach-device', async () => {
+      await PushDevice.deleteMany({
+        $or: [
+          { token, installationId: { $ne: installationId } },
+          { installationId, userId: { $ne: userId } },
+        ],
+      });
+      await User.updateMany(
+        { _id: { $ne: userId }, pushToken: token },
+        { $unset: { pushToken: '' } },
+      );
+    });
+
+    const device = await PushDevice.findOneAndUpdate(
+      { installationId, userId },
+      {
+        $set: {
+          token,
+          platform,
+          appId,
+          projectId,
+          lastRegisteredAt: new Date(),
+          lastError: null,
+          lastErrorAt: null,
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    ).lean();
+
+    res.json({
+      registered: true,
+      installationId: device?.installationId ?? installationId,
+    });
+  } catch (err) {
+    console.error('Error registering push device:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/** DELETE /notifications/devices/:installationId — sign-out: this installation stops receiving this account's pushes. */
+export const unregisterDevice = async (req: Request, res: Response) => {
+  try {
+    const userId = (req as any).user?.id;
+    if (!userId) return res.status(401).json({ message: 'Unauthorized' });
+    const installationId = String(req.params.installationId || '').trim();
+    if (!INSTALLATION_ID.test(installationId))
+      return res.status(400).json({ message: 'installationId is invalid' });
+    const result = await PushDevice.deleteOne({ installationId, userId });
+    res.json({
+      removed: (result as { deletedCount?: number }).deletedCount ?? 0,
+    });
+  } catch (err) {
+    console.error('Error unregistering push device:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+/**
+ * POST /notifications/devices/release  { installationId, token }  — NO session.
+ *
+ * A phone whose session ended without a reachable server (sign-out while
+ * offline, a session that expired or was revoked) is still registered, and
+ * Android shows a push without asking the app — so the previous person's
+ * notifications would keep arriving. The app retries this until it succeeds.
+ *
+ * It needs no session because it can only ever REMOVE, and only the one
+ * registration matching BOTH the installation id and the exact push token —
+ * two values that exist together only on that device. It reveals nothing but
+ * whether something was removed.
+ */
+export const releaseDevice = async (req: Request, res: Response) => {
+  try {
+    const body = (req.body || {}) as Record<string, unknown>;
+    const token = typeof body.token === 'string' ? body.token.trim() : '';
+    const installationId =
+      typeof body.installationId === 'string' ? body.installationId.trim() : '';
+    if (!Expo.isExpoPushToken(token) || !INSTALLATION_ID.test(installationId)) {
+      return res
+        .status(400)
+        .json({ message: 'installationId and token are required' });
+    }
+    const result = await withoutTenantScope('push:release-device', () =>
+      PushDevice.deleteOne({ installationId, token }),
+    );
+    res.json({
+      released: ((result as { deletedCount?: number }).deletedCount ?? 0) > 0,
+    });
+  } catch (err) {
+    console.error('Error releasing push device:', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
 // Get notifications for the authenticated user
 export const getUserNotifications = async (req: Request, res: Response) => {
   try {
@@ -158,7 +322,10 @@ export const getUserNotifications = async (req: Request, res: Response) => {
     ]);
 
     res.json({
-      notifications,
+      // Legacy rows that carry `body` instead of `message` read the same as the rest.
+      notifications: notifications.map((n) =>
+        presentNotification(n as unknown as Record<string, unknown>),
+      ),
       total,
       unreadCount,
       hasMore: total > Number(skip) + notifications.length,

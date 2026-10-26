@@ -17,6 +17,7 @@
  * (services/aiGenerationJobs); they are excluded here.
  */
 import { ImportBatch } from '../models/ImportedQuestion';
+import { refundForSubject } from '../core/subscriptions/usage';
 
 const setting = (name: string, fallback: number): number => {
   const value = Number(process.env[name]);
@@ -84,6 +85,9 @@ export async function reconcileInterruptedImports(
         $push: { processingErrors: { error: INTERRUPTED_IMPORT_MESSAGE, timestamp: new Date() } },
       },
     );
+    // An AI generation job interrupted here produced nothing: not counted
+    // against the plan. A no-op for batches that reserved no usage.
+    if (result.modifiedCount === 1) await refundForSubject('ImportBatch', batch._id, 'job interrupted');
     changed += result.modifiedCount;
   }
   return changed;

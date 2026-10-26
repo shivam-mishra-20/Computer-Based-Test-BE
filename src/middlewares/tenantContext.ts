@@ -170,7 +170,7 @@ export function tenantContextMiddleware(req: Request, res: Response, next: NextF
   // its own scopes explicitly; inheriting one it did not ask for is how a
   // cross-tenant read gets silently narrowed, or silently widened.
   if (req.path.startsWith('/api/platform')) {
-    return continueWithoutOrg(req, next);
+    return continueWithoutOrg(req, res, next);
   }
 
   if (hint || req.headers.host) {
@@ -180,20 +180,32 @@ export function tenantContextMiddleware(req: Request, res: Response, next: NextF
           const context: TenantContext = { orgId: resolved, userId: null, source: 'claim' };
           return enterTenant(req, context, next);
         }
-        return continueWithoutOrg(req, next);
+        return continueWithoutOrg(req, res, next);
       })
-      .catch(() => continueWithoutOrg(req, next));
+      .catch(() => continueWithoutOrg(req, res, next));
   }
 
-  return continueWithoutOrg(req, next);
+  return continueWithoutOrg(req, res, next);
 }
 
 /**
  * No usable organization. Two possibilities, and they are treated very
  * differently on purpose.
  */
-function continueWithoutOrg(req: Request, next: NextFunction) {
+function continueWithoutOrg(req: Request, res: Response, next: NextFunction) {
   const allowed = findPublicRoute(req.method, req.path);
+
+  // A route that serves an organization's data, on a server holding many
+  // organizations, with no organization named: there is no right answer to
+  // give — unscoped it would be every organization's data at once (and, for
+  // the batch configuration, a merge across all of them). The platform clients
+  // always send X-Org-Id when they know the institute.
+  if (allowed?.tenantData && tenantMode() === 'claim') {
+    return res.status(400).json({
+      message: 'Which institute is this for? Open it from the institute\'s own app or site.',
+      code: 'ORG_REQUIRED',
+    });
+  }
 
   if (allowed) {
     // A reviewed, justified entry in the allowlist. The reason string reaches

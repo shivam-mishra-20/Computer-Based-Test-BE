@@ -8,6 +8,8 @@ import Lecture from '../../models/Lecture';
 import { authMiddleware } from '../../middlewares/authMiddleware';
 import { uploadAiContent } from '../../middlewares/uploadAiContent';
 import { aiLimiter } from '../../middlewares/rateLimiter';
+import { requireModule } from '../../middlewares/requireModule';
+import { meterRequest } from '../../core/subscriptions/usage';
 import { buildClassVariants } from '../../utils/audienceTargeting';
 import { INSTITUTE_ACCOUNT_CLAUSE } from '../../utils/instituteAudience';
 import { tenantLookup } from '../../core/tenancy';
@@ -35,7 +37,11 @@ const router = Router();
 // ── AI Content Generator (PPT / Question Paper / future tools) ──────────────
 // Unified endpoint; an optional uploaded file (PDF/PPTX/DOCX/image) routes
 // through the Vision/extraction pipeline. Teachers & admins only.
-const aiGuards = [authMiddleware, requireStaffPermission('ai.generate'), aiLimiter];
+// Starting AI work needs the `ai` module and counts one generation against the
+// plan (core/subscriptions/usage; refunded if it fails). Reading, exporting,
+// cancelling or deleting what was already generated needs neither: an
+// organization that downgrades keeps its own content.
+const aiGuards = [authMiddleware, requireModule('ai'), requireStaffPermission('ai.generate'), aiLimiter, meterRequest('aiGenerationsMonthly')];
 // Multer errors (unsupported type, >25MB) otherwise fall through to Express's
 // default HTML error page — the app can't parse that. Convert to clean 400 JSON
 // so the teacher sees the actual reason instead of a generic "Generation failed".
@@ -56,7 +62,8 @@ router.post('/ai/history/:id/cancel', authMiddleware, requireStaffPermission('ai
 router.post('/ai/history/:id/export-pdf', authMiddleware, requireStaffPermission('ai.read'), aiContentExportPdf);
 // Two-phase ppt: approve the (edited) Lecture Blueprint → phase-2 generation.
 // NOT behind aiLimiter — approving doesn't start a fresh AI planning run.
-router.post('/ai/history/:id/blueprint/approve', authMiddleware, requireStaffPermission('ai.generate'), aiContentApproveBlueprint);
+// Phase 2 of a generation already counted at /ai/generate: the module, not a second unit.
+router.post('/ai/history/:id/blueprint/approve', authMiddleware, requireModule('ai'), requireStaffPermission('ai.generate'), aiContentApproveBlueprint);
 // Reusable lecture-structure templates.
 router.get('/ai/blueprint-templates', authMiddleware, requireStaffPermission('exams.read'), aiListBlueprintTemplates);
 router.post('/ai/blueprint-templates', authMiddleware, requireStaffPermission('exams.create'), aiSaveBlueprintTemplate);

@@ -140,7 +140,7 @@ async function main() {
   configureDnsForSrv();
   process.env.MONGO_URI = uri;
   process.env.TENANT_MODE = 'claim';
-  process.env.TENANT_ENFORCEMENT = 'warn';
+  process.env.TENANT_ENFORCEMENT = process.env.E2E_TENANT_ENFORCEMENT || 'warn';
   process.env.ENABLE_CRON = 'false';
   process.env.PPT_WORKER_EMBEDDED = 'false';
   process.env.REDIS_ENABLED = 'false';
@@ -495,7 +495,7 @@ async function main() {
         );
       }
     }
-    process.env.TENANT_ENFORCEMENT = 'warn';
+    process.env.TENANT_ENFORCEMENT = process.env.E2E_TENANT_ENFORCEMENT || 'warn';
 
     /* ══ 4. Traceability ════════════════════════════════════════════════ */
     console.log('\ntraceability');

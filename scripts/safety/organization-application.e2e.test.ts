@@ -185,7 +185,7 @@ async function main() {
   configureDnsForSrv();
   process.env.MONGO_URI = uri;
   process.env.TENANT_MODE = 'claim';
-  process.env.TENANT_ENFORCEMENT = 'warn';
+  process.env.TENANT_ENFORCEMENT = process.env.E2E_TENANT_ENFORCEMENT || 'warn';
   process.env.ENABLE_CRON = 'false';
   process.env.PPT_WORKER_EMBEDDED = 'false';
   process.env.REDIS_ENABLED = 'false';
@@ -423,6 +423,23 @@ async function main() {
     await request(port, 'PATCH', `/api/public/organization-applications/${draftId}`, {
       draftToken, body: { application: { academic: APPLICATION.academic } },
     });
+
+    // The administrator's password became a submission requirement on
+    // 2026-10-14 (b216fc2), after this suite was written. Proven required here,
+    // then set the way the form sets it.
+    const noPassword = await request(port, 'POST', `/api/public/organization-applications/${draftId}/submit`, { draftToken });
+    check('without an administrator password it cannot be submitted',
+      noPassword.status === 400 && Boolean(noPassword.json?.fields?.['staff.password']), `got ${noPassword.status} ${noPassword.raw.slice(0, 200)}`);
+    const shortPassword = await request(port, 'PUT', `/api/public/organization-applications/${draftId}/admin-password`, {
+      draftToken, body: { password: 'short' },
+    });
+    check('a too-short administrator password is refused', shortPassword.status === 400, `got ${shortPassword.status}`);
+    const setPassword = await request(port, 'PUT', `/api/public/organization-applications/${draftId}/admin-password`, {
+      draftToken, body: { password: `Admin-${process.pid}-Pass!` },
+    });
+    check('the administrator password is set, and never echoed',
+      setPassword.status === 200 && setPassword.json?.draft?.adminPasswordSet === true && !setPassword.raw.includes(`Admin-${process.pid}-Pass!`),
+      `got ${setPassword.status} ${setPassword.raw.slice(0, 200)}`);
 
     const submitted = await request(port, 'POST', `/api/public/organization-applications/${draftId}/submit`, { draftToken });
     check('a complete application submits', submitted.status === 200, `got ${submitted.status} ${submitted.raw.slice(0, 250)}`);

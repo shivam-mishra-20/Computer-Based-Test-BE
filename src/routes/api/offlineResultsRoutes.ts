@@ -6,6 +6,10 @@ import OfflineResult from '../../models/OfflineResult';
 import TestResult from '../../models/TestResult';
 import User from '../../models/User';
 import {
+  buildStudentTestMatch,
+  entryForStudent,
+} from '../../services/writtenTests';
+import {
   createTest,
   getAllTests,
   getTestById,
@@ -18,66 +22,6 @@ import {
 
 const router = Router();
 
-// Build the assignment-aware $or that matches every TestResult a given student
-// should see. A test is visible when the student's CLASS matches AND, if the
-// test specifies a BATCH (its `batch` field or `assignedBatches`), the student's
-// batch matches too. Individually-assigned tests bypass class/batch. This also
-// covers legacy tests (no assignmentType) and tests created before the
-// assignment fields existed, which carry their scope on `class`/`batch`.
-function buildStudentTestMatch(user: { id?: string; classLevel?: string; batch?: string }): any[] {
-  const rawClass = String(user.classLevel || '').trim();
-  const classNum = rawClass.replace(/^Class\s*/i, '').trim();
-  const classVariants = [classNum, `Class ${classNum}`, rawClass].filter((v) => v && v !== 'Class');
-  const userBatch = (user.batch || '').trim();
-
-  // Class scope: the test's own `class` OR an explicit `assignedClasses` entry.
-  const classMatch = {
-    $or: [{ class: { $in: classVariants } }, { assignedClasses: { $in: classVariants } }],
-  };
-
-  // A test is NOT batch-restricted when it has no specific `batch` and no
-  // `assignedBatches` ("" / "all" / "All Batches" == whole class).
-  const noBatchRestriction = {
-    $and: [
-      {
-        $or: [
-          { batch: { $in: [null, ''] } },
-          { batch: { $exists: false } },
-          { batch: { $regex: /^all(\s*batches)?$/i } },
-        ],
-      },
-      {
-        $or: [{ assignedBatches: { $exists: false } }, { assignedBatches: { $size: 0 } }],
-      },
-    ],
-  };
-
-  const or: any[] = [];
-
-  // Individually-assigned tests are always visible to the named student.
-  if (user.id && mongoose.Types.ObjectId.isValid(user.id)) {
-    or.push({
-      assignmentType: 'students',
-      assignedStudents: new mongoose.Types.ObjectId(user.id),
-    });
-  }
-
-  // Whole-class tests: class matches and the test imposes no batch restriction.
-  or.push({ $and: [{ assignmentType: { $ne: 'students' } }, classMatch, noBatchRestriction] });
-
-  // Batch-restricted tests: class matches AND the student's batch is targeted.
-  if (userBatch) {
-    or.push({
-      $and: [
-        { assignmentType: { $ne: 'students' } },
-        classMatch,
-        { $or: [{ batch: userBatch }, { assignedBatches: userBatch }] },
-      ],
-    });
-  }
-
-  return or;
-}
 
 // New structured test routes
 //
@@ -139,9 +83,11 @@ router.get('/student', authMiddleware, async (req: Request, res: Response) => {
     // Extract this student's results from each test's studentResults array
     const studentResults = tests
       .map((test: any) => {
-        const studentResult = test.studentResults?.find(
-          (r: any) => r.studentId === authUser.id || r.studentName === userName
-        );
+        const studentResult: any = entryForStudent<any>(test.studentResults, {
+          id: authUser.id,
+          firebaseUid: user.firebaseUid,
+          name: userName,
+        });
         if (!studentResult) return null;
 
         return {
@@ -199,9 +145,11 @@ router.get('/student/upcoming', authMiddleware, async (req: Request, res: Respon
     const userId = String(authUser.id);
     const userName = user.name;
     const upcoming = tests.filter((t: any) => {
-      const mine = (t.studentResults || []).find(
-        (r: any) => r.studentId === userId || r.studentName === userName
-      );
+      const mine: any = entryForStudent<any>(t.studentResults, {
+        id: userId,
+        firebaseUid: user.firebaseUid,
+        name: userName,
+      });
       return !mine || (!(Number(mine.marksObtained) > 0) && !mine.isAbsent);
     });
 

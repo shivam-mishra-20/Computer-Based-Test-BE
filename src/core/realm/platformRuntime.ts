@@ -37,8 +37,10 @@ const state: RuntimeState = {
 };
 
 /** Where /platform-api/* goes right now. `port: null` means starting or restarting. */
-export function platformRuntimeTarget(): { configured: boolean; port: number | null; gatewayKey: string } {
-  return { configured: state.configured, port: state.port, gatewayKey: state.gatewayKey };
+export function platformRuntimeTarget(): { configured: boolean; port: number | null; gatewayKey: string; restarts: number } {
+  // `restarts` counts CONSECUTIVE restarts — it returns to 0 once the runtime
+  // is serving again — so a non-zero value on a monitor means a crash loop.
+  return { configured: state.configured, port: state.port, gatewayKey: state.gatewayKey, restarts: state.restarts };
 }
 
 /**

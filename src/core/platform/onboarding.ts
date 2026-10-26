@@ -27,6 +27,7 @@ import { runWithTenant, withoutTenantScope } from '../tenancy/context';
 import { setAppExperience } from './appExperience';
 import {
   createOrganization,
+  getSubscription,
   setOrganizationConfig,
   setOrganizationPolicy,
   setSubscription,
@@ -58,7 +59,10 @@ export interface OnboardingInput {
     addOns?: string[];
     removals?: string[];
     overrides?: { modules?: string[]; limits?: Record<string, number> };
+    /** `trialing` (default) starts a dated trial; `active` activates. */
     status?: string;
+    /** Trial length; defaults to the plan's, then 14 days. */
+    trialDays?: number;
   };
   customRoles?: { key: string; name: string; description?: string; permissions: string[] }[];
   /**
@@ -98,7 +102,11 @@ export interface OnboardingResult {
   complete: boolean;
 }
 
-export async function onboardOrganization(input: OnboardingInput): Promise<OnboardingResult> {
+export async function onboardOrganization(
+  input: OnboardingInput,
+  options: { actor?: { kind: 'platform' | 'system' | 'tenant'; id?: string; email?: string; role?: string } } = {},
+): Promise<OnboardingResult> {
+  const actor = options.actor ?? { kind: 'system' as const };
   const steps: OnboardingStep[] = [];
   const roleIds: Record<string, string> = {};
   let adminUserId: string | undefined;
@@ -221,27 +229,44 @@ export async function onboardOrganization(input: OnboardingInput): Promise<Onboa
   }
 
   // ── 7. Subscription and entitlements ─────────────────────────────────────
+  // A separate step from creating the organization, and safe to re-run.
+  //   first run  starts the subscription through the lifecycle — a dated trial
+  //              by default — on the chosen plan, then applies add-ons;
+  //   re-run     the subscription already exists, so only its modules are
+  //              brought in line. The clock is never restarted by a retry, and
+  //              the unique orgId index means a retry cannot create a second one.
+  // If this step fails, the organization is left with core modules only (it was
+  // created `subscriptionRequired`), never with everything — and re-running
+  // the same request completes it.
   if (input.subscription) {
     try {
-      let planId: string | null = null;
-      if (input.subscription.planKey) {
-        const plan = await withoutTenantScope('onboard:find-plan', async () => {
-          // eslint-disable-next-line @typescript-eslint/no-var-requires
-          const Plan = require('../../models/Plan').default;
-          return Plan.findOne({ key: input.subscription!.planKey!.toLowerCase() }).lean();
-        });
-        if (!plan) throw new Error(`Plan "${input.subscription.planKey}" not found`);
-        planId = String((plan as { _id: unknown })._id);
-      }
-
-      const entitlement = await setSubscription(orgId, {
-        planId,
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { transition } = require('../subscriptions/service');
+      const planKey = input.subscription.planKey ? input.subscription.planKey.toLowerCase() : undefined;
+      const existing = (await getSubscription(orgId)) as { status: string } | null;
+      const shape = {
         addOns: input.subscription.addOns,
         removals: input.subscription.removals,
         overrides: input.subscription.overrides,
-        status: input.subscription.status ?? 'trialing',
-      });
-      record('subscription', true, `${entitlement.modules.length} modules enabled`);
+      };
+
+      if (existing) {
+        const entitlement = await setSubscription(orgId, { ...shape, ...(planKey ? { planKey } : {}) } as never, actor);
+        record('subscription', true, `already existed (${existing.status}) — ${entitlement.modules.length} modules enabled`);
+      } else {
+        const status = input.subscription.status ?? 'trialing';
+        if (status !== 'trialing' && status !== 'active') {
+          throw new Error(`A new subscription starts as trialing or active, not "${status}".`);
+        }
+        await transition(orgId, status === 'trialing' ? 'start_trial' : 'activate', {
+          actor,
+          reason: 'Organization onboarding',
+          planKey,
+          days: input.subscription.trialDays,
+        });
+        const entitlement = await setSubscription(orgId, shape, actor);
+        record('subscription', true, `${status === 'trialing' ? 'trial started' : 'activated'} — ${entitlement.modules.length} modules enabled`);
+      }
     } catch (error) {
       record('subscription', false, (error as Error).message);
     }

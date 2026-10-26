@@ -88,9 +88,11 @@ export const PLATFORM_DEFAULTS: Omit<ResolvedPolicy, 'configured'> = {
     requiresApproval: true,
   },
   batch: {
-    // Abhigyan's existing rule, now expressed as data rather than as three
-    // predicate functions naming two specific batch labels.
-    mergeRules: [{ merge: ['Advanced', 'Basic'], into: 'Advanced/Basic' }],
+    // None. Each organization owns its batches and manages them itself; the
+    // platform never merges, renames or deletes them on its own. Abhigyan's
+    // historical Advanced+Basic rule belongs to the existing system only
+    // (LEGACY_BATCH_MERGE_RULES in services/batchConfigService).
+    mergeRules: [],
   },
   locale: {
     timezone: 'Asia/Kolkata',

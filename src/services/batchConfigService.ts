@@ -1,41 +1,35 @@
 /**
  * Class levels and their batches, per organization.
  *
- * ── What changed, and why it had to ─────────────────────────────────────────
- * This service used to be Abhigyan expressed as code: classes 7–12 in a
- * constant, `Batch.find({})` across the whole collection, and a merge step that
- * hunted for batches literally named "Advanced" and "Basic" and DELETED them.
+ * ── Each organization owns its batches ──────────────────────────────────────
+ * Batches are optional and organization-specific. An organization creates,
+ * renames and deletes its own through the batch routes; until it creates any,
+ * every picker simply has none and a student needs no batch. The platform
+ * never creates, merges, renames or deletes an organization's batches on its
+ * own.
  *
- * In a shared database that last part is not merely wrong, it is destructive.
- * The tenancy plugin filters reads only under `enforce`; under `warn` — which is
- * where production sits during the migration — a regex find over `Batch` sees
- * every organization's batches. One Abhigyan admin opening a user form would
- * have merged and then deleted another institute's batches, and rewritten their
- * students' `batch` field to "Advanced/Basic".
+ * ── The one exception: the existing system's own merge ─────────────────────
+ * The existing system (`/api/*`, Abhigyan Gurukul's database) has always folded
+ * its "Advanced" and "Basic" batches into "Advanced/Basic" when batches are
+ * read. That stays exactly as it was — but ONLY there (`serviceRealm()` is
+ * 'existing', a process connected to no other organization's data). The
+ * platform runtime never runs it: not by default, not from a stored policy.
  *
- * So all three inputs now come from configuration:
+ * It used to be a platform default (PLATFORM_DEFAULTS.batch.mergeRules), so
+ * every organization got Abhigyan's rule applied to its own batches whenever
+ * they were read — and, with no organization in context, to everyone's at once.
  *
- *   classes      getOrgConfiguration() — the org's ClassLevel rows, falling
- *                back to the legacy 7–12 when it has none.
- *   batches      the org's own Batch documents, explicitly scoped by orgId.
- *   merge rules  getOrgPolicy().batch.mergeRules — data, not two hardcoded
- *                labels and three predicate functions.
- *
- * ── Abhigyan is unchanged ───────────────────────────────────────────────────
- * Its configuration resolves to classes 7–12, its own twelve batches, and the
- * default merge rule Advanced+Basic -> Advanced/Basic that PLATFORM_DEFAULTS
- * transcribes from the constant this file used to hold. Same response, same
- * merge, same order.
- *
- * A tenant that legitimately wants separate Advanced and Basic batches clears
- * `batch.mergeRules` in its policy. That it is possible to clear at all is the
- * point of moving it into data.
+ * Inputs:
+ *   classes   getOrgConfiguration() — the org's ClassLevel rows, falling back to
+ *             the legacy 7–12 when it has none.
+ *   batches   the org's own Batch documents, scoped by orgId.
  */
 
 import Batch from '../models/Batch';
 import User from '../models/User';
 import Schedule from '../models/Schedule';
 import { currentOrgId } from '../core/tenancy/context';
+import { serviceRealm } from '../core/realm/realm';
 import {
   getOrgConfiguration,
   resolveClassKey,
@@ -77,15 +71,25 @@ function byClassOrder(levels: ResolvedClassLevel[]) {
 }
 
 /**
- * Apply the organization's batch merge rules.
- *
- * Every query here is scoped to the current organization. Without that scope
- * this function is a cross-tenant delete.
+ * The existing system's historical rule: its "Advanced" and "Basic" batches
+ * are one batch, "Advanced/Basic". Applied in the existing system only.
+ */
+export const LEGACY_BATCH_MERGE_RULES: ReadonlyArray<{ merge: string[]; into: string }> = [
+  { merge: ['Advanced', 'Basic'], into: 'Advanced/Basic' },
+];
+
+/**
+ * The existing system's batch merge (see the header). A no-op everywhere else:
+ * on the platform runtime it returns before reading or writing anything.
  */
 export async function mergeAdvancedBasicBatchValues(): Promise<void> {
+  if (serviceRealm() !== 'existing') return;
+
   const [policy, configuration] = await Promise.all([getOrgPolicy(), getOrgConfiguration()]);
-  const rules = policy.batch?.mergeRules ?? [];
-  if (!rules.length) return;
+  // A rule stored in the existing system's own policy still wins, exactly as
+  // before; otherwise its historical rule (formerly the platform default).
+  const stored = policy.batch?.mergeRules ?? [];
+  const rules = stored.length ? stored : LEGACY_BATCH_MERGE_RULES;
 
   const scope = orgScope();
 

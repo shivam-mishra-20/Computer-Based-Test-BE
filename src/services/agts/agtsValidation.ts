@@ -13,7 +13,15 @@
  * Nothing here trusts the browser for anything that decides an outcome.
  */
 
-import { CONTACT_CHANNELS, LEAD_STATUSES, type ContactChannel, type LeadStatus, type Touch } from '../../models/Lead';
+import {
+  CONTACT_CHANNELS,
+  LEAD_CHANNELS,
+  LEAD_STATUSES,
+  type ContactChannel,
+  type LeadChannel,
+  type LeadStatus,
+  type Touch,
+} from '../../models/Lead';
 
 export const AGTS_CLASS_LEVELS = [7, 8, 9, 10, 11, 12] as const;
 export const AGTS_BOARDS = ['CBSE', 'GSEB', 'ICSE', 'State Board', 'Other'] as const;
@@ -303,6 +311,17 @@ export interface LeadListQuery {
   to?: Date;
   followUp?: 'due' | 'upcoming' | 'none';
   guidance?: boolean;
+  /**
+   * Which channel's leads. Left out, the list is AGTS leads only — what the
+   * /api/agts desk has always shown. The admissions desk asks for 'all'.
+   */
+  channel?: LeadChannel | 'all';
+  /** The admission session ("2027-28") and the class/stream asked for in it. */
+  session?: string;
+  admissionClass?: number;
+  stream?: string;
+  /** 'none' = unassigned; otherwise a user id (the route resolves 'me'). */
+  owner?: string;
   page: number;
   limit: number;
   sort: 'recent' | 'score' | 'followup' | 'created';
@@ -314,6 +333,16 @@ export function parseLeadListQuery(query: Record<string, unknown>): LeadListQuer
   if (status && (LEAD_STATUSES as readonly string[]).includes(status)) out.status = status as LeadStatus;
   const classLevel = Number(query.classLevel);
   if (AGTS_CLASS_LEVELS.includes(classLevel as (typeof AGTS_CLASS_LEVELS)[number])) out.classLevel = classLevel;
+  const channel = cleanText(query.channel, 20).toLowerCase();
+  if (channel === 'all' || (LEAD_CHANNELS as readonly string[]).includes(channel)) out.channel = channel as LeadChannel | 'all';
+  const session = cleanText(query.session, 10);
+  if (/^\d{4}-\d{2}$/.test(session)) out.session = session;
+  const admissionClass = Number(query.admissionClass);
+  if (AGTS_CLASS_LEVELS.includes(admissionClass as (typeof AGTS_CLASS_LEVELS)[number])) out.admissionClass = admissionClass;
+  const stream = cleanText(query.stream, 20);
+  if (stream === 'Science' || stream === 'Commerce') out.stream = stream;
+  const owner = cleanText(query.owner, 30);
+  if (owner === 'none' || owner === 'me' || /^[a-f0-9]{24}$/i.test(owner)) out.owner = owner;
   const search = cleanText(query.search, 60);
   if (search) out.search = search;
   for (const key of ['from', 'to'] as const) {

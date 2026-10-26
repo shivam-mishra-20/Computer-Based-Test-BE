@@ -34,6 +34,7 @@ import { Types } from 'mongoose';
 import { ImportBatch } from '../models/ImportedQuestion';
 import { clearPreview, getPreview, newPreviewId, previewTtlMs, setPreview, type PreviewQuestion } from './importPreview';
 import { withoutTenantScope } from '../core/tenancy/context';
+import { refundForSubject } from '../core/subscriptions/usage';
 import {
   EmptySourceError,
   OcrUnavailableError,
@@ -150,7 +151,7 @@ async function updateRunning(jobId: string, set: Record<string, unknown>): Promi
 
 async function failJob(jobId: string, code: string, message: string, detail?: string): Promise<void> {
   try {
-    await ImportBatch.updateOne(
+    const result = await ImportBatch.updateOne(
       { _id: jobId, status: 'processing' },
       {
         $set: {
@@ -163,6 +164,8 @@ async function failJob(jobId: string, code: string, message: string, detail?: st
         $push: { processingErrors: { error: detail || message, timestamp: new Date() } },
       },
     );
+    // A generation that produced nothing is not counted against the plan.
+    if (result.modifiedCount === 1) await refundForSubject('ImportBatch', jobId, `job failed: ${code}`);
   } catch (error) {
     console.error(`[AI Job ${jobId}] could not record the failure:`, (error as Error).message);
   }
@@ -340,10 +343,11 @@ export async function getGenerationJob(jobId: string, userId: string): Promise<G
   const beatAge = Date.now() - new Date(job.heartbeatAt || job.createdAt).getTime();
   if (job.status === 'processing' && !live.has(jobId) && beatAge > staleMs()) {
     // Nothing has run it for a while: the process that held it is gone.
-    await ImportBatch.updateOne(
+    const interrupted = await ImportBatch.updateOne(
       { ...filter, status: 'processing', heartbeatAt: job.heartbeatAt },
       { $set: interruptedFields() },
     );
+    if (interrupted.modifiedCount === 1) await refundForSubject('ImportBatch', jobId, 'job interrupted');
     job = (await ImportBatch.findOne(filter).lean()) || job;
   }
 
@@ -427,6 +431,7 @@ export async function sweepGenerationJobs(now = Date.now()): Promise<{ interrupt
         { _id: job._id, status: 'processing', heartbeatAt: job.heartbeatAt },
         { $set: interruptedFields() },
       );
+      if (result.modifiedCount === 1) await refundForSubject('ImportBatch', job._id, 'job interrupted');
       interrupted += result.modifiedCount;
     }
 

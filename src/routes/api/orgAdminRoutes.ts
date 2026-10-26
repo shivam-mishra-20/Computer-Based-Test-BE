@@ -16,7 +16,9 @@
  * organization data and no second way to change it.
  *
  * ── What an institute cannot change here ────────────────────────────────────
- * Its plan and modules (read-only), its app's native identity (package name,
+ * Its modules and limits directly (a plan changes only through a trial, a
+ * switch during the trial, or a PAID order — see core/billing/selfServe), its
+ * app's native identity (package name,
  * icons, builds) and custom roles, which remain platform operations. Changes
  * that only reach an INSTALLED app through a new build say so in the response
  * (`effects`), so nobody is told a setting "applies" when the binary on a
@@ -38,12 +40,30 @@ import User from '../../models/User';
 import AuditLog from '../../models/AuditLog';
 import PlatformAudit from '../../models/PlatformAudit';
 import AppBuildJob from '../../models/AppBuildJob';
+import GuardianLink from '../../models/GuardianLink';
+import Exam from '../../models/Exam';
 import { getEntitlement } from '../../core/entitlements/resolve';
 import { MODULES } from '../../core/entitlements/moduleRegistry';
 import { getOrgConfiguration } from '../../core/config/orgConfig';
 import { getOrgPolicy } from '../../core/config/policy';
+import { tenantSubscriptionView } from '../../core/subscriptions/service';
+import { BillingError, getOrgBilling, getOrgInvoice, listOrgInvoices, updateOrgBilling } from '../../core/billing/invoices';
+import { createSubscriptionRequest, listOrgRequests } from '../../core/billing/requests';
 import {
-  getSubscription,
+  cancelSubscription,
+  placeOrder,
+  resumeSubscription,
+  selfServeState,
+  startSelfServeTrial,
+  switchTrialPlan,
+  withdrawOrder,
+} from '../../core/billing/selfServe';
+import type { Actor } from '../../core/subscriptions/service';
+import { sendInvoiceDocument } from '../../core/billing/document';
+import { GST_STATE_CODES } from '../../core/billing/gst';
+import { auditRefusal, seatOf, sendUsageError, usageSummary, withCapacity, type SeatResource } from '../../core/subscriptions/usage';
+import { LIMIT_KEYS, listPublicPlans } from '../../core/subscriptions/catalogue';
+import {
   setOrganizationConfig,
   setOrganizationPolicy,
   updateOrganization,
@@ -108,6 +128,7 @@ const urlOf = (value: unknown) => {
 };
 
 function fail(res: Response, err: unknown) {
+  if (err instanceof BillingError) return res.status(err.status).json({ message: err.message, code: err.code, ...err.details });
   const status = (err as { status?: number })?.status;
   if (status && status >= 400 && status < 500) return res.status(status).json({ message: (err as Error).message });
   if (err instanceof DesignRequestError) {
@@ -127,13 +148,59 @@ router.get('/overview', read, async (_req, res) => {
   if (!orgId) return;
   const org = await loadOrg(orgId);
   if (!org) return res.status(404).json({ message: 'Organization not found.' });
-  const [users, pendingRegistrations] = await Promise.all([
-    User.countDocuments({ ...requireTenantScope('org-admin:overview') }),
-    User.countDocuments({ ...requireTenantScope('org-admin:overview'), status: 'pending', role: { $ne: 'parent' } }),
-  ]);
+  const scope = requireTenantScope('org-admin:overview');
+  // Each extra count is best-effort: a dashboard tile showing "—" is better
+  // than an overview that fails because one collection could not be counted.
+  const soft = <T,>(p: Promise<T>) => p.catch(() => null);
+  const approved = (role: string) => soft(User.countDocuments({ ...scope, role, status: 'approved' }));
+  const [users, pendingRegistrations, students, teachers, admins, parents, pendingParentLinks, exams, configuration, lastBuild] =
+    await Promise.all([
+      User.countDocuments({ ...scope }),
+      User.countDocuments({ ...scope, status: 'pending', role: { $ne: 'parent' } }),
+      approved('student'),
+      approved('teacher'),
+      approved('admin'),
+      approved('parent'),
+      soft(GuardianLink.countDocuments({ ...scope, status: 'pending' })),
+      soft(Exam.countDocuments({ ...scope })),
+      soft(getOrgConfiguration(orgId)),
+      soft(
+        withoutTenantScope('org-admin:overview-build', async () =>
+          AppBuildJob.findOne({ orgId: new mongoose.Types.ObjectId(orgId), status: 'completed' })
+            .sort({ completedAt: -1 })
+            .select('completedAt buildNumber')
+            .lean(),
+        ) as Promise<{ completedAt?: Date; buildNumber?: number } | null>,
+      ),
+    ]);
+  const profile = (org.profile ?? {}) as Record<string, string>;
+  const brand = (org.branding ?? {}) as Record<string, string>;
   return res.json({
     organization: { id: String(org._id), name: org.name, slug: org.slug, status: org.status, createdAt: org.createdAt },
-    counts: { users, pendingRegistrations },
+    counts: { users, pendingRegistrations, students, teachers, admins, parents, pendingParentLinks, exams },
+    // What the dashboard's setup checklist reads. Facts, not judgements: the
+    // screen decides what to suggest.
+    setup: {
+      profile: {
+        filled: PROFILE_FIELDS.filter(([key]) => String(profile[key] ?? '').trim()).length,
+        total: PROFILE_FIELDS.length,
+      },
+      branding: {
+        logo: Boolean(brand.logoUrl),
+        colors: Boolean(brand.primaryColor),
+        appName: Boolean(brand.appName),
+      },
+      academic: configuration
+        ? {
+            customized: !configuration.usingDefaults?.classLevels || !configuration.usingDefaults?.subjects,
+            classLevels: configuration.classLevels?.length ?? 0,
+            subjects: configuration.subjects?.length ?? 0,
+            rooms: configuration.rooms?.length ?? 0,
+          }
+        : null,
+      registrationPolicy: org.appExperience?.registrationPolicy ?? 'invite',
+      lastAppBuild: lastBuild ? { number: lastBuild.buildNumber ?? null, at: lastBuild.completedAt ?? null } : null,
+    },
   });
 });
 
@@ -415,8 +482,7 @@ router.put('/policy', settings, async (req: Req, res) => {
 router.get('/plan', read, async (_req, res) => {
   const orgId = orgOf(res);
   if (!orgId) return;
-  const [entitlement, subscription] = await Promise.all([getEntitlement(orgId), getSubscription(orgId)]);
-  const sub = subscription as Record<string, any> | null;
+  const [entitlement, billing] = await Promise.all([getEntitlement(orgId), tenantSubscriptionView(orgId)]);
   const enabled = new Set(entitlement.modules);
   return res.json({
     status: entitlement.status,
@@ -429,18 +495,237 @@ router.get('/plan', read, async (_req, res) => {
       description: m.description,
       enabled: enabled.has(m.key),
     })),
-    subscription: sub
+    // These fields used to read `planKey` and `currentPeriodEnd`, which a
+    // Subscription has never had — so the plan always showed as "—".
+    subscription: billing.status
       ? {
-          plan: sub.planKey ?? sub.planName ?? null,
-          status: sub.status ?? null,
-          currentPeriodEnd: sub.currentPeriodEnd ?? null,
-          trialEndsAt: sub.trialEndsAt ?? null,
+          plan: billing.plan?.name ?? billing.plan?.key ?? null,
+          status: billing.status,
+          currentPeriodEnd: billing.periodEnd,
+          trialEndsAt: billing.trialEndsAt,
         }
       : null,
-    // Usage metering is not recorded yet; said plainly rather than shown as zero.
-    usage: { tracked: false },
+    // The full view: plan and version, dates, grace end, payment history.
+    billing,
+    limitKeys: LIMIT_KEYS,
+    limitsEnforced: Boolean(entitlement.limitsEnforced),
+    // Usage against each limit. A resource with no meter (storage, exams per
+    // month) reports `used: null` — said plainly rather than shown as zero.
+    usage: { tracked: true, resources: await usageSummary(orgId, entitlement) },
     managedBy: 'platform',
   });
+});
+
+/**
+ * The plans this organization could move to — the public catalogue, marked
+ * with the one it is on. Choosing one is a trial, a switch during a trial, or
+ * an order (POST /subscription/*): a paid order is what changes the plan.
+ */
+router.get('/plans', read, async (_req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    const [plans, view] = await Promise.all([listPublicPlans(), tenantSubscriptionView(orgId)]);
+    const current = view.plan?.key ?? null;
+    return res.json({
+      plans: plans.map((p) => ({ ...p, current: p.key === current })),
+      current: view.plan ?? null,
+      limitKeys: LIMIT_KEYS,
+    });
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+/* ══ Billing: details, invoices, requests ═════════════════════════════════ */
+// The organization's own billing — read its invoices, keep its billing details
+// current, ask for a renewal or a plan change. These paths stay open while the
+// subscription is read-only (RESTRICTED_WRITE_ALLOWED), because renewing is how
+// an organization gets out of that state. Nothing here changes the plan,
+// records a payment or marks an invoice paid: requests go to platform staff.
+
+router.get('/billing/details', read, async (_req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    return res.json({ billing: await getOrgBilling(orgId), stateCodes: GST_STATE_CODES });
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+router.put('/billing/details', settings, async (req: Req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    const billing = await updateOrgBilling(orgId, req.body ?? {});
+    await logAudit(req.user?.id, 'org.billing.update', orgId, { fields: Object.keys(req.body ?? {}) });
+    return res.json({ billing });
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+router.get('/billing/invoices', read, async (_req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    return res.json({ invoices: await listOrgInvoices(orgId) });
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+router.get('/billing/invoices/:id', read, async (req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    return res.json({ invoice: await getOrgInvoice(orgId, req.params.id) });
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+router.get('/billing/invoices/:id/document', read, async (req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    return await sendInvoiceDocument(res, await getOrgInvoice(orgId, req.params.id), String(req.query.format ?? 'html'));
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+router.get('/subscription/requests', read, async (_req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    return res.json({ requests: await listOrgRequests(orgId) });
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+/** Ask for a renewal, an upgrade, a downgrade or a cancellation. Body: { kind, planKey?, billingInterval?, message? } */
+router.post('/subscription/requests', settings, async (req: Req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    const me = await withoutTenantScope('org-admin:requester', async () =>
+      User.findById(req.user?.id).select('name email').lean(),
+    ) as { name?: string; email?: string } | null;
+    const result = await createSubscriptionRequest(orgId, req.body ?? {}, { id: req.user?.id, name: me?.name, email: me?.email });
+    if (!result.duplicate) {
+      await logAudit(req.user?.id, 'org.subscription.request', orgId, { kind: result.request?.kind, planKey: result.request?.planKey });
+    }
+    return res.status(result.duplicate ? 200 : 201).json(result);
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+/* ══ Self-serve subscription: trial, plan, orders, cancellation ═══════════ */
+// The institute's own choices (core/billing/selfServe). What moves no money
+// happens at once; buying is an order — an invoice — and the plan changes only
+// when it is paid. All under /subscription, so they stay open while read-only:
+// renewing is how an institute gets out of that state.
+
+async function tenantActor(req: Req): Promise<Actor> {
+  const me = (await withoutTenantScope('org-admin:actor', async () =>
+    User.findById(req.user?.id).select('email').lean(),
+  )) as { email?: string } | null;
+  return { kind: 'tenant', id: req.user?.id, email: me?.email, role: req.user?.role };
+}
+
+router.get('/subscription', read, async (_req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    return res.json(await selfServeState(orgId));
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+/** Body: { planKey } — a free trial, once, with no subscription. */
+router.post('/subscription/trial', settings, async (req: Req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    const result = await startSelfServeTrial(orgId, req.body ?? {}, await tenantActor(req));
+    await logAudit(req.user?.id, 'org.subscription.trial', orgId, { planKey: req.body?.planKey });
+    return res.status(201).json(result);
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+/** Body: { planKey } — switch plan during a trial; nothing is charged. */
+router.post('/subscription/switch-plan', settings, async (req: Req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    const result = await switchTrialPlan(orgId, req.body ?? {}, await tenantActor(req));
+    await logAudit(req.user?.id, 'org.subscription.switch-plan', orgId, { planKey: req.body?.planKey });
+    return res.json(result);
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+/** Body: { planKey, billingInterval } — buy, renew, upgrade or downgrade: an invoice, applied when paid. */
+router.post('/subscription/orders', settings, async (req: Req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    const result = await placeOrder(orgId, req.body ?? {}, await tenantActor(req));
+    await logAudit(req.user?.id, 'org.subscription.order', orgId, {
+      planKey: req.body?.planKey,
+      billingInterval: req.body?.billingInterval,
+      kind: result.kind,
+    });
+    return res.status(201).json(result);
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+router.post('/subscription/orders/:id/withdraw', settings, async (req: Req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    const result = await withdrawOrder(orgId, String(req.params.id), await tenantActor(req));
+    if (result.withdrawn) await logAudit(req.user?.id, 'org.subscription.order-withdrawn', orgId, { invoiceId: req.params.id });
+    return res.json(result);
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+/** Body: { reason? } — stop at the end of the trial or paid period (now, if overdue). */
+router.post('/subscription/cancel', settings, async (req: Req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    const result = await cancelSubscription(orgId, req.body ?? {}, await tenantActor(req));
+    await logAudit(req.user?.id, 'org.subscription.cancel', orgId, { when: result.when });
+    return res.json(result);
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+/** Withdraw a cancellation scheduled for period end. */
+router.post('/subscription/resume', settings, async (req: Req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    const result = await resumeSubscription(orgId, await tenantActor(req));
+    if (result.changed) await logAudit(req.user?.id, 'org.subscription.resume', orgId, {});
+    return res.json(result);
+  } catch (err) {
+    return fail(res, err);
+  }
 });
 
 /* ══ Audit ════════════════════════════════════════════════════════════════ */
@@ -528,16 +813,23 @@ router.post(
         classLevel = resolved.classLevel;
         batch = resolved.batch;
       }
-      const user = await User.create({
-        name,
-        email,
-        password: unusablePassword(),
-        role,
-        status: 'approved',
-        empCode,
-        classLevel,
-        batch,
-        registrationSource: 'admin',
+      // An invited account is approved and holds its seat from now: counted
+      // and created as one step, inside the plan's limit.
+      const user = await withCapacity({
+        orgId,
+        resource: seatOf({ role, status: 'approved' }) as SeatResource,
+        run: () =>
+          User.create({
+            name,
+            email,
+            password: unusablePassword(),
+            role,
+            status: 'approved',
+            empCode,
+            classLevel,
+            batch,
+            registrationSource: 'admin',
+          }),
       });
       const invite = await issueInvite(user._id, String(req.user?.id ?? ''));
       await logAudit(req.user?.id, 'org.user.invite', String(user._id), { role, email });
@@ -546,6 +838,10 @@ router.post(
         invite: { link: invite.link, token: invite.token, expiresAt: invite.expiresAt, delivery: invite.delivery },
       });
     } catch (err) {
+      if (sendUsageError(res, err)) {
+        await auditRefusal(currentTenantOrgId(), req.user?.id, err);
+        return undefined;
+      }
       const message = (err as Error)?.message || '';
       if (/class|batch/i.test(message)) return res.status(400).json({ message });
       return fail(res, err);

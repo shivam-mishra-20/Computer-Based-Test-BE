@@ -52,6 +52,7 @@ import {
   type BrandRole,
 } from '../platform/mobileBuildRules';
 import { withoutTenantScope } from '../tenancy/context';
+import { withCapacity } from '../subscriptions/usage';
 import GuardianLink from '../../models/GuardianLink';
 import { findWardByCredentials, requestLink } from '../guardians/guardians';
 import {
@@ -500,7 +501,7 @@ export async function registerPublicly(
   //    escalation with a sign-up button on it.
   //    A parent always waits too: until an administrator verifies the link,
   //    a parent has nothing they are entitled to see.
-  const status: 'pending' | 'approved' =
+  const requestedStatus: 'pending' | 'approved' =
     role === 'teacher' || role === 'parent' || brand.registrationPolicy !== 'open'
       ? 'pending'
       : 'approved';
@@ -509,83 +510,101 @@ export async function registerPublicly(
   const userId = new mongoose.Types.ObjectId();
   const registrationId = new mongoose.Types.ObjectId();
 
-  const accountDoc = {
-    _id: userId,
-    // Explicit, not stamped from context: this runs outside the tenant scope,
-    // and the organization is the one resolved above — the same record the
-    // policy and the store came from.
-    orgId,
-    name: details.name,
-    email: details.email,
-    password: details.password,
-    phone: details.phone,
-    role,
-    status,
-    registrationSource: input.source,
-    registrationId,
-  };
-  const recordDoc = {
-    _id: registrationId,
-    orgId,
-    applicationId,
-    role,
-    name: details.name,
-    email: details.email,
-    phone: details.phone,
-    status,
-    policy,
-    userId,
-    source: input.source,
-    requestedAt: new Date(),
-    requestFingerprint: requestFingerprint(input.ip),
-  };
+  // 10. An approved student takes a seat. At the plan's student limit the
+  //     account is created PENDING instead — the person's details are kept,
+  //     the institute decides (and its approval is limit-checked), and an
+  //     anonymous caller learns nothing about the organization's numbers.
+  //     Counting and writing happen as one step (core/subscriptions/usage).
+  const writeAccount = async (status: 'pending' | 'approved'): Promise<'pending' | 'approved'> => {
+    const accountDoc = {
+      _id: userId,
+      // Explicit, not stamped from context: this runs outside the tenant scope,
+      // and the organization is the one resolved above — the same record the
+      // policy and the store came from.
+      orgId,
+      name: details.name,
+      email: details.email,
+      password: details.password,
+      phone: details.phone,
+      role,
+      status,
+      registrationSource: input.source,
+      registrationId,
+    };
+    const recordDoc = {
+      _id: registrationId,
+      orgId,
+      applicationId,
+      role,
+      name: details.name,
+      email: details.email,
+      phone: details.phone,
+      status,
+      policy,
+      userId,
+      source: input.source,
+      requestedAt: new Date(),
+      requestFingerprint: requestFingerprint(input.ip),
+    };
 
-  const writeBoth = async (session?: mongoose.ClientSession) =>
-    withoutTenantScope('registration:write', async () => {
-      await User.create([accountDoc], session ? { session } : {});
-      await Registration.create([recordDoc], session ? { session } : {});
-      // In the same transaction: a parent account never exists without the
-      // pending relationship that explains it.
-      if (wardId) await requestLink({ orgId, parentId: userId, studentId: wardId }, session);
-    });
+    const writeBoth = async (session?: mongoose.ClientSession) =>
+      withoutTenantScope('registration:write', async () => {
+        await User.create([accountDoc], session ? { session } : {});
+        await Registration.create([recordDoc], session ? { session } : {});
+        // In the same transaction: a parent account never exists without the
+        // pending relationship that explains it.
+        if (wardId) await requestLink({ orgId, parentId: userId, studentId: wardId }, session);
+      });
 
-  try {
-    const session = await mongoose.startSession();
     try {
-      await session.withTransaction(() => writeBoth(session));
-    } catch (err) {
-      if (!transactionsUnsupported(err)) throw err;
-      // A standalone server (a developer's local mongod) has no transactions.
-      // Same writes, with the account removed if its record cannot be written.
+      const session = await mongoose.startSession();
       try {
-        await writeBoth();
-      } catch (inner) {
-        await withoutTenantScope('registration:compensate', async () =>
-          Promise.all([
-            User.deleteOne({ _id: userId, orgId }),
-            Registration.deleteOne({ _id: registrationId }),
-            GuardianLink.deleteOne({ orgId, parentId: userId }),
-          ]),
-        ).catch(() => undefined);
-        throw inner;
+        await session.withTransaction(() => writeBoth(session));
+      } catch (err) {
+        if (!transactionsUnsupported(err)) throw err;
+        // A standalone server (a developer's local mongod) has no transactions.
+        // Same writes, with the account removed if its record cannot be written.
+        try {
+          await writeBoth();
+        } catch (inner) {
+          await withoutTenantScope('registration:compensate', async () =>
+            Promise.all([
+              User.deleteOne({ _id: userId, orgId }),
+              Registration.deleteOne({ _id: registrationId }),
+              GuardianLink.deleteOne({ orgId, parentId: userId }),
+            ]),
+          ).catch(() => undefined);
+          throw inner;
+        }
+      } finally {
+        await session.endSession();
       }
-    } finally {
-      await session.endSession();
+    } catch (err) {
+      if (isDuplicateKey(err)) {
+        // A race with a concurrent registration, or the platform-wide email
+        // index that predates tenant-local uniqueness. Same answer either way,
+        // and deliberately the same words as the check above.
+        throw new RegistrationRefused(
+          'ALREADY_REGISTERED',
+          409,
+          'An account with this email already exists here. Try signing in instead.',
+          { email: 'An account with this email already exists here.' },
+        );
+      }
+      throw err;
     }
-  } catch (err) {
-    if (isDuplicateKey(err)) {
-      // A race with a concurrent registration, or the platform-wide email
-      // index that predates tenant-local uniqueness. Same answer either way,
-      // and deliberately the same words as the check above.
-      throw new RegistrationRefused(
-        'ALREADY_REGISTERED',
-        409,
-        'An account with this email already exists here. Try signing in instead.',
-        { email: 'An account with this email already exists here.' },
-      );
-    }
-    throw err;
-  }
+    return status;
+  };
+
+  const status =
+    requestedStatus === 'approved' && role === 'student'
+      ? await withCapacity({
+          orgId,
+          resource: 'students',
+          run: () => writeAccount('approved'),
+          onFull: () => writeAccount('pending'),
+        })
+      : await writeAccount(requestedStatus);
 
   return {
     status,

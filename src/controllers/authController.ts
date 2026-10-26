@@ -7,6 +7,8 @@ import { normalizeClassValue, toClassLabel } from '../config/studentBatchConfig'
 import { getStudentBatchConfigFromDatabase, matchBatchName } from '../services/batchConfigService';
 import { putPublicTenantAsset } from '../core/storage/storageService';
 import { signSessionToken, signSessionPair } from '../core/auth/tokens';
+import { serviceRealm } from '../core/realm/realm';
+import { CLIENT_UPDATE_REQUIRED, platformRequiresRefresh } from '../core/auth/platformSessionPolicy';
 import { currentOrgId, runWithTenant } from '../core/tenancy/context';
 import { logAudit } from '../utils/logger';
 import {
@@ -244,7 +246,8 @@ async function registerWithin(req: Request, res: Response, orgId: string | null)
     };
     // A client that can refresh asks for a refreshable session, exactly as at
     // login: a 15-minute access token and a refresh token. One that does not
-    // ask gets the token it always got.
+    // ask gets a single token (capped on the platform — see
+    // core/auth/platformSessionPolicy).
     if (req.body?.session === 'refresh') {
       const pair = signSessionPair({
         id: result.userId,
@@ -354,6 +357,13 @@ export const login = async (req: Request, res: Response) => {
     // Revocable (`tv`), and refreshable when the client can refresh. A client
     // that does not ask gets the legacy shape — see core/auth/tokens.
     const tokenVersion = Number((user as any).tokenVersion ?? 0) || 0;
+    // Once no non-refreshing organization app remains in use, the platform can
+    // refuse them outright (PLATFORM_REQUIRE_REFRESH). Default: allowed, capped.
+    if (req.body?.session !== 'refresh' && serviceRealm() === 'platform' && platformRequiresRefresh()) {
+      return res
+        .status(CLIENT_UPDATE_REQUIRED.status)
+        .json({ message: CLIENT_UPDATE_REQUIRED.message, code: CLIENT_UPDATE_REQUIRED.code });
+    }
     if (req.body?.session === 'refresh') {
       const pair = signSessionPair({
         id: String(user._id),

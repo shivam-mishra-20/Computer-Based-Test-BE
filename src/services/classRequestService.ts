@@ -10,6 +10,7 @@ import User from '../models/User';
 import StudyResource from '../models/StudyResource';
 import Question from '../models/Question';
 import { getStudentBatchConfigFromDatabase } from './batchConfigService';
+import { tenantScope } from '../core/tenancy';
 import { CURRICULUM_SUBJECTS } from '../config/subjects';
 import { buildClassVariants } from '../utils/audienceTargeting';
 import { INSTITUTE_ACCOUNT_CLAUSE } from '../utils/instituteAudience';
@@ -397,6 +398,8 @@ export const createPublicClassRequest = async (
   let batchId: Types.ObjectId | undefined;
   if (batchName !== NO_BATCH_LABEL) {
     const batchDoc = await Batch.findOne({
+      // This organization's batch of that name — never another's.
+      ...tenantScope(),
       name: new RegExp(
         `^${batchName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`,
         'i',

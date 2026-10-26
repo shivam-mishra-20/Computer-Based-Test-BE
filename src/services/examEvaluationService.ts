@@ -15,6 +15,7 @@ import ReviewAuditLog, { ReviewAuditAction } from '../models/ReviewAuditLog';
 import { findExamQuestions } from '../utils/questionSource';
 import { sanitizeQuestion } from '../utils/exam';
 import { gradeObjective, isSubjectiveType } from './attemptService';
+import { notifyPublishedResults } from './resultNotifications';
 
 const DEFAULT_SCHEME: IMarkingScheme = { correct: 1, incorrect: 0, unattempted: 0 };
 
@@ -715,6 +716,10 @@ export async function transitionState(
     note,
   });
 
+  // Tell each student whose result just became visible — once per exam, ever
+  // (services/resultNotifications). Not awaited: push delivery must not hold
+  // up the teacher's publish, and it never throws.
+  if (publishing) void notifyPublishedResults(examId);
   return evaluation;
 }
 

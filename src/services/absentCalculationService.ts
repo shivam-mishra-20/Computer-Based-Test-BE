@@ -2,6 +2,7 @@ import User, { IUser } from '../models/User';
 import Holiday, { IHoliday } from '../models/Holiday';
 import Attendance from '../models/Attendance';
 import mongoose from 'mongoose';
+import { studentStarts, workingDatesFor } from './attendanceStart';
 
 export interface AttendanceStats {
   expectedDays: number;
@@ -77,20 +78,34 @@ class AbsentCalculationService {
       }
     });
 
+    // 4b. A student cannot be absent before they joined: their working days
+    //     start at the earlier of account creation and first-ever punch
+    //     (services/attendanceStart). Staff are unchanged.
+    let countedWorkingDates = workingDates;
+    if ((user as any).role === 'student') {
+      const starts = await studentStarts([
+        { _id: user._id, role: 'student', createdAt: (user as any).createdAt },
+      ]);
+      countedWorkingDates = workingDatesFor(
+        workingDates,
+        'student',
+        starts.get(String(user._id)) ?? null,
+      );
+    }
     // 5. Calculate absent dates (working days without attendance)
-    const absentDates = workingDates.filter(d => !presentDates.has(d));
+    const absentDates = countedWorkingDates.filter((d) => !presentDates.has(d));
 
     // 6. Calculate extra days (present on holiday/Sunday)
     // Intersection of presentDates and holidayDates
     const extraDaysList = holidayDates.filter(d => presentDates.has(d));
 
     return {
-      expectedDays: workingDates.length,
+      expectedDays: countedWorkingDates.length,
       presentDays: presentDates.size,
       absentDays: absentDates.length,
       holidays: holidayDates.length,
       extraDays: extraDaysList.length,
-      workingDates,
+      workingDates: countedWorkingDates,
       presentDates: Array.from(presentDates),
       absentDates,
       holidayDates

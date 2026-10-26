@@ -22,6 +22,8 @@
  */
 
 import jwt from 'jsonwebtoken';
+import { serviceRealm } from '../realm/realm';
+import { platformNonRefreshTtl } from './platformSessionPolicy';
 
 export type TokenAudience = 'tenant' | 'platform' | 'legacy';
 
@@ -164,8 +166,15 @@ export function signSessionToken(claims: {
   if (claims.role) payload.role = claims.role;
   if (claims.orgId) payload.orgId = String(claims.orgId);
   if (typeof claims.tokenVersion === 'number') payload.tv = claims.tokenVersion;
-  const ttl = claims.role === 'admin' ? TOKEN_TTL.legacyAdmin : TOKEN_TTL.legacy;
-  return jwt.sign(payload, secret(), { expiresIn: ttl });
+  // On the organization platform a non-refreshable token never lasts ten
+  // years (core/auth/platformSessionPolicy); /api keeps its historical shape.
+  const ttl =
+    serviceRealm() === 'platform'
+      ? platformNonRefreshTtl()
+      : claims.role === 'admin'
+        ? TOKEN_TTL.legacyAdmin
+        : TOKEN_TTL.legacy;
+  return jwt.sign(payload, secret(), { expiresIn: ttl as jwt.SignOptions['expiresIn'] });
 }
 
 export interface SessionPair {

@@ -94,10 +94,13 @@ async function main() {
   const cleanup = async () => {
     const ids = await fixtureOrgIds();
     const both = ids.flatMap((id) => [id, new ObjectId(id)]);
-    for (const name of ['users', 'guardianlinks', 'exams', 'attempts', 'notifications', 'entitlements', 'organizationregistrations', 'appbuildjobs', 'platformaudits']) {
+    for (const name of ['users', 'guardianlinks', 'exams', 'attempts', 'notifications', 'entitlements', 'organizationregistrations', 'appbuildjobs', 'platformaudits', 'subscriptions', 'subscriptionevents', 'subscriptionrequests', 'payments', 'invoices']) {
       await col(name).deleteMany({ orgId: { $in: both } }).catch(() => undefined);
     }
     await col('users').deleteMany({ email: { $regex: '^zz-del-' } }).catch(() => undefined);
+    // Retained by the deletion itself, so found by reference rather than by an org that no longer exists.
+    await col('payments').deleteMany({ reference: { $regex: '^zz-del-' } }).catch(() => undefined);
+    await col('invoices').deleteMany({ number: { $regex: '^zz-del-' } }).catch(() => undefined);
     await unscoped(() => PlatformUser.deleteMany({ email: { $regex: '^zz-del-' } }));
     for (const id of ids) storagePrefixesSeen.add(`organizations/${id}/`);
     for (const prefix of storagePrefixesSeen) await storage.deleteStoragePrefix(prefix).catch(() => undefined);
@@ -112,7 +115,8 @@ async function main() {
   const ownedCounts = async (orgId: string) => {
     const names = (await db.listCollections({}, { nameOnly: true }).toArray())
       .map((c: any) => c.name as string)
-      .filter((n) => !n.startsWith('system.') && n !== 'orgs' && n !== 'platformaudits' && !n.startsWith('reg_'))
+      // payments are retained like the audit log (orgDeletion RETAINED): counted separately.
+      .filter((n) => !n.startsWith('system.') && n !== 'orgs' && n !== 'platformaudits' && n !== 'payments' && n !== 'invoices' && !n.startsWith('reg_'))
       .sort();
     const out: Record<string, number> = {};
     for (const name of names) {
@@ -168,6 +172,13 @@ async function main() {
       await col(UNMODELLED).insertMany(Array.from({ length: n.unmodelled }, (_, i) => ({ orgId, i })));
       if (n.regCol) await col(n.regCol).insertMany(Array.from({ length: n.reg }, (_, i) => ({ email: `${RUN}-${key}-reg${i}@example.test` })));
       await col('platformaudits').insertOne({ action: 'e2e.fixture', orgId, createdAt: new Date() });
+      // Commercial records: the subscription and its history belong to the
+      // organization; a payment is financial evidence and outlives it.
+      const sub = await col('subscriptions').insertOne({ orgId: oid, status: 'cancelled', managedSince: new Date(), addOns: [], removals: [] });
+      await col('subscriptionevents').insertOne({ orgId: oid, subscriptionId: sub.insertedId, type: 'cancel', actor: { kind: 'platform' }, at: new Date() });
+      await col('payments').insertOne({ orgId: oid, provider: 'manual', reference: `${RUN}-${key}-pay`, method: 'upi', status: 'confirmed', amountMinor: 99900, currency: 'INR', receivedAt: new Date(), applied: true });
+      await col('invoices').insertOne({ orgId: oid, status: 'paid', number: `${RUN}-${key}-inv`, totalMinor: 99900, lines: [], notes: RUN });
+      await col('subscriptionrequests').insertOne({ orgId: oid, kind: 'renewal', status: 'resolved' });
     };
     await seed(X, 'x', { users: 3, exams: 2, attempts: 3, notes: 2, unmodelled: 2, reg: 2, regCol: regX });
     await seed(Y, 'y', { users: 2, exams: 1, attempts: 1, notes: 1, unmodelled: 1, reg: 1, regCol: regY });
@@ -258,6 +269,12 @@ async function main() {
     t.check('...including a collection no model describes', step(`documents:${UNMODELLED}`)?.planned === 2);
     t.check('...and ObjectId-typed ownership', step('documents:entitlements')?.planned === 1 && step('documents:organizationregistrations')?.planned === 1 && step('documents:appbuildjobs')?.planned === 1);
     t.check('the app’s own registration collection is dropped whole', step(`collection:${regX}`)?.planned === 2);
+    t.check(
+      'the subscription and its history are planned for deletion; payments are not',
+      step('documents:subscriptions')?.planned === 1 && step('documents:subscriptionevents')?.planned === 1 && step('documents:subscriptionrequests')?.planned === 1 &&
+        !step('documents:payments') && !step('documents:invoices'),
+      JSON.stringify(plan?.steps?.map((x: any) => x.key)),
+    );
     t.check('files: the organization’s prefix and its application’s', step(`storage:${prefixX}`)?.planned === 3 && step(`storage:${prefixApp}`)?.planned === 1);
     t.check('the Expo project is listed as external', step(`external:expo:${PROJECT_X}`)?.resource?.fullName === `@zz-e2e-account/${slugOf('x')}`);
     t.check(
@@ -359,6 +376,13 @@ async function main() {
     );
     t.check('the organization record is gone', !(await unscoped(() => Org.findById(X).lean())));
     t.check('the platform audit log keeps its history of X', (await col('platformaudits').countDocuments({ orgId: X, action: 'e2e.fixture' })) === 1);
+    t.check("X's payment record is retained after the deletion", (await col('payments').countDocuments({ orgId: new ObjectId(X) })) === 1);
+    t.check("...and so is its invoice", (await col('invoices').countDocuments({ orgId: new ObjectId(X) })) === 1);
+    t.check(
+      '...while its subscription and subscription history are gone',
+      (await col('subscriptions').countDocuments({ orgId: new ObjectId(X) })) === 0 &&
+        (await col('subscriptionevents').countDocuments({ orgId: new ObjectId(X) })) === 0,
+    );
     const summaryText = JSON.stringify(done.json?.summary ?? {});
     t.check('the completion record carries counts, not people', !/@example\.test|Del x/.test(summaryText), summaryText.slice(0, 300));
     t.check('resuming a finished deletion → 404', (await request(port, 'POST', `/api/platform/orgs/${X}/deletion/resume`, { token: owner.token })).status === 404);
@@ -369,6 +393,7 @@ async function main() {
     t.section('Organization Y is untouched');
     t.check('every one of Y’s rows, collection by collection', JSON.stringify(await ownedCounts(Y)) === JSON.stringify(yBefore), JSON.stringify({ before: yBefore, after: await ownedCounts(Y) }));
     t.check('Y’s files', (await storage.countStoragePrefix(prefixY)) === 2);
+    t.check('Y’s payment', (await col('payments').countDocuments({ orgId: new ObjectId(Y) })) === 1);
     t.check('Y’s registration collection and its record', (await exists(regY)) && (await col(regY).countDocuments({})) === 1);
     t.check('Y’s organization record and Expo project', (await unscoped(() => Org.findById(Y).lean()))?.mobile?.easProjectId === PROJECT_SHARED);
     const unownedAfter = (await col('users').countDocuments({ orgId: { $exists: false } })) + (await col(UNMODELLED).countDocuments({ orgId: { $exists: false } }));

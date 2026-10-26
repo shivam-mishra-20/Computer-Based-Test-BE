@@ -107,6 +107,15 @@ function extractGuards(args: string): string[] {
   for (const match of args.matchAll(/requirePlatformCapability\(([^)]*)\)/g)) {
     guards.push(`platformCapability(${match[1].replace(/['"\s]/g, '')})`);
   }
+  // Route-level entitlement gates and usage meters, with their keys: a module
+  // gate that changes key, or a meter that disappears, is a contract change.
+  for (const match of args.matchAll(/requireModule\(\s*['"]([^'"]+)['"]\s*\)/g)) {
+    guards.push(`requireModule(${match[1]})`);
+  }
+  for (const match of args.matchAll(/meterRequest\(\s*['"]([^'"]+)['"]\s*\)/g)) {
+    guards.push(`meter(${match[1]})`);
+  }
+  if (/\bmeterAi\b/.test(args)) guards.push('meter(aiGenerationsMonthly)');
   // Keep this list current with every guard the codebase adds. A guard the
   // parser does not recognise is reported as PUBLIC, which is the dangerous
   // direction: it makes a protected route look unprotected, and the first real
@@ -114,15 +123,17 @@ function extractGuards(args: string): string[] {
   for (const name of [
     'authMiddleware',
     'optionalAuthMiddleware',
-    'requireModule',
     'requireWritable',
     'platformAuthMiddleware',
+    'platformMfaEnrollmentAuth',
   ]) {
     if (new RegExp(`\\b${name}\\b`).test(args)) guards.push(name);
   }
   for (const match of args.matchAll(/\b(\w*[Ll]imiter)\b/g)) {
     guards.push(match[1]);
   }
+  // A module gate whose key the parser could not read is still a gate.
+  if (/\brequireModule\b/.test(args) && !guards.some((g) => g.startsWith('requireModule('))) guards.push('requireModule');
   return [...new Set(guards)];
 }
 

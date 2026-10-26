@@ -229,15 +229,31 @@ export async function wardResults(orgId: string, parentId: string, studentId: st
     if (!link) throw new GuardianLinkError('WARD_NOT_VERIFIED', 404, 'No such ward.');
     const attempts = await Attempt.find({ userId: studentId, orgId, resultPublished: true })
       .select('examId percentage submittedAt status')
-      .populate({ path: 'examId', select: 'title subject totalMarks' })
+      .populate({ path: 'examId', select: 'title classLevel sections subject meta' })
       .sort({ submittedAt: -1 })
       .limit(50)
       .lean();
+    // An exam has no subject field; it is the subjects of its questions
+    // (services/examSubjects) — the same label the student's own row shows.
+    const { subjectsForExams } = await import('../../services/examSubjects');
+    const subjects = await subjectsForExams(
+      attempts
+        .map((a) => (a as { examId?: unknown }).examId)
+        .filter((e): e is { _id: unknown } =>
+          Boolean(e && typeof e === 'object'),
+        ) as never[],
+    ).catch(() => new Map<string, string | null>());
     return attempts.map((a) => {
-      const exam = (a as { examId?: { _id?: unknown; title?: string; subject?: string } }).examId;
+      const exam = (a as { examId?: { _id?: unknown; title?: string } }).examId;
       return {
         id: String(a._id),
-        exam: exam && typeof exam === 'object' ? { title: exam.title, subject: exam.subject } : null,
+        exam:
+          exam && typeof exam === 'object'
+            ? {
+                title: exam.title,
+                subject: subjects.get(String(exam._id)) ?? undefined,
+              }
+            : null,
         percentage: typeof a.percentage === 'number' ? Math.round(a.percentage * 10) / 10 : null,
         submittedAt: a.submittedAt,
       };
@@ -309,14 +325,35 @@ export async function wardAttendance(
           return d.getMonth() + 1 === opts.month && d.getFullYear() === opts.year;
         })
       : all;
-  // Same rule as /attendance/my: a day counts as present with both punches.
-  const present = records.filter((r) => r.clockIn !== '--:--' && r.clockOut !== '--:--').length;
-  const total = records.length;
+  // The figures are the canonical ones the student and the institute see
+  // (absentCalculationService: working days from the day the student joined,
+  // up to today) — not a second count made from whatever records came back,
+  // which treated a day with one punch as absent and a day with none as if it
+  // had not happened.
+  const now = new Date();
+  const year = opts.year ?? now.getFullYear();
+  const month = opts.month ?? now.getMonth() + 1;
+  const { default: absentService } = await import(
+    '../../services/absentCalculationService'
+  );
+  const canonical = await absentService.calculateStats(
+    String(student._id),
+    new Date(year, month - 1, 1),
+    new Date(year, month, 0, 23, 59, 59, 999),
+  );
+  const total = canonical.expectedDays;
+  const absent = canonical.absentDays;
+  const present = Math.max(0, total - absent);
   return {
     records: records
       .sort((a, b) => new Date(b.dayAndDate).getTime() - new Date(a.dayAndDate).getTime())
       .slice(0, 120),
-    stats: { present, absent: total - present, total, percentage: total ? Math.round((present / total) * 100) : 0 },
+    stats: {
+      present,
+      absent,
+      total,
+      percentage: total ? Math.round((present / total) * 100) : 0,
+    },
   };
 }
 

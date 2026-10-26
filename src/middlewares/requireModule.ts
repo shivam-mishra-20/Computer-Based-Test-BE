@@ -109,42 +109,74 @@ export function requireModule(moduleKey: string) {
 }
 
 /**
- * Refuse WRITES when the subscription is suspended or cancelled.
+ * Writes that stay open while a subscription is read-only.
  *
  * ── Read-only, never locked out ─────────────────────────────────────────────
- * Suspension degrades to read-only so a customer can always see and export
- * their own data. And in-progress exam attempts are exempt entirely: if a
- * payment fails on the morning of a board practice and five hundred students
- * cannot submit, that is not contract enforcement — it is the end of a customer
- * relationship, and the review that costs the next three.
+ * An expired, suspended or cancelled subscription degrades to read-only so a
+ * customer can always see and export their own data, sign in and out, and
+ * renew. In-progress exam attempts are exempt entirely: if a payment fails on
+ * the morning of a board practice and five hundred students cannot submit,
+ * that is not contract enforcement — it is the end of a customer relationship.
+ *
+ * Every entry is a path that does not grow or change the organization's data:
+ * a session, a password, a rendered export, a renewal request.
  */
-const ATTEMPT_PATH = /^\/api\/attempts\//;
+export const RESTRICTED_WRITE_ALLOWED: readonly RegExp[] = [
+  /^\/api\/attempts\//,
+  /^\/api\/auth\/(change-password|logout-all)$/,
+  /^\/api\/org-admin\/(subscription|billing)(\/|$)/,
+  /^\/api\/papers\/temp\/export\/(pdf|doc)$/,
+  /^\/api\/teacher\/ai\/history\/[^/]+\/export-pdf$/,
+  /^\/api\/materials\/[^/]+\/download$/,
+];
 
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/**
+ * The read-only refusal for a request in `orgId`, or null when it may proceed.
+ *
+ * Commercial, like the module gate: a resolution failure lets the request
+ * through rather than locking a customer out over a billing-system fault.
+ * `423 SUBSCRIPTION_READ_ONLY` mirrors `423 ORG_READ_ONLY` (an administrative
+ * suspension), so a client that already explains one explains both.
+ */
+export async function subscriptionWriteRefusal(
+  req: Request,
+  orgId: string,
+): Promise<{ status: number; message: string; code: string; subscriptionStatus: string } | null> {
+  if (SAFE_METHODS.has(req.method)) return null;
+  const path = String(req.originalUrl || req.url || '').split('?')[0];
+  if (RESTRICTED_WRITE_ALLOWED.some((rx) => rx.test(path))) return null;
+  try {
+    const entitlement = await getEntitlement(orgId);
+    if (entitlement.writable) return null;
+    return {
+      status: 423,
+      message:
+        'Your subscription is not active, so your organization is read-only. Your data can still be viewed and exported; renew to make changes again.',
+      code: 'SUBSCRIPTION_READ_ONLY',
+      subscriptionStatus: entitlement.status,
+    };
+  } catch (error) {
+    console.error(
+      `[subscription] resolution failed for org ${orgId}, allowing through:`,
+      (error as Error).message,
+    );
+    return null;
+  }
+}
+
+/** The same rule as a route middleware, for a router that runs before authMiddleware knows the org. */
 export function requireWritable() {
   return async (req: Request, res: Response, next: NextFunction) => {
-    if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
-
     const orgId = currentOrgId();
     if (!orgId) return next();
-
-    // In-progress attempts always complete. See the comment above.
-    if (ATTEMPT_PATH.test(req.path)) return next();
-
-    try {
-      const entitlement = await getEntitlement(orgId);
-      if (entitlement.writable) return next();
-
-      return res.status(402).json({
-        message: 'Your subscription is not active. Your data remains available to read and export.',
-        code: 'SUBSCRIPTION_NOT_WRITABLE',
-        status: entitlement.status,
-      });
-    } catch (error) {
-      console.error(
-        `[requireWritable] resolution failed for org ${orgId}, allowing through:`,
-        (error as Error).message,
-      );
-      return next();
-    }
+    const refusal = await subscriptionWriteRefusal(req, orgId);
+    if (!refusal) return next();
+    return res.status(refusal.status).json({
+      message: refusal.message,
+      code: refusal.code,
+      subscriptionStatus: refusal.subscriptionStatus,
+    });
   };
 }

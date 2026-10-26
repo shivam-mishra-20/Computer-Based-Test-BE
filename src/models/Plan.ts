@@ -9,9 +9,17 @@ import mongoose, { Document, Schema } from 'mongoose';
  *
  * Prices live here rather than in the module registry because they change
  * without a deploy. Module *definitions* are code; module *packaging* is data.
+ *
+ * ── The head, not the terms ─────────────────────────────────────────────────
+ * This document is the catalogue entry: name, ordering, whether it is on sale.
+ * Its modules/limits/price mirror its CURRENT version for display, but what a
+ * subscriber is entitled to comes from the immutable PlanVersion they were
+ * sold (models/PlanVersion.ts). Edit terms through core/subscriptions/catalogue
+ * so a new version is written; never update this document's terms directly.
  */
 
 export interface IPlanLimits {
+  /** Active (approved) student accounts. */
   students?: number;
   teachers?: number;
   admins?: number;
@@ -39,6 +47,19 @@ export interface IPlan extends Document {
   price: IPlanPrice;
   /** Hidden plans still resolve for existing subscribers; they are just not sold. */
   isPublic: boolean;
+  /**
+   * Whether the plan can be assigned to anyone new. A deactivated plan keeps
+   * resolving for the organizations already on it — withdrawing a plan from
+   * sale cannot retroactively disable a paying customer.
+   */
+  isActive: boolean;
+  /** Offered on the public registration form (never true for custom pricing). */
+  selfServe: boolean;
+  /** Priced per customer (Enterprise). */
+  customPricing: boolean;
+  trialDays: number;
+  /** The latest PlanVersion. Absent on plans created before versioning. */
+  currentVersion?: number;
   sortOrder: number;
   createdAt: Date;
   updatedAt: Date;
@@ -64,6 +85,11 @@ const planSchema = new Schema<IPlan>(
     // A withdrawn plan must keep resolving for organizations already on it —
     // pulling a plan from sale cannot retroactively disable a paying customer.
     isPublic: { type: Boolean, default: true },
+    isActive: { type: Boolean, default: true },
+    selfServe: { type: Boolean, default: false },
+    customPricing: { type: Boolean, default: false },
+    trialDays: { type: Number, default: 14 },
+    currentVersion: { type: Number },
     sortOrder: { type: Number, default: 0 },
   },
   { timestamps: true, tenantScoped: false } as never,

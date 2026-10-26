@@ -63,6 +63,10 @@ export async function createOrganization(input: CreateOrgInput) {
       branding: input.branding ?? {},
       locale: input.locale ?? {},
       notes: input.notes,
+      // Written in the same insert as the organization, so there is no moment
+      // at which a new organization exists without it: until a subscription
+      // grants paid modules, it has core modules only (see resolve.ts).
+      subscriptionRequired: true,
     });
 
     const orgId = String(org._id);
@@ -363,34 +367,23 @@ export interface SubscriptionInput {
 }
 
 /**
- * Create or replace an organization's subscription, then re-resolve.
+ * Edit an organization's subscription (modules, overrides, plan, platform-owned
+ * flag), then re-resolve.
  *
- * Re-resolution is not optional. The entitlement snapshot is what every request
- * reads, so a subscription change that did not re-resolve would be a change
- * nobody could observe — the most confusing possible failure for whoever made
- * it.
+ * A thin delegate to core/subscriptions: a requested `status` is applied as the
+ * lifecycle event it means, never written directly, so this cannot put a
+ * subscription in a state the lifecycle would refuse. Re-resolution happens
+ * there, before returning — a change nobody could observe until a cache expired
+ * would be the most confusing possible failure for whoever made it.
  */
-export async function setSubscription(orgId: string, input: SubscriptionInput) {
-  await withoutTenantScope('platform:set-subscription', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const Subscription = require('../../models/Subscription').default;
-
-    const update: Record<string, unknown> = { orgId };
-    if (input.planId !== undefined) update.planId = input.planId || null;
-    if (input.addOns) update.addOns = input.addOns;
-    if (input.removals) update.removals = input.removals;
-    if (input.overrides) update.overrides = input.overrides;
-    if (input.status) update.status = input.status;
-    if (input.isPlatformOwned !== undefined) update.isPlatformOwned = input.isPlatformOwned;
-
-    await Subscription.findOneAndUpdate(
-      { orgId },
-      { $set: update },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
-    );
-  });
-
-  return resolveEntitlement(orgId, 'subscription-changed');
+export async function setSubscription(
+  orgId: string,
+  input: SubscriptionInput,
+  actor: { kind: 'platform' | 'system' | 'tenant'; id?: string; email?: string; role?: string } = { kind: 'system' },
+) {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { updateSubscriptionShape } = require('../subscriptions/service');
+  return updateSubscriptionShape(orgId, input, actor);
 }
 
 // ── Catalogue ──────────────────────────────────────────────────────────────
@@ -409,40 +402,54 @@ export async function listPlans() {
   return withoutTenantScope('platform:list-plans', async () => {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const Plan = require('../../models/Plan').default;
-    return Plan.find({}).sort({ sortOrder: 1, name: 1 }).lean();
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const Subscription = require('../../models/Subscription').default;
+    const [plans, counts] = await Promise.all([
+      Plan.find({}).sort({ sortOrder: 1, name: 1 }).lean(),
+      Subscription.aggregate([
+        { $match: { planKey: { $exists: true } } },
+        { $group: { _id: { planKey: '$planKey', planVersion: '$planVersion' }, n: { $sum: 1 } } },
+      ]),
+    ]);
+    // How many organizations sit on each version — what editing a plan's terms
+    // would NOT change, shown before anyone presses save.
+    return plans.map((plan: Record<string, any>) => ({
+      ...plan,
+      subscribers: Object.fromEntries(
+        counts
+          .filter((c: { _id: { planKey: string } }) => c._id.planKey === plan.key)
+          .map((c: { _id: { planVersion?: number }; n: number }) => [String(c._id.planVersion ?? 'unpinned'), c.n]),
+      ),
+    }));
   });
 }
 
-export async function upsertPlan(input: {
-  key: string;
-  name: string;
-  description?: string;
-  modules: string[];
-  limits?: Record<string, number>;
-  price?: Record<string, unknown>;
-  isPublic?: boolean;
-  sortOrder?: number;
-}) {
-  return withoutTenantScope('platform:upsert-plan', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const Plan = require('../../models/Plan').default;
-    return Plan.findOneAndUpdate(
-      { key: input.key.toLowerCase() },
-      {
-        $set: {
-          key: input.key.toLowerCase(),
-          name: input.name,
-          description: input.description,
-          modules: input.modules,
-          limits: input.limits ?? {},
-          price: input.price ?? {},
-          isPublic: input.isPublic ?? true,
-          sortOrder: input.sortOrder ?? 0,
-        },
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
-    ).lean();
-  });
+/**
+ * Create or edit a plan. A change to its TERMS writes a new PlanVersion; the
+ * organizations already on it keep the version they were sold. See
+ * core/subscriptions/catalogue.ts.
+ */
+export async function upsertPlan(
+  input: {
+    key: string;
+    name: string;
+    description?: string;
+    modules?: string[];
+    limits?: Record<string, number>;
+    price?: Record<string, unknown>;
+    isPublic?: boolean;
+    isActive?: boolean;
+    selfServe?: boolean;
+    customPricing?: boolean;
+    trialDays?: number;
+    sortOrder?: number;
+    changeNote?: string;
+  },
+  actor: { id?: string; email?: string } = {},
+) {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { upsertPlanVersioned } = require('../subscriptions/catalogue');
+  return upsertPlanVersioned(input, actor);
 }
 
 export { createCustomRole };
