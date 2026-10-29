@@ -207,7 +207,8 @@ function scopeFilter(query: Pick<LeadListQuery, 'channel' | 'session'>): Record<
 
 function listFilter(query: LeadListQuery, now = new Date()): Record<string, unknown> {
   const filter: Record<string, unknown> = scopeFilter(query);
-  if (query.status) filter.status = query.status;
+  if (query.statuses?.length) filter.status = { $in: query.statuses };
+  else if (query.status) filter.status = query.status;
   if (query.classLevel) filter['student.classLevel'] = query.classLevel;
   if (query.admissionClass) filter['admission.classLevel'] = query.admissionClass;
   if (query.stream) filter['admission.stream'] = query.stream;
@@ -250,7 +251,11 @@ const SORTS: Record<LeadListQuery['sort'], Record<string, 1 | -1>> = {
   created: { createdAt: -1 },
   score: { 'agts.latest.percentage': -1, updatedAt: -1 },
   followup: { followUpAt: 1, updatedAt: -1 },
+  name: { 'student.name': 1, updatedAt: -1 },
 };
+
+// Names sort the way people read them: "aarav" next to "Aarav", not after "Zoya".
+const NAME_COLLATION = { locale: 'en', strength: 2 };
 
 export async function listLeads(query: LeadListQuery, now = new Date()) {
   const filter = listFilter(query, now);
@@ -261,7 +266,15 @@ export async function listLeads(query: LeadListQuery, now = new Date()) {
     query.sort === 'followup' && !('followUpAt' in filter) ? { ...filter, followUpAt: { $ne: null } } : filter;
 
   const [items, total, counts, due, guidance] = await Promise.all([
-    Lead.find(sortFilter).select(LIST_PROJECTION).sort(SORTS[query.sort]).skip(skip).limit(query.limit).lean(),
+    (query.sort === 'name'
+      ? Lead.find(sortFilter).collation(NAME_COLLATION)
+      : Lead.find(sortFilter)
+    )
+      .select(LIST_PROJECTION)
+      .sort(SORTS[query.sort])
+      .skip(skip)
+      .limit(query.limit)
+      .lean(),
     Lead.countDocuments(sortFilter),
     Lead.aggregate([{ $match: scopeFilter(query) }, { $group: { _id: '$status', n: { $sum: 1 } } }]),
     Lead.countDocuments(listFilter({ channel: query.channel, session: query.session, page: 1, limit: 1, sort: 'recent', followUp: 'due' }, now)),
@@ -379,17 +392,22 @@ export async function setLeadFollowUp(leadId: string, followUpAt: Date | null, n
   return staffLeadView(lead);
 }
 
-/** An admin opened a call or WhatsApp to the family. Status is NOT changed automatically. */
-export async function logLeadContact(leadId: string, channel: string, actor: Actor) {
+/**
+ * An admin opened a call or WhatsApp to the family. Status is NOT changed
+ * automatically. `purpose` names the message chosen ("Admission confirmed"),
+ * so the desk can show which confirmations a family has been sent.
+ */
+export async function logLeadContact(leadId: string, channel: string, actor: Actor, purpose = '') {
   const lead = await findScopedLead(leadId);
   const now = new Date();
+  const entry = { channel, at: now, by: actorId(actor), byName: actorName(actor), ...(purpose ? { purpose } : {}) };
   await Lead.updateOne(
     { _id: lead._id },
     {
       $set: { lastContactedAt: now, lastContactChannel: channel },
-      $push: { contactLog: { $each: [{ channel, at: now, by: actorId(actor), byName: actorName(actor) }], $slice: -200 } },
+      $push: { contactLog: { $each: [entry], $slice: -200 } },
     },
   );
-  await logAudit(actor.id, 'agts.lead.contact', String(lead._id), { channel });
+  await logAudit(actor.id, 'agts.lead.contact', String(lead._id), { channel, ...(purpose ? { purpose } : {}) });
   return { lastContactedAt: now, lastContactChannel: channel };
 }

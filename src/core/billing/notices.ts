@@ -108,6 +108,39 @@ export function noticeFor(type: string, ctx: { after?: Doc; metadata?: Doc; plan
       return { title: `Your trial ends in ${m.days} day${m.days === 1 ? '' : 's'}`, body: `It ends on ${day(s.trialEndsAt)}. Choose a plan from Billing to keep going without interruption.` };
     case 'request_resolved':
       return { title: `Your ${m.kind ?? ''} request was ${m.status === 'declined' ? 'declined' : 'handled'}`.replace('  ', ' '), body: String(m.note ?? '') || 'See Billing for details.' };
+    // ── Renewals (core/billing/renewals) ────────────────────────────────────
+    case 'renewal_invoiced':
+      return {
+        title: `Your renewal invoice is ready${m.number ? `: ${m.number}` : ''}`,
+        body: m.autopayOn
+          ? `₹${rupees(Number(m.totalMinor ?? 0))} for ${plan}from ${day(m.periodStart)}. It will be charged to your auto-pay a day or two before then.`
+          : `₹${rupees(Number(m.totalMinor ?? 0))} for ${plan}from ${day(m.periodStart)}. Pay it online from Subscription & billing to continue without interruption.`,
+      };
+    case 'renewal_reminder':
+      return {
+        title: 'Your plan renews tomorrow — the invoice is unpaid',
+        body: `Pay ₹${rupees(Number(m.totalMinor ?? 0))} from Subscription & billing to keep everything working.`,
+      };
+    // ── Auto-pay (core/billing/autopay) ─────────────────────────────────────
+    case 'autopay_active':
+      return { title: 'Auto-pay is on', body: `Renewals will be charged automatically${m.method ? ` (${m.method})` : ''}, up to ₹${rupees(Number(m.maxAmountMinor ?? 0))} each. You get a notice before every debit.` };
+    case 'autopay_scheduled':
+      return { title: `₹${rupees(Number(m.amountMinor ?? 0))} will be charged on ${day(m.scheduledFor)}`, body: `Your auto-pay will pay invoice ${m.number ?? ''}.`.replace(' .', '.') };
+    case 'autopay_failed':
+      return { title: 'Auto-pay could not charge your renewal', body: `${m.reason ? `${m.reason}. ` : ''}Please pay invoice ${m.number ?? ''} online from Subscription & billing.`.replace('  ', ' ') };
+    case 'autopay_over_limit':
+      return { title: 'Your renewal is above your auto-pay limit', body: `Invoice ${m.number ?? ''} is ₹${rupees(Number(m.amountMinor ?? 0))}, more than the ₹${rupees(Number(m.maxAmountMinor ?? 0))} you authorised. Please pay it online, or set up auto-pay again.` };
+    case 'autopay_cancelled':
+      return { title: 'Auto-pay is off', body: 'Renewals will no longer be charged automatically. Pay each renewal invoice from Subscription & billing.' };
+    // ── Refunds (core/billing/refundRequests) ───────────────────────────────
+    case 'refund_requested':
+      return { title: 'Refund request received', body: `We will review your request for ₹${rupees(Number(m.amountMinor ?? 0))} and let you know.` };
+    case 'refund_approved':
+      return { title: `Refund of ₹${rupees(Number(m.amountMinor ?? 0))} approved`, body: 'It goes back to how you paid, usually within 5–7 working days.' };
+    case 'refund_completed':
+      return { title: `₹${rupees(Number(m.amountMinor ?? 0))} refunded`, body: m.arn ? `Bank reference ${m.arn}.` : 'It should now show in your account.' };
+    case 'refund_declined':
+      return { title: 'Refund request declined', body: String(m.note ?? '') || 'See Subscription & billing for details.' };
     default:
       return null;
   }

@@ -48,6 +48,7 @@ import {
 import {
   AgtsValidationError,
   parseContactChannel,
+  parseContactPurpose,
   parseFollowUp,
   parseLeadListQuery,
   parseLeadStatus,
@@ -246,7 +247,9 @@ router.patch('/admin/leads/:leadId/follow-up', ...staff, async (req, res) => {
 
 router.post('/admin/leads/:leadId/contact', ...staff, async (req, res) => {
   try {
-    res.json(await logLeadContact(req.params.leadId, parseContactChannel(req.body?.channel), actorOf(req)));
+    res.json(
+      await logLeadContact(req.params.leadId, parseContactChannel(req.body?.channel), actorOf(req), parseContactPurpose(req.body?.purpose)),
+    );
   } catch (err) {
     fail(res, err, 'Failed to record the contact');
   }

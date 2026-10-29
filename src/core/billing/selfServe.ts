@@ -138,7 +138,7 @@ async function loadSubscription(orgId: string): Promise<{ org: Doc | null; sub: 
   return { org, sub };
 }
 
-async function openOrderOf(orgId: string): Promise<Doc | null> {
+export async function openOrderOf(orgId: string): Promise<Doc | null> {
   const { Invoice } = models();
   return unscoped('open-order', () =>
     Invoice.findOne({ orgId, origin: 'self-serve', status: { $in: OPEN } }).sort({ createdAt: -1 }).lean(),
@@ -408,6 +408,10 @@ export async function cancelSubscription(orgId: string, input: { reason?: unknow
       result = { when: 'period-end', endsAt: scheduled.endsAt ?? null };
     }
     if (open) await withdrawOrder(orgId, String(open._id), actor).catch(() => undefined);
+    // Nothing is to be charged any more: auto-pay goes too (set up again after resuming).
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { cancelAutopayFor } = require('./autopay');
+    await cancelAutopayFor(orgId, actor, 'Subscription cancelled by the institute').catch(() => undefined);
     return { ...result, subscription: await tenantSubscriptionView(orgId) };
   } catch (error) {
     return asBilling(error);

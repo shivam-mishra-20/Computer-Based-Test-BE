@@ -44,6 +44,11 @@ export class SubscriptionLifecycleCron {
             `[SubscriptionLifecycleCron] examined ${summary.examined}, advanced ${summary.advanced}, failed ${summary.failed}`,
           );
           for (const error of summary.errors.slice(0, 20)) console.error(`[SubscriptionLifecycleCron] ${error}`);
+          const r = summary.renewals as { invoiced?: number; charged?: number; reminded?: number; errors?: string[] } | undefined;
+          if (r) {
+            console.log(`[SubscriptionLifecycleCron] renewals: invoiced ${r.invoiced ?? 0}, charged ${r.charged ?? 0}, reminded ${r.reminded ?? 0}`);
+            for (const error of (r.errors ?? []).slice(0, 20)) console.error(`[SubscriptionLifecycleCron] ${error}`);
+          }
         } catch (error) {
           console.error('[SubscriptionLifecycleCron] sweep failed:', (error as Error).message);
         }

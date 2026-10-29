@@ -42,10 +42,13 @@ export class DraftNotFound extends Error {
 }
 
 export class DraftNotEditable extends Error {
-  constructor(status: string) {
+  /** Set when the client should act on the reason (APPLICATION_PAID: keep the draft). */
+  code?: string;
+  constructor(status: string, message?: string) {
     super(
-      `This application has already been submitted (status ${status}) and can no longer be edited. ` +
-        'Contact the team if something needs to change.',
+      message ??
+        `This application has already been submitted (status ${status}) and can no longer be edited. ` +
+          'Contact the team if something needs to change.',
     );
     this.name = 'DraftNotEditable';
   }
@@ -145,6 +148,13 @@ export async function loadDraft(id: string, token: string): Promise<IOrganizatio
   });
 }
 
+/** Load a draft the applicant may still change — the checkout opens only on one. */
+export async function loadEditableDraft(id: string, token: string): Promise<IOrganizationRegistration> {
+  const found = await loadDraft(id, token);
+  if (!EDITABLE.has(found.status)) throw new DraftNotEditable(found.status);
+  return found;
+}
+
 /**
  * Merge a patch into the application.
  *
@@ -198,6 +208,24 @@ export async function saveDraft(
         throw new RegistrationValidationError({ 'commercial.planPreference': 'Choose one of the plans offered.' });
       }
       (patch.commercial as { planPreference?: string }).planPreference = key;
+    }
+    // Monthly or yearly: the price the checkout charges depends on it.
+    const interval = (patch.commercial as { billingInterval?: unknown }).billingInterval;
+    if (interval === undefined || interval === null || interval === '') {
+      delete (patch.commercial as { billingInterval?: unknown }).billingInterval;
+    } else if (interval !== 'monthly' && interval !== 'annual') {
+      throw new RegistrationValidationError({ 'commercial.billingInterval': 'Choose monthly or yearly billing.' });
+    }
+    // Once paid, the plan is what was paid for. A later edit of the choice is
+    // overruled here rather than refused, so the rest of the step still saves.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { effectivePayment } = require('../billing/registrationPayments');
+    const paid = await effectivePayment(found._id);
+    if (paid) {
+      Object.assign(patch.commercial as Record<string, unknown>, {
+        planPreference: paid.planKey,
+        billingInterval: paid.billingInterval,
+      });
     }
   }
 
@@ -357,6 +385,13 @@ export async function submitApplication(
   const fields = validateApplicationForSubmission(found);
   if (Object.keys(fields).length) throw new RegistrationValidationError(fields);
 
+  // A plan with a price is paid for before the application is submitted
+  // (core/billing/registrationPayments). Throws PaymentRequired otherwise.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { requirePaymentForSubmission } = require('../billing/registrationPayments');
+  const paid = await requirePaymentForSubmission(found);
+  if (paid) lockPaidPlan(found, paid);
+
   found.status = 'PENDING';
   found.submittedAt = new Date();
   // The token stops working the moment it is submitted: from here the
@@ -367,6 +402,47 @@ export async function submitApplication(
 
   await withoutTenantScope('application:submit', async () => found.save());
   return found;
+}
+
+/** The application names exactly the plan and interval that were paid for. */
+function lockPaidPlan(found: IOrganizationRegistration, paid: { planKey: string; billingInterval: string }) {
+  const app = (found.application ?? { version: 1 }) as IOrganizationApplication;
+  app.commercial = { ...(app.commercial ?? {}), planPreference: paid.planKey, billingInterval: paid.billingInterval };
+  found.application = app;
+  found.markModified('application');
+}
+
+/**
+ * Submit an application because its payment has just been verified — from
+ * the applicant returning from Cashfree, the webhook, or staff checking the
+ * order. No token: the verified payment is the authority, and the webhook
+ * never had one.
+ *
+ * The same validation as `submitApplication` runs (it already ran before the
+ * checkout was opened; this catches an edit made since). An application that
+ * no longer passes stays a DRAFT — paid — and the applicant's own Submit
+ * finishes it once the answers are fixed. Already submitted: nothing to do.
+ */
+export async function submitPaidApplication(id: string): Promise<{ submitted: boolean; status: string; fields?: Record<string, string> }> {
+  const found = await withoutTenantScope('application:paid-load', async () => model().findById(id).select('+draftToken'));
+  if (!found) throw new DraftNotFound();
+  if (!EDITABLE.has(found.status)) return { submitted: false, status: found.status };
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { effectivePayment } = require('../billing/registrationPayments');
+  const paid = await effectivePayment(found._id);
+  if (!paid) return { submitted: false, status: found.status };
+  lockPaidPlan(found, paid);
+  const fields = validateApplicationForSubmission(found);
+  if (Object.keys(fields).length) {
+    await withoutTenantScope('application:paid-lock', async () => found.save());
+    return { submitted: false, status: found.status, fields };
+  }
+  found.status = 'PENDING';
+  found.submittedAt = new Date();
+  found.draftToken = undefined;
+  found.draftExpiresAt = undefined;
+  await withoutTenantScope('application:paid-submit', async () => found.save());
+  return { submitted: true, status: found.status };
 }
 
 /**
@@ -382,6 +458,15 @@ export async function submitApplication(
 export async function discardDraft(id: string, token: string): Promise<{ removedFiles: number }> {
   const found = await loadDraft(id, token);
   if (found.status !== 'DRAFT') throw new DraftNotEditable(found.status);
+  // A paid application is kept: the payment belongs to it, and staff refund it
+  // from the console if it is not wanted.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { effectivePayment } = require('../billing/registrationPayments');
+  if (await effectivePayment(found._id)) {
+    const refused = new DraftNotEditable('DRAFT', 'This application has been paid for, so it cannot be discarded. Contact the team if it is not wanted.');
+    refused.code = 'APPLICATION_PAID';
+    throw refused;
+  }
 
   let removedFiles = 0;
   try {

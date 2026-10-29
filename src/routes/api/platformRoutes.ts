@@ -146,6 +146,30 @@ import {
 import { listSubscriptionRequests, resolveSubscriptionRequest } from '../../core/billing/requests';
 import { acceptOrder, applyOrderPlan, declineOrder, listOrders } from '../../core/billing/selfServe';
 import { listProviders } from '../../core/billing/provider';
+import { cashfreeStatus } from '../../core/billing/cashfree';
+import {
+  approveRefundRequest,
+  declineRefundRequest,
+  listRefundRequests,
+  openRefundRequestCount,
+  raiseRefundRequest,
+  refreshRefundRequest,
+  refundQuote,
+  requestsForRegistration,
+} from '../../core/billing/refundRequests';
+import { runRenewals } from '../../core/billing/renewals';
+import { listInvoiceCheckouts } from '../../core/billing/invoiceCheckout';
+import { autopayEnabled, cancelAutopay, orgMandates } from '../../core/billing/autopay';
+import {
+  effectivePayment,
+  invoiceRegistrationPayment,
+  listRegistrationPayments,
+  paymentsForRegistration,
+  paymentsMode,
+  refreshRefund,
+  refreshRegistrationPayment,
+  refundRegistrationPayment,
+} from '../../core/billing/registrationPayments';
 import { sendInvoiceDocument } from '../../core/billing/document';
 import { GST_STATE_CODES } from '../../core/billing/gst';
 import PlatformUserModel, { PLATFORM_ROLES, platformCapabilities } from '../../models/PlatformUser';
@@ -492,7 +516,7 @@ router.get(
       const soon = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
       const now = new Date();
 
-      const [orgs, byStatus, users, subs, overdueInvoices, openInvoices, openRequests, endingSoon, openOrders] = await Promise.all([
+      const [orgs, byStatus, users, subs, overdueInvoices, openInvoices, openRequests, endingSoon, openOrders, openRefunds] = await Promise.all([
         Org.countDocuments({}),
         Org.aggregate([{ $group: { _id: '$status', n: { $sum: 1 } } }]),
         User.countDocuments({}),
@@ -512,6 +536,8 @@ router.get(
         }),
         // Institutes' own orders still waiting for the platform (draft or unpaid).
         Invoice.countDocuments({ origin: 'self-serve', status: { $in: ['draft', 'issued'] } }),
+        // Refund requests waiting for a decision (or a retry after Cashfree refused).
+        openRefundRequestCount(),
       ]);
 
       return {
@@ -524,7 +550,7 @@ router.get(
           (subs as { _id: string; n: number }[]).map((r) => [r._id ?? 'unknown', r.n]),
         ),
         modules: listModules().length,
-        billing: { overdueInvoices, openInvoices, openRequests, dueWithinWeek: endingSoon, openOrders },
+        billing: { overdueInvoices, openInvoices, openRequests, dueWithinWeek: endingSoon, openOrders, openRefunds },
       };
     });
 
@@ -1151,7 +1177,14 @@ router.get(
   requirePlatformCapability('org.read'),
   handle(async (_req, res) => {
     const profile = await getBillingProfile();
-    return res.json({ profile, gst: gstReadiness(profile), stateCodes: GST_STATE_CODES, providers: listProviders() });
+    return res.json({
+      profile,
+      gst: gstReadiness(profile),
+      stateCodes: GST_STATE_CODES,
+      providers: listProviders(),
+      // The online checkout on the public application (no key material).
+      gateway: { ...cashfreeStatus(), mode: paymentsMode() },
+    });
   }),
 );
 
@@ -1285,6 +1318,235 @@ router.get(
   '/invoices/:id/document',
   requirePlatformCapability('org.read'),
   handle(async (req, res) => sendInvoiceDocument(res, await getInvoice(req.params.id), String(req.query.format ?? 'html'))),
+);
+
+// ── Online payments taken while applying (Cashfree) ────────────────────────
+// core/billing/registrationPayments. Reading needs org.read; anything that
+// asks Cashfree, moves money or issues an invoice needs billing.manage. Paid
+// is only ever what Cashfree answers to a request made from here.
+
+/** The staff member, with the email the refund record names them by. */
+async function staffWithEmail(req: Request) {
+  const actor = staffActor(req);
+  const found = actor.id && mongoose.Types.ObjectId.isValid(actor.id)
+    ? await PlatformUserModel.findById(actor.id).select('email').lean()
+    : null;
+  return { ...actor, email: (found as { email?: string } | null)?.email };
+}
+
+/** ?status=pending|paid|failed|expired|superseded|refunded */
+router.get(
+  '/registration-payments',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const status = typeof req.query.status === 'string' && req.query.status ? req.query.status : undefined;
+    if (status && !['pending', 'paid', 'failed', 'expired', 'superseded', 'refunded'].includes(status)) {
+      return res.status(400).json({ message: 'Unknown status', code: 'BILLING_INVALID' });
+    }
+    return res.json({
+      payments: await listRegistrationPayments({ status, limit: Number(req.query.limit) || undefined }),
+      gateway: { ...cashfreeStatus(), mode: paymentsMode() },
+    });
+  }),
+);
+
+/** Ask Cashfree again — for an applicant who paid and never came back to the page. */
+router.post(
+  '/registration-payments/:id/refresh',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const result = await refreshRegistrationPayment(req.params.id);
+    await recordPlatformAction(req, {
+      action: 'registration-payment.refresh',
+      entity: 'RegistrationPayment',
+      entityId: req.params.id,
+      metadata: { status: result.payment.status, submitted: result.submission?.submitted ?? null },
+    });
+    return res.json(result);
+  }),
+);
+
+/** Return the money through Cashfree (before approval only). Body: { reason } */
+router.post(
+  '/registration-payments/:id/refund',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const result = await refundRegistrationPayment(req.params.id, req.body ?? {}, await staffWithEmail(req));
+    await recordPlatformAction(req, {
+      action: result.duplicate ? 'registration-payment.refund.duplicate' : 'registration-payment.refund',
+      entity: 'RegistrationPayment',
+      entityId: req.params.id,
+      metadata: { reason: req.body?.reason, amount: req.body?.amount, refundRequestId: result.request?.id },
+    });
+    return res.status(result.duplicate ? 200 : 201).json(result);
+  }),
+);
+
+router.post(
+  '/registration-payments/:id/refund/refresh',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => res.json(await refreshRefund(req.params.id))),
+);
+
+/** Issue the (already paid) invoice for a payment approval has applied. */
+router.post(
+  '/registration-payments/:id/invoice',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const result = await invoiceRegistrationPayment(req.params.id, staffActor(req));
+    await recordPlatformAction(req, {
+      action: result.duplicate ? 'registration-payment.invoice.duplicate' : 'registration-payment.invoice',
+      orgId: String(result.invoice.orgId),
+      entity: 'Invoice',
+      entityId: result.invoice.id,
+      metadata: { number: result.invoice.number, registrationPaymentId: req.params.id, totalMinor: result.invoice.totalMinor },
+    });
+    return res.status(result.duplicate ? 200 : 201).json(result);
+  }),
+);
+
+// ── Refund requests ────────────────────────────────────────────────────────
+// core/billing/refundRequests. Anyone eligible asks; staff decide here, and
+// approving is what sends the refund to Cashfree. Reading needs org.read,
+// deciding billing.manage.
+
+/** ?status=open (open + failed) | refunding | refunded | declined | failed */
+router.get(
+  '/refund-requests',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const status = typeof req.query.status === 'string' && req.query.status ? req.query.status : undefined;
+    if (status && !['open', 'refunding', 'refunded', 'declined', 'failed'].includes(status)) {
+      return res.status(400).json({ message: 'Unknown status', code: 'BILLING_INVALID' });
+    }
+    const orgId = typeof req.query.orgId === 'string' ? req.query.orgId : undefined;
+    return res.json({ requests: await listRefundRequests({ status, orgId, limit: Number(req.query.limit) || undefined }) });
+  }),
+);
+
+/** What the policy gives on a payment now. ?registrationPaymentId= | ?paymentId= */
+router.get(
+  '/refund-quote',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const rp = typeof req.query.registrationPaymentId === 'string' ? req.query.registrationPaymentId : '';
+    const p = typeof req.query.paymentId === 'string' ? req.query.paymentId : '';
+    if (!rp && !p) return res.status(400).json({ message: 'registrationPaymentId or paymentId is required', code: 'BILLING_INVALID' });
+    return res.json({ quote: await refundQuote(rp ? { registrationPaymentId: rp } : { paymentId: p }) });
+  }),
+);
+
+/**
+ * Staff raise a request on someone's behalf. Body: { registrationPaymentId | paymentId,
+ * reason, amount?, approve?, endSubscription? } — approve: true refunds now.
+ */
+router.post(
+  '/refund-requests',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const staff = await staffWithEmail(req);
+    const target = req.body?.registrationPaymentId
+      ? { registrationPaymentId: String(req.body.registrationPaymentId) }
+      : { paymentId: String(req.body?.paymentId ?? '') };
+    const result = await raiseRefundRequest(
+      target,
+      { reason: req.body?.reason, amount: req.body?.amount },
+      { kind: 'platform', id: staff.id, email: staff.email },
+      req.body?.approve ? { approveAs: staff, approveNote: req.body?.note ?? req.body?.reason, endSubscription: req.body?.endSubscription } : {},
+    );
+    await recordPlatformAction(req, {
+      action: req.body?.approve ? 'refund.raise-approve' : 'refund.raise',
+      orgId: result.request.orgId ? String(result.request.orgId) : undefined,
+      entity: 'RefundRequest',
+      entityId: result.request.id,
+      metadata: { amount: req.body?.amount, reason: req.body?.reason, duplicate: result.duplicate },
+    });
+    return res.status(result.duplicate ? 200 : 201).json(result);
+  }),
+);
+
+/** Body: { amount? (rupees; default the requested amount), note?, endSubscription? } */
+router.post(
+  '/refund-requests/:id/approve',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const result = await approveRefundRequest(req.params.id, req.body ?? {}, await staffWithEmail(req));
+    await recordPlatformAction(req, {
+      action: 'refund.approve',
+      orgId: result.request.orgId ? String(result.request.orgId) : undefined,
+      entity: 'RefundRequest',
+      entityId: req.params.id,
+      metadata: { amountMinor: result.request.decision?.amountMinor, endSubscription: result.request.decision?.endSubscription, refund: result.request.refund?.status },
+    });
+    return res.json(result);
+  }),
+);
+
+/** Body: { note } — shown to whoever asked. */
+router.post(
+  '/refund-requests/:id/decline',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const result = await declineRefundRequest(req.params.id, req.body ?? {}, await staffWithEmail(req));
+    await recordPlatformAction(req, {
+      action: 'refund.decline',
+      orgId: result.request.orgId ? String(result.request.orgId) : undefined,
+      entity: 'RefundRequest',
+      entityId: req.params.id,
+      metadata: { note: req.body?.note },
+    });
+    return res.json(result);
+  }),
+);
+
+router.post(
+  '/refund-requests/:id/refresh',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => res.json(await refreshRefundRequest(req.params.id))),
+);
+
+// ── Renewals, online invoice payments, auto-pay ────────────────────────────
+
+/** Run the renewal step now (it also runs in the daily sweep). Body: { orgId? } */
+router.post(
+  '/renewals/run',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const orgId = typeof req.body?.orgId === 'string' && req.body.orgId ? req.body.orgId : undefined;
+    const summary = await runRenewals(new Date(), { orgId });
+    await recordPlatformAction(req, { action: 'renewals.run', orgId, entity: 'Subscription', metadata: { ...summary, errors: summary.errors.slice(0, 20) } });
+    return res.json({ summary });
+  }),
+);
+
+/** Invoices paid online by institutes. ?status=&orgId= */
+router.get(
+  '/invoice-checkouts',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => {
+    const status = typeof req.query.status === 'string' && req.query.status ? req.query.status : undefined;
+    const orgId = typeof req.query.orgId === 'string' ? req.query.orgId : undefined;
+    return res.json({ checkouts: await listInvoiceCheckouts({ status, orgId, limit: Number(req.query.limit) || undefined }) });
+  }),
+);
+
+router.get(
+  '/orgs/:orgId/autopay',
+  requirePlatformCapability('org.read'),
+  handle(async (req, res) => res.json({ enabled: autopayEnabled(), mandates: await orgMandates(req.params.orgId) })),
+);
+
+/** Body: { reason } */
+router.post(
+  '/orgs/:orgId/autopay/cancel',
+  requirePlatformCapability('billing.manage'),
+  handle(async (req, res) => {
+    const reason = typeof req.body?.reason === 'string' && req.body.reason.trim().length >= 3 ? req.body.reason.trim().slice(0, 500) : null;
+    if (!reason) return res.status(400).json({ message: 'Say why auto-pay is turned off.', code: 'REASON_REQUIRED' });
+    const result = await cancelAutopay(req.params.orgId, staffActor(req), `Turned off by platform staff: ${reason}`);
+    await recordPlatformAction(req, { action: 'autopay.cancel', orgId: req.params.orgId, entity: 'AutopayMandate', metadata: { reason } });
+    return res.json(result);
+  }),
 );
 
 // ── Institute orders (self-serve) ──────────────────────────────────────────
@@ -2084,6 +2346,9 @@ router.get(
 
     return res.json({
       registration,
+      // Payments taken at checkout while applying (core/billing/registrationPayments).
+      payments: await paymentsForRegistration(req.params.id),
+      refundRequests: await requestsForRegistration(req.params.id),
       readiness,
       // What provisioning WOULD apply, so an admin can see it before pressing
       // the button rather than discovering it in the result.
@@ -2184,14 +2449,34 @@ router.post(
       { id: staff?.id },
     );
 
+    // A paid application that is rejected gets its money back, in full, at
+    // once: the refund request is raised and approved by the same decision.
+    // If Cashfree refuses, the rejection stands and the request can be
+    // approved again from the Payment card.
+    const paid = await effectivePayment(String(registration._id));
+    let refund: Record<string, unknown> | null = null;
+    if (paid) {
+      try {
+        const result = await raiseRefundRequest(
+          { registrationPaymentId: String(paid._id) },
+          { reason: `Application rejected${registration.reviewNote ? `: ${registration.reviewNote}` : ''}` },
+          { kind: 'system', id: 'registration:rejected' },
+          { approveAs: await staffWithEmail(req), approveNote: 'Refunded in full: the application was rejected.' },
+        );
+        refund = { request: result.request };
+      } catch (error) {
+        refund = { error: (error as Error).message, code: (error as { code?: string }).code };
+      }
+    }
+
     await recordPlatformAction(req, {
       action: 'registration.reject',
       entity: 'OrganizationRegistration',
       entityId: req.params.id,
-      metadata: { note: registration.reviewNote },
+      metadata: { note: registration.reviewNote, refund: refund ? { requestId: (refund.request as { id?: string } | undefined)?.id, error: refund.error } : null },
     });
 
-    return res.json({ registration });
+    return res.json({ registration, refund });
   }),
 );
 

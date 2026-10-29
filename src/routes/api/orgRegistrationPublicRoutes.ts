@@ -18,6 +18,10 @@
  *
  * Provisioning happens later, from the console, through
  * `onboardOrganization()`. See docs/organization-registration.md.
+ *
+ * The long application below also takes payment for a priced plan before it
+ * can be submitted: those routes write RegistrationPayment rows and talk to
+ * Cashfree, and still create no tenant. See docs/registration-payments.md.
  */
 
 // Organization registration is the organization system's. A legacy deployment
@@ -42,11 +46,20 @@ import {
   discardDraft,
   draftView,
   loadDraft,
+  loadEditableDraft,
   saveDraft,
   setAdminPassword,
   storeAsset,
   submitApplication,
 } from '../../core/platform/applications';
+import { BillingError } from '../../core/billing/invoices';
+import {
+  PaymentRequired,
+  applicantPaymentState,
+  confirmOrder,
+  startCheckout,
+} from '../../core/billing/registrationPayments';
+import { raiseRefundRequest, requesterView } from '../../core/billing/refundRequests';
 
 const router = express.Router();
 
@@ -157,10 +170,25 @@ function handleApplicationError(res: Response, err: unknown, what: string) {
     return res.status(404).json({ message: err.message });
   }
   if (err instanceof DraftNotEditable) {
-    return res.status(409).json({ message: err.message });
+    return res.status(409).json({ message: err.message, ...(err.code ? { code: err.code } : {}) });
   }
   if (err instanceof AssetRejected) {
     return res.status(400).json({ message: err.message });
+  }
+  // 402: the application is complete, but its plan has not been paid for.
+  if (err instanceof PaymentRequired) {
+    return res.status(402).json({ message: err.message, code: err.code });
+  }
+  // Payment problems carry their own status and a sentence for the applicant.
+  // The gateway's own words are logged, never sent to the public page.
+  if (err instanceof BillingError) {
+    const { gateway: _gateway, ...details } = err.details as Record<string, unknown>;
+    void _gateway;
+    return res.status(err.status).json({
+      message: err.message,
+      code: err.code,
+      ...(details.field ? { fields: { [String(details.field)]: err.message } } : {}),
+    });
   }
   console.error(`[organization-application] ${what} failed:`, err);
   return res.status(500).json({ message: 'Something went wrong. Please try again shortly.' });
@@ -362,6 +390,95 @@ router.delete('/organization-applications/:id', requirePlatformDeployment, draft
     return res.json({ discarded: true, removedFiles });
   } catch (err) {
     return handleApplicationError(res, err, 'discard');
+  }
+});
+
+/* ══════════════════════════════════════════════════════════════════════════
+   Paying for the plan (Cashfree)
+   ══════════════════════════════════════════════════════════════════════════
+
+   A plan with a price is paid for before the application is submitted —
+   core/billing/registrationPayments. The page asks what is due, opens the
+   checkout with the session id returned here, and on its way back asks us to
+   confirm. Confirming never takes the browser's word: the server asks Cashfree
+   about the order, and only Cashfree's answer can mark it paid. */
+
+/** What is due for this draft, and whether it is already paid. */
+router.get('/organization-applications/:id/payment', requirePlatformDeployment, draftEditLimiter, async (req: Request, res: Response) => {
+  try {
+    const found = await loadDraft(req.params.id, draftTokenOf(req));
+    return res.json({ payment: await applicantPaymentState(found) });
+  } catch (err) {
+    return handleApplicationError(res, err, 'payment state');
+  }
+});
+
+/**
+ * Open (or reopen) the checkout. Validates the whole application first —
+ * nobody should pay for an application that then cannot be submitted.
+ * Body: { returnUrl? } — this page's own address, with `{order_id}` in it.
+ */
+router.post('/organization-applications/:id/checkout', requirePlatformDeployment, draftEditLimiter, async (req: Request, res: Response) => {
+  try {
+    const found = await loadEditableDraft(req.params.id, draftTokenOf(req));
+    const checkout = await startCheckout(found, {
+      returnUrl: req.body?.returnUrl,
+      origin: req.header('origin'),
+      ip: req.ip,
+    });
+    return res.status(checkout.alreadyPaid ? 200 : 201).json({ checkout });
+  } catch (err) {
+    return handleApplicationError(res, err, 'checkout');
+  }
+});
+
+/**
+ * "I am back from paying." Keyed by the order id alone — a paid application
+ * is submitted at once, which retires its draft token, and the applicant must
+ * still be able to see the outcome. Answers only the payment's status and the
+ * application's reference.
+ */
+router.post('/registration-payments/:orderId/confirm', requirePlatformDeployment, draftEditLimiter, async (req: Request, res: Response) => {
+  try {
+    return res.json(await confirmOrder(req.params.orderId, 'applicant'));
+  } catch (err) {
+    return handleApplicationError(res, err, 'payment confirm');
+  }
+});
+
+/**
+ * An applicant asking for their money back — withdrawing the application, or
+ * after it was turned down. Proved by the order id (on their receipt) AND the
+ * application's email; anything else answers like a missing payment. Platform
+ * staff decide (core/billing/refundRequests). Body: { email, reason }.
+ */
+router.post('/registration-payments/:orderId/refund-request', requirePlatformDeployment, publicFormLimiter, async (req: Request, res: Response) => {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const RegistrationPayment = require('../../models/RegistrationPayment').default;
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const OrganizationRegistration = require('../../models/OrganizationRegistration').default;
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { withoutTenantScope } = require('../../core/tenancy/context');
+    const orderId = String(req.params.orderId ?? '').trim();
+    const email = String(req.body?.email ?? '').trim().toLowerCase();
+    const record = /^[A-Za-z0-9_-]{3,45}$/.test(orderId)
+      ? await withoutTenantScope('public:refund-request', () => RegistrationPayment.findOne({ orderId }).lean())
+      : null;
+    const reg = record
+      ? await withoutTenantScope('public:refund-request-reg', () => OrganizationRegistration.findById(record.registrationId).select('email contactName').lean())
+      : null;
+    if (!record || !reg || !email || String(reg.email ?? '').toLowerCase() !== email) {
+      return res.status(404).json({ message: 'No payment matches that order and email.' });
+    }
+    const result = await raiseRefundRequest(
+      { registrationPaymentId: String(record._id) },
+      { reason: req.body?.reason },
+      { kind: 'applicant', email, name: reg.contactName },
+    );
+    return res.status(result.duplicate ? 200 : 201).json({ refundRequest: requesterView(result.request), duplicate: result.duplicate });
+  } catch (err) {
+    return handleApplicationError(res, err, 'refund request');
   }
 });
 

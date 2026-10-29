@@ -27,7 +27,7 @@ import {
   validateEnquiry,
 } from '../../src/services/admissions/admissionValidation';
 import { alertText, enquirySourceLabel } from '../../src/services/admissions/admissionAlerts';
-import { parseLeadListQuery } from '../../src/services/agts/agtsValidation';
+import { parseContactPurpose, parseLeadListQuery } from '../../src/services/agts/agtsValidation';
 import { staffLeadView } from '../../src/services/agts/leadService';
 import { Checks } from './e2eHarness';
 
@@ -169,6 +169,13 @@ const application = {
   t.check('list query: admissions filters parsed', list.channel === 'enquiry' && list.session === '2027-28' && list.admissionClass === 11 && list.stream === 'Commerce' && list.owner === 'none');
   t.check('list query: no channel stays AGTS-only by default (undefined)', parseLeadListQuery({}).channel === undefined);
   t.check('list query: bad owner dropped', parseLeadListQuery({ owner: '{"$gt":""}' }).owner === undefined);
+
+  const stage = parseLeadListQuery({ status: 'contacted, counselling,nope,contacted' });
+  t.check('list query: a stage is several statuses, junk and repeats dropped', stage.status === undefined && stage.statuses?.join() === 'contacted,counselling');
+  t.check('list query: one status stays a single status', parseLeadListQuery({ status: 'offered' }).status === 'offered' && !parseLeadListQuery({ status: 'offered' }).statuses);
+  t.check('list query: only junk statuses means no status filter', !parseLeadListQuery({ status: 'x,$ne' }).status && !parseLeadListQuery({ status: 'x,$ne' }).statuses);
+  t.check('list query: name sort accepted', parseLeadListQuery({ sort: 'name' }).sort === 'name' && parseLeadListQuery({ sort: 'zzz' }).sort === 'recent');
+  t.check('contact purpose is trimmed text, capped', parseContactPurpose('  Admission confirmed ') === 'Admission confirmed' && parseContactPurpose('x'.repeat(200)).length === 60 && parseContactPurpose(undefined) === '');
 }
 
 // ── Identifiers ─────────────────────────────────────────────────────────────

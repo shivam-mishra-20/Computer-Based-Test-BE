@@ -61,6 +61,11 @@ import {
 import type { Actor } from '../../core/subscriptions/service';
 import { sendInvoiceDocument } from '../../core/billing/document';
 import { GST_STATE_CODES } from '../../core/billing/gst';
+import { paymentsMode } from '../../core/billing/registrationPayments';
+import { confirmInvoiceCheckout, startInvoiceCheckout } from '../../core/billing/invoiceCheckout';
+import { autopayState, cancelAutopay, startAutopay } from '../../core/billing/autopay';
+import { orgPaymentsWithRefunds, orgRefundRequests, raiseRefundRequest, requesterView } from '../../core/billing/refundRequests';
+import { publicApiBase } from '../../core/billing/publicBase';
 import { auditRefusal, seatOf, sendUsageError, usageSummary, withCapacity, type SeatResource } from '../../core/subscriptions/usage';
 import { LIMIT_KEYS, listPublicPlans } from '../../core/subscriptions/catalogue';
 import {
@@ -723,6 +728,122 @@ router.post('/subscription/resume', settings, async (req: Req, res) => {
     const result = await resumeSubscription(orgId, await tenantActor(req));
     if (result.changed) await logAudit(req.user?.id, 'org.subscription.resume', orgId, {});
     return res.json(result);
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+/* ══ Paying online, auto-pay, refunds ═════════════════════════════════════ */
+// Through Cashfree (core/billing/invoiceCheckout, autopay, refundRequests).
+// Paid is only ever what Cashfree answers the server; a refund is only ever
+// asked for here — platform staff approve it.
+
+/** What this organization can do online: pay invoices, auto-pay, and its mandate. */
+router.get('/billing/online', read, async (_req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    return res.json({ payments: paymentsMode(), autopay: await autopayState(orgId) });
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+/** Body: { returnUrl } — this page's address with {order_id} in it. */
+router.post('/billing/invoices/:id/checkout', settings, async (req: Req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    const result = await startInvoiceCheckout(orgId, String(req.params.id), {
+      returnUrl: req.body?.returnUrl,
+      origin: req.header('origin'),
+      actor: await tenantActor(req),
+    });
+    await logAudit(req.user?.id, 'org.billing.checkout', orgId, { invoiceId: req.params.id, alreadyPaid: result.alreadyPaid });
+    return res.status(result.alreadyPaid ? 200 : 201).json(result);
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+router.post('/billing/checkouts/:orderId/confirm', read, async (req: Req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    return res.json(await confirmInvoiceCheckout(String(req.params.orderId), 'tenant', orgId));
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+/** Body: { returnUrl } — the page Cashfree's return comes back to. */
+router.post('/billing/autopay', settings, async (req: Req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    const result = await startAutopay(orgId, {
+      returnUrl: req.body?.returnUrl,
+      origin: req.header('origin'),
+      apiBase: publicApiBase(req.headers, req.protocol),
+      actor: await tenantActor(req),
+    });
+    await logAudit(req.user?.id, 'org.billing.autopay-start', orgId, { subscriptionId: result.subscriptionId });
+    return res.status(201).json(result);
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+router.post('/billing/autopay/cancel', settings, async (req: Req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    const result = await cancelAutopay(orgId, await tenantActor(req));
+    await logAudit(req.user?.id, 'org.billing.autopay-cancel', orgId, {});
+    return res.json(result);
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+/** The organization's payments, with what the refund policy gives on each paid online. */
+router.get('/billing/payments', read, async (_req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    return res.json({ payments: await orgPaymentsWithRefunds(orgId) });
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+router.get('/billing/refund-requests', read, async (_req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    return res.json({ requests: await orgRefundRequests(orgId) });
+  } catch (err) {
+    return fail(res, err);
+  }
+});
+
+/** Body: { paymentId, reason } — platform staff decide; the institute is told. */
+router.post('/billing/refund-requests', settings, async (req: Req, res) => {
+  const orgId = orgOf(res);
+  if (!orgId) return;
+  try {
+    const actor = await tenantActor(req);
+    const me = (await withoutTenantScope('org-admin:refund-requester', async () =>
+      User.findById(req.user?.id).select('name email').lean(),
+    )) as { name?: string; email?: string } | null;
+    const result = await raiseRefundRequest(
+      { paymentId: String(req.body?.paymentId ?? '') },
+      { reason: req.body?.reason },
+      { kind: 'tenant', id: actor.id, email: me?.email ?? actor.email, name: me?.name },
+      { scopeOrgId: orgId },
+    );
+    if (!result.duplicate) await logAudit(req.user?.id, 'org.billing.refund-request', orgId, { paymentId: req.body?.paymentId });
+    return res.status(result.duplicate ? 200 : 201).json({ request: requesterView(result.request), duplicate: result.duplicate });
   } catch (err) {
     return fail(res, err);
   }

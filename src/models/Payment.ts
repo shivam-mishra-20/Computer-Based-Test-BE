@@ -55,6 +55,13 @@ export interface IPayment extends Document {
   failureReason?: string;
   recordedBy?: { id?: string; email?: string; role?: string };
   notes?: string;
+  /**
+   * Where a gateway holds this money (provider `cashfree`): the order it was
+   * paid on, or the auto-pay mandate charge. What a refund is sent against.
+   */
+  gateway?: { kind: 'order' | 'mandate'; orderId?: string; subscriptionId?: string; chargePaymentId?: string };
+  /** Returned through refunds (core/billing/refundRequests), in paise. */
+  refundedMinor?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -85,6 +92,12 @@ const paymentSchema = new Schema<IPayment>(
       _id: false,
     },
     notes: { type: String, maxlength: 1000 },
+    gateway: {
+      type: { kind: { type: String, enum: ['order', 'mandate'] }, orderId: String, subscriptionId: String, chargePaymentId: String },
+      _id: false,
+      required: false,
+    },
+    refundedMinor: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true, tenantScoped: false } as never,
 );

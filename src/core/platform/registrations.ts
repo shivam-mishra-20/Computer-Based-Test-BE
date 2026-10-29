@@ -287,7 +287,16 @@ export async function listRegistrations(query: ListRegistrationsQuery) {
       OrganizationRegistration.countDocuments(filter),
     ]);
 
-    return { items, total };
+    // What each applicant paid online, one line per row (core/billing/registrationPayments).
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { paymentSummariesFor } = require('../billing/registrationPayments');
+    const summaries = await paymentSummariesFor((items as { _id: unknown }[]).map((r) => r._id));
+    const withPayments = (items as Record<string, unknown>[]).map((r) => ({
+      ...r,
+      payment: summaries.get(String(r._id)) ?? { state: 'none', count: 0 },
+    }));
+
+    return { items: withPayments, total };
   });
 }
 
@@ -476,9 +485,34 @@ export async function approveRegistration(
     }
   }
 
+  // ── Paid online while applying? Then the plan is what was paid for ───────
+  // The organization is created WITHOUT a subscription, and the payment is
+  // recorded against it afterwards (applyRegistrationPayment) — which starts
+  // the subscription ACTIVE on the paid plan for the paid interval. No trial,
+  // and no staff payment entry. A different plan needs the payment refunded
+  // first: approving onto other terms would keep money for something not sold.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const payments = require('../billing/registrationPayments');
+  const paid: Record<string, any> | null = await payments.effectivePayment(registration._id);
+  if (paid && input.subscription?.planKey && String(input.subscription.planKey).toLowerCase() !== paid.planKey) {
+    throw new RegistrationNotActionable(
+      `This application paid online for ${paid.planName} (${paid.billingInterval}). ` +
+        'Refund that payment from the registration before approving it on another plan.',
+    );
+  }
+
   // ── The plan: staff decide; the applicant's preference is the default ────
-  const plan = await planForApproval(registration, mapped.planPreference, input.subscription, base.subscription);
-  const subscription = input.subscription ?? plan.subscription ?? base.subscription;
+  const plan = paid
+    ? {
+        subscription: undefined,
+        outcome: {
+          preference: mapped.planPreference,
+          applied: true,
+          note: `${paid.planName} (${paid.billingInterval}) was paid online — the subscription starts active on it, no trial.`,
+        } as PlanOutcome,
+      }
+    : await planForApproval(registration, mapped.planPreference, input.subscription, base.subscription);
+  const subscription = paid ? undefined : input.subscription ?? plan.subscription ?? base.subscription;
 
   const onboarding = await onboardOrganization({
     organization: base.organization,
@@ -497,6 +531,16 @@ export async function approveRegistration(
     // (above); without one, the account is created with an invitation link.
     admin,
   }, { actor: { kind: 'platform', id: staff.id } });
+
+  // The paid checkout becomes the organization's payment, and starts its plan.
+  if (paid && onboarding.orgId) {
+    const step = await payments.applyRegistrationPayment(paid, String(onboarding.orgId), registration.toObject(), {
+      kind: 'platform',
+      id: staff.id,
+    });
+    onboarding.steps.push(step);
+    if (!step.ok) onboarding.complete = false;
+  }
 
   // The account exists with that password now; nothing needs the hash again.
   const adminCreated = onboarding.steps.some((s) => s.step === 'admin-user' && s.ok);

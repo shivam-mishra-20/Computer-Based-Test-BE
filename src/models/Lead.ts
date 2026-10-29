@@ -141,7 +141,7 @@ export interface ILead extends Document {
   followUpAt?: Date | null;
   lastContactedAt?: Date | null;
   lastContactChannel?: string;
-  contactLog: Array<{ channel: string; at: Date; by?: Types.ObjectId; byName?: string }>;
+  contactLog: Array<{ channel: string; at: Date; by?: Types.ObjectId; byName?: string; purpose?: string }>;
   agts: {
     attemptCount: number;
     completedCount: number;
@@ -332,6 +332,7 @@ const leadSchema = new Schema<ILead>(
         at: { type: Date, required: true },
         by: { type: Schema.Types.ObjectId, ref: 'User' },
         byName: String,
+        purpose: String,
       },
     ],
     agts: {

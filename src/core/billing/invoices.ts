@@ -527,6 +527,53 @@ async function recordInvoiceEvent(invoice: Doc, type: string, actor: Actor, meta
   });
 }
 
+/** The next number in the financial year, for this prefix. A number taken is never reused. */
+async function nextInvoiceNumber(profile: Doc, now: Date) {
+  const { InvoiceCounter } = models();
+  const financialYear = financialYearOf(now);
+  const prefix = profile.invoicePrefix || 'INV';
+  const counter = await unscoped('issue-counter', () =>
+    InvoiceCounter.findOneAndUpdate({ prefix, financialYear }, { $inc: { seq: 1 } }, { upsert: true, new: true }).lean(),
+  );
+  return { number: formatInvoiceNumber(prefix, financialYear, counter.seq), financialYear, sequence: counter.seq as number };
+}
+
+const stateNameOf = (code?: string) => (code && GST_STATE_CODES[code]) || undefined;
+
+/** The platform as the seller, copied onto an invoice at issue. */
+function sellerParty(profile: Doc) {
+  return {
+    name: profile.tradeName || profile.legalName,
+    legalName: profile.legalName,
+    gstin: profile.gstin,
+    pan: profile.pan,
+    address: profile.address,
+    city: profile.city,
+    pincode: profile.pincode,
+    stateCode: profile.stateCode,
+    stateName: stateNameOf(profile.stateCode),
+    email: profile.email,
+    phone: profile.phone,
+  };
+}
+
+/** The organization as the buyer: its billing details, else its profile. */
+function buyerParty(org: Doc | null) {
+  const billing = org?.billing ?? {};
+  return {
+    name: org?.name,
+    legalName: billing.legalName || org?.name,
+    gstin: billing.gstin,
+    address: billing.address || org?.profile?.address,
+    city: billing.city || org?.profile?.city,
+    pincode: billing.pincode,
+    stateCode: billing.stateCode,
+    stateName: stateNameOf(billing.stateCode) || org?.profile?.state,
+    email: billing.email || org?.profile?.contactEmail,
+    phone: billing.phone || org?.profile?.contactPhone,
+  };
+}
+
 /**
  * Issue a draft: take the next number in the financial year, freeze the totals
  * and copy the seller and buyer onto it. A draft is claimed before a number is
@@ -535,7 +582,7 @@ async function recordInvoiceEvent(invoice: Doc, type: string, actor: Actor, meta
 export async function issueInvoice(invoiceId: string, actor: Actor): Promise<Doc> {
   const invoice = await loadInvoice(invoiceId);
   if (invoice.status !== 'draft') throw new BillingError(409, 'INVOICE_NOT_DRAFT', `This invoice is already ${invoice.status}.`);
-  const { Invoice, InvoiceCounter, Org } = models();
+  const { Invoice, Org } = models();
   const now = new Date();
 
   const [profile, org] = await Promise.all([
@@ -561,38 +608,7 @@ export async function issueInvoice(invoiceId: string, actor: Actor): Promise<Doc
   if (!claimed) throw new BillingError(409, 'INVOICE_CONFLICT', 'This invoice is being issued by someone else.');
 
   try {
-    const financialYear = financialYearOf(now);
-    const prefix = profile.invoicePrefix || 'INV';
-    const counter = await unscoped('issue-counter', () =>
-      InvoiceCounter.findOneAndUpdate({ prefix, financialYear }, { $inc: { seq: 1 } }, { upsert: true, new: true }).lean(),
-    );
-    const number = formatInvoiceNumber(prefix, financialYear, counter.seq);
-    const stateName = (code?: string) => (code && GST_STATE_CODES[code]) || undefined;
-    const seller = {
-      name: profile.tradeName || profile.legalName,
-      legalName: profile.legalName,
-      gstin: profile.gstin,
-      pan: profile.pan,
-      address: profile.address,
-      city: profile.city,
-      pincode: profile.pincode,
-      stateCode: profile.stateCode,
-      stateName: stateName(profile.stateCode),
-      email: profile.email,
-      phone: profile.phone,
-    };
-    const buyer = {
-      name: org?.name,
-      legalName: buyerBilling.legalName || org?.name,
-      gstin: buyerBilling.gstin,
-      address: buyerBilling.address || org?.profile?.address,
-      city: buyerBilling.city || org?.profile?.city,
-      pincode: buyerBilling.pincode,
-      stateCode: buyerBilling.stateCode,
-      stateName: stateName(buyerBilling.stateCode) || org?.profile?.state,
-      email: buyerBilling.email || org?.profile?.contactEmail,
-      phone: buyerBilling.phone || org?.profile?.contactPhone,
-    };
+    const { number, financialYear, sequence } = await nextInvoiceNumber(profile, now);
     const issued = await unscoped('issue-write', () =>
       Invoice.findOneAndUpdate(
         { _id: invoice._id, status: 'draft' },
@@ -601,10 +617,10 @@ export async function issueInvoice(invoiceId: string, actor: Actor): Promise<Doc
             status: 'issued',
             number,
             financialYear,
-            sequence: counter.seq,
+            sequence,
             ...taxFields(tax),
-            seller,
-            buyer,
+            seller: sellerParty(profile),
+            buyer: buyerParty(org),
             issuedAt: now,
             dueAt: new Date(now.getTime() + (profile.paymentTermsDays ?? 7) * DAY_MS),
             issuedBy: { id: actor.id, role: actor.role },
@@ -745,6 +761,84 @@ export async function settleInvoice(invoiceId: string, input: SettleInput, actor
   return { invoice: invoiceView(current), payment, duplicate, lifecycle };
 }
 
+/**
+ * An invoice for money a gateway has ALREADY collected and the subscription
+ * has already been given — an institute that paid online while applying
+ * (core/billing/registrationPayments). Numbered like any invoice, and issued
+ * straight as paid: there is nothing left to settle, so settleInvoice (which
+ * would apply the payment a second time) is not involved.
+ *
+ * The lines and tax are the ones the customer was charged, frozen at checkout,
+ * not recomputed from today's billing profile: an invoice states what was
+ * paid. The caller holds the claim that keeps one payment to one invoice.
+ */
+export interface PaidInvoiceInput {
+  orgId: string;
+  lines: Doc[];
+  subtotalMinor: number;
+  tax: Doc;
+  totalMinor: number;
+  currency?: string;
+  planKey?: string;
+  planVersion?: number;
+  billingInterval?: string;
+  periodStart?: Date;
+  periodEnd?: Date;
+  paymentId: string;
+  paidAt: Date;
+  registrationId?: string;
+  notes?: string;
+}
+
+export async function issuePaidInvoice(input: PaidInvoiceInput, actor: Actor): Promise<Doc> {
+  if (!(input.totalMinor > 0)) throw new BillingError(400, 'INVOICE_EMPTY', 'An invoice must be for more than ₹0.');
+  const { Invoice, Org, Payment } = models();
+  const [profile, org] = await Promise.all([
+    getBillingProfile(),
+    unscoped('paid-org', () => Org.findById(input.orgId).select('name billing profile').lean()),
+  ]);
+  if (!org) throw new BillingError(404, 'ORG_NOT_FOUND', 'Organization not found.');
+  const now = new Date();
+  const { number, financialYear, sequence } = await nextInvoiceNumber(profile, now);
+  const created = await unscoped('paid-create', () =>
+    Invoice.create({
+      orgId: input.orgId,
+      status: 'paid',
+      number,
+      financialYear,
+      sequence,
+      lines: input.lines,
+      currency: input.currency ?? 'INR',
+      subtotalMinor: input.subtotalMinor,
+      tax: input.tax,
+      totalMinor: input.totalMinor,
+      amountPaidMinor: input.totalMinor,
+      periodStart: input.periodStart,
+      periodEnd: input.periodEnd,
+      billingInterval: input.billingInterval,
+      planKey: input.planKey,
+      planVersion: input.planVersion,
+      seller: sellerParty(profile),
+      buyer: buyerParty(org),
+      issuedAt: now,
+      dueAt: input.paidAt,
+      paidAt: input.paidAt,
+      paymentIds: [input.paymentId],
+      origin: 'registration',
+      ...(input.registrationId ? { registrationId: input.registrationId } : {}),
+      notes: text(input.notes, 1000),
+      createdBy: { id: actor.id, role: actor.role },
+      issuedBy: { id: actor.id, role: actor.role },
+    }),
+  );
+  const invoice = created.toObject();
+  await unscoped('paid-link', () =>
+    Payment.updateOne({ _id: input.paymentId, invoiceId: { $exists: false } }, { $set: { invoiceId: invoice._id } }),
+  );
+  await recordInvoiceEvent(invoice, 'invoice_paid', actor, { paymentId: String(input.paymentId), origin: 'registration' });
+  return invoiceView(invoice);
+}
+
 // ── Reads ──────────────────────────────────────────────────────────────────
 
 export function invoiceView(invoice: Doc): Doc & { id: string; balanceMinor: number; overdue: boolean; taxInvoice: boolean } {
@@ -839,6 +933,7 @@ export function renderInvoiceHtml(invoice: Doc): string {
   if (tax.igstMinor) totals.push([`IGST ${tax.ratePercent ?? 0}%`, tax.igstMinor]);
   totals.push(['Total', invoice.totalMinor]);
   if (invoice.amountPaidMinor) totals.push(['Paid', invoice.amountPaidMinor]);
+  if (invoice.refundedMinor) totals.push(['Refunded', invoice.refundedMinor]);
   const stamp =
     invoice.status === 'void'
       ? `<div class="stamp void">VOID — ${esc(invoice.voidReason ?? '')}</div>`

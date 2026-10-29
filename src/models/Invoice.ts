@@ -101,8 +101,16 @@ export interface IInvoice extends Document {
    * selfServe). Paying it moves the subscription onto `planKey`/`planVersion`
    * — or starts one. Staff-drafted invoices have no origin and never change
    * the plan when paid.
+   *
+   * `registration`: issued, already paid, for money a gateway collected while
+   * the institute was applying (core/billing/registrationPayments). The plan
+   * was applied at approval; this invoice changes nothing.
    */
-  origin?: 'self-serve';
+  origin?: 'self-serve' | 'registration';
+  /** The application whose checkout this invoice is for (origin `registration`). */
+  registrationId?: Types.ObjectId;
+  /** Paid back through refunds, in paise. The invoice stays paid; the document shows it. */
+  refundedMinor?: number;
   /** What the order was, as the institute chose it. */
   order?: {
     kind: 'new' | 'renewal' | 'upgrade' | 'downgrade';
@@ -110,6 +118,11 @@ export interface IInvoice extends Document {
     /** Staff put the institute on the ordered plan before the payment arrived. */
     appliedAt?: Date;
     appliedBy?: { id?: string; email?: string };
+    /** Raised by the renewal sweep (core/billing/renewals), for the period after `renewalOf`. */
+    auto?: boolean;
+    renewalOf?: Date;
+    /** When the institute was last told about it (invoice ready, charge, last reminder). */
+    remindedAt?: Date;
   };
   revision: number;
   createdAt: Date;
@@ -189,13 +202,18 @@ const invoiceSchema = new Schema<IInvoice>(
     paymentIds: [{ type: Schema.Types.ObjectId, ref: 'Payment' }],
     createdBy: { type: { id: String, role: String }, required: false, _id: false },
     issuedBy: { type: { id: String, role: String }, required: false, _id: false },
-    origin: { type: String, enum: ['self-serve'] },
+    origin: { type: String, enum: ['self-serve', 'registration'] },
+    registrationId: { type: Schema.Types.ObjectId, ref: 'OrganizationRegistration' },
+    refundedMinor: { type: Number, default: 0, min: 0 },
     order: {
       type: {
         kind: { type: String, enum: ['new', 'renewal', 'upgrade', 'downgrade'] },
         by: { type: { id: String, email: String }, _id: false },
         appliedAt: { type: Date },
         appliedBy: { type: { id: String, email: String }, _id: false },
+        auto: { type: Boolean },
+        renewalOf: { type: Date },
+        remindedAt: { type: Date },
       },
       required: false,
       _id: false,

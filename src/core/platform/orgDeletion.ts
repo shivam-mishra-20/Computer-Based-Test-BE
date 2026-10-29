@@ -74,12 +74,12 @@ import { deleteEasProject, isEasConfigured } from './easClient';
 export const DELETABLE_STATUSES = ['suspended', 'cancelled', 'terminated'];
 /**
  * The platform's record of what happened, and of money billed and received.
- * Never deleted from. Payments, invoices and payment-provider events are
- * financial evidence: deleting an organization removes its data, not the record
+ * Never deleted from. Payments, invoices, payment-provider events and the
+ * payments taken at registration are financial evidence: deleting an organization removes its data, not the record
  * of what it was billed and paid (the retention period is a policy decision
  * recorded in docs/subscriptions-plan.md).
  */
-const RETAINED = new Set(['platformaudits', 'payments', 'invoices', 'providerevents']);
+const RETAINED = new Set(['platformaudits', 'payments', 'invoices', 'providerevents', 'registrationpayments', 'invoicecheckouts', 'autopaymandates', 'refundrequests']);
 /** The organization registry. Its one document is the LAST thing removed. */
 const REGISTRY = 'orgs';
 /** Documents per delete. Small enough to keep each round trip short. */

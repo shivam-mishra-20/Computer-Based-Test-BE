@@ -147,6 +147,12 @@ export interface IApplicationModules {
   /** A named starting point — 'coaching', 'school', 'test-prep', 'custom'. */
   preset?: string;
   addOns?: string[];
+  /**
+   * Modules the chosen plan includes that the applicant switched off on the
+   * form. Applied as removals when a PAID application is approved
+   * (core/billing/registrationPayments); staff can switch them back on.
+   */
+  excluded?: string[];
 }
 
 export interface IApplicationStaff {
@@ -187,11 +193,14 @@ export interface IApplicationCommercial {
   billingEmail?: string;
   billingAddress?: string;
   /**
-   * What the institute ASKED for. Never an entitlement: the plan actually
-   * granted is a commercial decision made in the console, and a public form
-   * that could assign one would be a self-service upgrade endpoint.
+   * What the institute ASKED for. Never an entitlement by itself: the plan is
+   * granted at approval — on the plan PAID for when the applicant paid online
+   * (core/billing/registrationPayments), otherwise as staff decide. Once paid,
+   * the server locks this to the paid plan.
    */
   planPreference?: string;
+  /** monthly | annual — the interval the checkout charges for. */
+  billingInterval?: string;
 }
 
 /** One uploaded brand asset. */

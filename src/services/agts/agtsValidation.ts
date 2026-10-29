@@ -303,8 +303,15 @@ export function parseContactChannel(value: unknown): ContactChannel {
   return channel;
 }
 
+/** What a logged contact was for ("Admission confirmed"); optional, free text. */
+export function parseContactPurpose(value: unknown): string {
+  return cleanText(value, 60);
+}
+
 export interface LeadListQuery {
   status?: LeadStatus;
+  /** Several statuses at once (`status=a,b`): one stage of the admissions desk. */
+  statuses?: LeadStatus[];
   classLevel?: number;
   search?: string;
   from?: Date;
@@ -324,13 +331,22 @@ export interface LeadListQuery {
   owner?: string;
   page: number;
   limit: number;
-  sort: 'recent' | 'score' | 'followup' | 'created';
+  sort: 'recent' | 'score' | 'followup' | 'created' | 'name';
 }
 
 export function parseLeadListQuery(query: Record<string, unknown>): LeadListQuery {
   const out: LeadListQuery = { page: 1, limit: 25, sort: 'recent' };
-  const status = cleanText(query.status, 30).toLowerCase();
-  if (status && (LEAD_STATUSES as readonly string[]).includes(status)) out.status = status as LeadStatus;
+  const statuses = [
+    ...new Set(
+      cleanText(query.status, 200)
+        .toLowerCase()
+        .split(',')
+        .map((s) => s.trim())
+        .filter((s) => (LEAD_STATUSES as readonly string[]).includes(s)),
+    ),
+  ] as LeadStatus[];
+  if (statuses.length === 1) out.status = statuses[0];
+  else if (statuses.length > 1) out.statuses = statuses;
   const classLevel = Number(query.classLevel);
   if (AGTS_CLASS_LEVELS.includes(classLevel as (typeof AGTS_CLASS_LEVELS)[number])) out.classLevel = classLevel;
   const channel = cleanText(query.channel, 20).toLowerCase();
@@ -362,7 +378,7 @@ export function parseLeadListQuery(query: Record<string, unknown>): LeadListQuer
   const limit = Math.floor(Number(query.limit));
   if (Number.isFinite(limit) && limit >= 1) out.limit = Math.min(limit, 100);
   const sort = cleanText(query.sort, 12);
-  if (sort === 'score' || sort === 'followup' || sort === 'created' || sort === 'recent') out.sort = sort;
+  if (sort === 'score' || sort === 'followup' || sort === 'created' || sort === 'recent' || sort === 'name') out.sort = sort;
   return out;
 }
 

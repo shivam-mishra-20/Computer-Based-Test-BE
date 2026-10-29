@@ -59,6 +59,7 @@ import playlistRoutes from './routes/api/playlistRoutes';
 import scholarshipRoutes from './routes/api/scholarshipRoutes';
 import agtsRoutes from './routes/api/agtsRoutes';
 import admissionRoutes from './routes/api/admissionRoutes';
+import { CASHFREE_WEBHOOK_PATH, cashfreeWebhookRoute, paymentReturnRoutes } from './routes/api/paymentWebhookRoutes';
 import { errorHandler } from './middlewares/errorHandler';
 import { globalLimiter } from './middlewares/rateLimiter';
 import { tenantContextMiddleware } from './middlewares/tenantContext';
@@ -184,6 +185,11 @@ const corsOptions: cors.CorsOptions = {
 	optionsSuccessStatus: 200,
 };
 
+// Cashfree's auto-pay return is the browser arriving by a cross-site form POST
+// from cashfree.com — it carries that Origin, which the allow-list below would
+// refuse, and it is a navigation, not a script reading our answer. It reads
+// only the `?m=` it was given (no body) and redirects back to the admin panel.
+app.use('/api/public', paymentReturnRoutes);
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 
@@ -202,6 +208,12 @@ app.options(/.*/, cors(corsOptions));
  * means a preflight is answered before the limiter counts it, which is right:
  * a browser's OPTIONS is not a request the user made.
  */
+
+// Cashfree's webhook needs the body exactly as received — its signature is an
+// HMAC over those bytes — so it is answered here, before the JSON parser and
+// the global limiter (Cashfree's retries are not a client to throttle).
+// Platform deployment only; see routes/api/paymentWebhookRoutes.ts.
+app.post(CASHFREE_WEBHOOK_PATH, ...cashfreeWebhookRoute);
 
 // Apply global rate limiter (early, but never before CORS — see above)
 app.use(globalLimiter);

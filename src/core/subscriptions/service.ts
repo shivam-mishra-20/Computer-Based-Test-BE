@@ -347,7 +347,11 @@ export async function runLifecycleSweep(now = new Date(), limit = 1000) {
     }
   }
   const reminded = await remindTrialsEnding(now);
-  return { ...summary, reminded };
+  // Next periods: renewal invoices, auto-pay charges and reminders (core/billing/renewals).
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { runRenewals } = require('../billing/renewals');
+  const renewals = await runRenewals(now).catch((error: Error) => ({ errors: [`renewals: ${error.message}`] }));
+  return { ...summary, reminded, renewals };
 }
 
 const REMIND_DAYS = 3;
